@@ -75,7 +75,7 @@ class FailoverGroupCreate(BaseModel):
     zone_id: int
     hostname: str = Field(min_length=1, max_length=255)
     ttl: int = Field(default=60, ge=30, le=86400)
-    primary_port: int = Field(default=443, ge=1, le=65535)
+    primary_port: int = Field(default=22, ge=1, le=65535)
     enabled: bool = True
     min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
     adopt_record_id: str | None = None
@@ -134,6 +134,33 @@ class OriginOut(BaseModel):
     last_error: str | None
     last_rtt_ms: float | None
     probe_states: list[ProbeStateOut] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TargetPoolCreate(BaseModel):
+    target: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=22, ge=1, le=65535)
+    remark: str | None = Field(default=None, max_length=500)
+    enabled: bool = True
+
+
+class TargetPoolUpdate(BaseModel):
+    target: str | None = Field(default=None, min_length=1, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    remark: str | None = Field(default=None, max_length=500)
+    enabled: bool | None = None
+
+
+class TargetPoolOut(BaseModel):
+    id: int
+    target: str
+    target_type: str
+    port: int
+    remark: str | None
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 

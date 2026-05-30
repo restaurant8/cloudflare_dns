@@ -371,48 +371,6 @@ form.panel {
   gap: 12px;
 }
 
-.groupCreateGrid {
-  align-items: end;
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(2, minmax(220px, 1fr));
-}
-
-.monoInput,
-.recordIdNotice code {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-}
-
-.recordIdNotice {
-  background: #f6f9fc;
-  border: 1px solid #dbe6ef;
-  border-radius: 6px;
-  color: #516070;
-  display: grid;
-  gap: 4px;
-  padding: 10px 12px;
-}
-
-.recordIdNotice strong {
-  color: #18212f;
-  font-size: 13px;
-}
-
-.recordIdNotice span {
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-
-.recordIdNotice code {
-  color: #176b87;
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.createGroupButton {
-  justify-self: start;
-}
-
 .row,
 .origin,
 .event {
@@ -453,6 +411,86 @@ form.panel {
   display: grid;
   gap: 16px;
   grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+}
+
+.groupsIntro {
+  background: #ffffff;
+  border: 1px solid #dfe6ee;
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.emptyGroupPanel {
+  color: #667789;
+  display: grid;
+  gap: 6px;
+}
+
+.emptyGroupPanel p {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.targetPoolPanel {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(280px, 390px) minmax(0, 1fr);
+}
+
+.targetPoolForm,
+.poolListPanel {
+  align-content: start;
+}
+
+.poolFormGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 110px;
+}
+
+.poolList {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.poolItem {
+  align-items: center;
+  background: #f6f9fc;
+  border: 1px solid #dbe6ef;
+  border-radius: 8px;
+  cursor: grab;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 10px 12px;
+}
+
+.poolItem:active {
+  cursor: grabbing;
+}
+
+.poolItemMain {
+  min-width: 0;
+}
+
+.poolItemMain strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.poolItemMain span {
+  color: #667789;
+  display: block;
+  font-size: 12px;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.poolEditGrid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(160px, 1fr) 90px minmax(140px, 1fr) auto;
 }
 
 .groupHead {
@@ -512,6 +550,16 @@ form.panel {
 .backupSummary {
   background: #fff7ed;
   border-color: #fed7aa;
+}
+
+.dropHint {
+  background: #f6f9fc;
+  border: 1px dashed #b7c7d8;
+  border-radius: 8px;
+  color: #667789;
+  font-size: 12px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
 }
 
 .rowActions {
@@ -658,42 +706,6 @@ form.panel {
   color: #b42318;
 }
 
-.originForm {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: minmax(140px, 1.7fr) 74px 74px 74px 42px;
-  margin-top: 12px;
-}
-
-.originBulkForm {
-  display: grid;
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.originBulkControls {
-  display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(2, minmax(120px, 1fr));
-}
-
-.originBulkForm button {
-  justify-self: start;
-}
-
-.originFormHeader {
-  border-top: 1px solid #edf1f5;
-  display: grid;
-  gap: 3px;
-  margin-top: 12px;
-  padding-top: 12px;
-}
-
-.originFormHeader strong {
-  font-size: 13px;
-}
-
-.originFormHeader span,
 .originHint {
   color: #667789;
   font-size: 12px;
@@ -843,6 +855,64 @@ form.panel {
   word-break: break-all;
 }
 
+.modalBackdrop {
+  align-items: center;
+  background: rgba(15, 23, 42, 0.46);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 18px;
+  position: fixed;
+  z-index: 50;
+}
+
+.modalPanel {
+  background: #ffffff;
+  border: 1px solid #dfe6ee;
+  border-radius: 8px;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.18);
+  display: grid;
+  gap: 14px;
+  max-height: calc(100vh - 36px);
+  overflow: auto;
+  padding: 18px;
+  width: min(520px, 100%);
+}
+
+.modalActions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.modalFormGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.confirmRecordBox {
+  background: #f6f9fc;
+  border: 1px solid #dbe6ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px 12px;
+  grid-template-columns: 84px minmax(0, 1fr);
+  padding: 12px;
+}
+
+.confirmRecordBox span {
+  color: #667789;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.confirmRecordBox strong {
+  color: #18212f;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .notice,
 .error {
   border-radius: 6px;
@@ -913,6 +983,7 @@ form.panel {
   }
 
   .gridTwo,
+  .targetPoolPanel,
   .metrics {
     grid-template-columns: 1fr;
   }
@@ -925,21 +996,16 @@ form.panel {
     flex-direction: column;
   }
 
-  .groupCreateGrid {
-    grid-template-columns: 1fr;
-  }
-
   .groupSummary {
     grid-template-columns: 1fr;
   }
 
-  .originForm {
-    grid-template-columns: 1fr 1fr;
-  }
-
   .groupSettingsEdit,
   .origin.originEditing,
-  .originEditGrid {
+  .originEditGrid,
+  .poolEditGrid,
+  .poolFormGrid,
+  .modalFormGrid {
     grid-template-columns: 1fr;
   }
 }

@@ -110,6 +110,18 @@ class Origin(Base, TimestampMixin):
     probe_states: Mapped[list["ProbeState"]] = relationship("ProbeState", back_populates="origin", cascade="all, delete-orphan")
 
 
+class TargetPoolItem(Base, TimestampMixin):
+    __tablename__ = "target_pool_items"
+    __table_args__ = (UniqueConstraint("target", "port", name="uq_target_pool_target_port"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
+    remark: Mapped[str | None] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
 class Agent(Base, TimestampMixin):
     __tablename__ = "agents"
 

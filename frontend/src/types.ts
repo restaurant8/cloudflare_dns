@@ -57,6 +57,17 @@ export type Origin = {
   probe_states: ProbeState[];
 };
 
+export type TargetPoolItem = {
+  id: number;
+  target: string;
+  target_type: string;
+  port: number;
+  remark: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
 export type FailoverGroup = {
   id: number;
   zone_id: number;

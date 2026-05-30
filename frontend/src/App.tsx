@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Cloud,
@@ -21,12 +21,13 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate } from "./api";
-import type { Agent, Credential, DnsRecord, EventItem, FailoverGroup, Origin, Overview, TelegramNotification, Webhook, Zone } from "./types";
+import type { Agent, Credential, DnsRecord, EventItem, FailoverGroup, Origin, Overview, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "agents" | "webhooks" | "account" | "events";
-type OriginDraft = { targets: string; port: number; priority: number };
+type OriginAddDraft = { target: string; port: number; priority: number; enabled: boolean };
 type OriginEditDraft = { target: string; port: number; priority: number; enabled: boolean };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
+type TargetPoolDraft = { target: string; port: number; remark: string; enabled: boolean };
 
 const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "overview", label: "总览", icon: Activity },
@@ -98,22 +99,6 @@ function probeSourceText(value: string): string {
   return value;
 }
 
-function parseOriginDraft(draft: OriginDraft): Array<{ target: string; port: number; priority: number; weight: number }> {
-  return draft.targets
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"))
-    .map((line) => {
-      const parts = (line.includes(",") ? line.split(",") : line.split(/\s+/)).map((part) => part.trim()).filter(Boolean);
-      return {
-        target: parts[0],
-        port: parts[1] ? Number(parts[1]) : draft.port,
-        priority: parts[2] ? Number(parts[2]) : draft.priority,
-        weight: 1
-      };
-    });
-}
-
 function inferDraftTargetType(value: string): string {
   const cleaned = value.trim();
   if (!cleaned) return "";
@@ -128,10 +113,6 @@ function shellQuote(value: string): string {
 
 function eventTypeText(value: string): string {
   return eventTypeLabels[value] || value;
-}
-
-function comparableHostname(value: string): string {
-  return value.trim().replace(/\.$/, "").toLowerCase();
 }
 
 function originLabel(origin: Origin | undefined): string {
@@ -165,7 +146,8 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginDraft: OriginDraft = { targets: "", port: 443, priority: 10 };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, enabled: true };
+const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", enabled: true };
 
 export default function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem("accessToken"));
@@ -181,6 +163,7 @@ export default function App() {
   const [selectedZoneId, setSelectedZoneId] = useState<number | "">("");
   const [records, setRecords] = useState<DnsRecord[]>([]);
   const [groups, setGroups] = useState<FailoverGroup[]>([]);
+  const [targetPool, setTargetPool] = useState<TargetPoolItem[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [telegramNotifications, setTelegramNotifications] = useState<TelegramNotification[]>([]);
   const [webhooks, setWebhooks] = useState<Webhook[]>([]);
@@ -197,11 +180,12 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextGroups, nextAgents, nextTelegram, nextWebhooks, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextGroups, nextTargetPool, nextAgents, nextTelegram, nextWebhooks, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
       apiFetch<FailoverGroup[]>("/api/groups", activeToken),
+      apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
       apiFetch<Agent[]>("/api/agents", activeToken),
       apiFetch<TelegramNotification[]>("/api/telegram", activeToken),
       apiFetch<Webhook[]>("/api/webhooks", activeToken),
@@ -211,6 +195,7 @@ export default function App() {
     setCredentials(nextCredentials);
     setZones(nextZones);
     setGroups(nextGroups);
+    setTargetPool(nextTargetPool);
     setAgents(nextAgents);
     setTelegramNotifications(nextTelegram);
     setWebhooks(nextWebhooks);
@@ -234,8 +219,10 @@ export default function App() {
       setMessage(done);
       await loadAll();
       if (selectedZoneId) await loadRecords();
+      return true;
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "请求失败");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -355,15 +342,11 @@ export default function App() {
             setSelectedZoneId={setSelectedZoneId}
             records={records}
             setSection={setSection}
-            seedGroup={(record) => {
-              sessionStorage.setItem("seedGroup", JSON.stringify({ zone_id: record.zone_id, hostname: record.name, adopt_record_id: record.cf_record_id, record_type: record.type, content: record.content, ttl: record.ttl }));
-              setSection("groups");
-            }}
             act={act}
           />
         )}
         {section === "groups" && (
-          <GroupsPanel token={token} zones={zones} groups={groups} act={act} />
+          <GroupsPanel token={token} groups={groups} targetPool={targetPool} act={act} />
         )}
         {section === "agents" && (
           <AgentsPanel token={token} agents={agents} agentToken={agentToken} setAgentToken={setAgentToken} act={act} />
@@ -452,7 +435,7 @@ function OverviewPanel({ overview }: { overview: Overview }) {
   );
 }
 
-function CloudflarePanel({ token, credentials, busy, act }: { token: string; credentials: Credential[]; busy: boolean; act: <T>(fn: () => Promise<T>, done?: string) => Promise<void> }) {
+function CloudflarePanel({ token, credentials, busy, act }: { token: string; credentials: Credential[]; busy: boolean; act: <T>(fn: () => Promise<T>, done?: string) => Promise<boolean> }) {
   const [name, setName] = useState("");
   const [cfToken, setCfToken] = useState("");
 
@@ -519,7 +502,7 @@ function RecordsPanel({
   selectedZoneId,
   setSelectedZoneId,
   records,
-  seedGroup,
+  setSection,
   act
 }: {
   token: string;
@@ -528,11 +511,12 @@ function RecordsPanel({
   setSelectedZoneId: (value: number | "") => void;
   records: DnsRecord[];
   setSection: (section: Section) => void;
-  seedGroup: (record: DnsRecord) => void;
-  act: <T>(fn: () => Promise<T>, done?: string) => Promise<void>;
+  act: <T>(fn: () => Promise<T>, done?: string) => Promise<boolean>;
 }) {
   const [query, setQuery] = useState("");
   const [zoneQuery, setZoneQuery] = useState("");
+  const [manageRecord, setManageRecord] = useState<DnsRecord | null>(null);
+  const [managePort, setManagePort] = useState(22);
   const filteredZones = zones.filter((zone) => zoneMatches(zone, zoneQuery));
   const selectedZone = zones.find((zone) => zone.id === selectedZoneId);
   const normalizedQuery = query.trim().toLowerCase();
@@ -544,6 +528,35 @@ function RecordsPanel({
           .includes(normalizedQuery)
       )
     : records;
+
+  function openManageRecord(record: DnsRecord) {
+    setManageRecord(record);
+    setManagePort(22);
+  }
+
+  async function confirmManageRecord() {
+    if (!manageRecord) return;
+    const ok = await act(
+      () =>
+        apiFetch("/api/groups", token, {
+          method: "POST",
+          body: JSON.stringify({
+            zone_id: manageRecord.zone_id,
+            hostname: manageRecord.name,
+            ttl: manageRecord.ttl >= 30 ? manageRecord.ttl : 60,
+            primary_port: managePort,
+            enabled: true,
+            min_switch_interval_seconds: 120,
+            adopt_record_id: manageRecord.cf_record_id
+          })
+        }),
+      "故障切换组已创建"
+    );
+    if (ok) {
+      setManageRecord(null);
+      setSection("groups");
+    }
+  }
 
   return (
     <section className="panel">
@@ -600,7 +613,7 @@ function RecordsPanel({
               <td>{record.ttl}</td>
               <td>{record.proxied ? "已代理" : "仅 DNS"}</td>
               <td>
-                <button className="icon" title="管理" disabled={record.proxied} onClick={() => seedGroup(record)}>
+                <button className="icon" title="管理" disabled={record.proxied} onClick={() => openManageRecord(record)}>
                   <Link2 size={16} />
                 </button>
               </td>
@@ -613,99 +626,183 @@ function RecordsPanel({
           )}
         </tbody>
       </table>
+      {manageRecord && (
+        <div className="modalBackdrop" role="dialog" aria-modal="true">
+          <div className="modalPanel">
+            <div className="panelTitle">
+              <h2>加入故障切换</h2>
+              <p>确认后会把这条解析记录接管为主用目标，并自动创建对应的故障切换组。</p>
+            </div>
+            <div className="confirmRecordBox">
+              <span>主机名</span>
+              <strong>{manageRecord.name}</strong>
+              <span>当前解析</span>
+              <strong>{manageRecord.type} {manageRecord.content}</strong>
+              <span>TTL</span>
+              <strong>{manageRecord.ttl}</strong>
+            </div>
+            <label>
+              主用检查端口
+              <input type="number" min={1} max={65535} value={managePort} onChange={(event) => setManagePort(Number(event.target.value))} />
+            </label>
+            <div className="modalActions">
+              <button type="button" className="secondary" onClick={() => setManageRecord(null)}>取消</button>
+              <button type="button" onClick={confirmManageRecord}>
+                <Plus size={16} />
+                <span>确认添加</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
 
-type GroupSeed = {
-  zone_id: number;
-  hostname: string;
-  adopt_record_id: string;
-  record_type?: string;
-  content?: string;
-  ttl?: number;
-};
-
-function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone[]; groups: FailoverGroup[]; act: <T>(fn: () => Promise<T>, done?: string) => Promise<void> }) {
-  const [seed] = useState<GroupSeed | null>(() => {
-    const raw = sessionStorage.getItem("seedGroup");
-    if (!raw) return null;
-    sessionStorage.removeItem("seedGroup");
-    try {
-      return JSON.parse(raw) as GroupSeed;
-    } catch {
-      return null;
-    }
-  });
-  const [zoneId, setZoneId] = useState<number | "">(seed?.zone_id || zones[0]?.id || "");
-  const [hostname, setHostname] = useState(seed?.hostname || "");
-  const [adoptRecordId, setAdoptRecordId] = useState(seed?.adopt_record_id || "");
-  const [ttl, setTtl] = useState(seed?.ttl && seed.ttl >= 30 ? seed.ttl : 60);
-  const [primaryPort, setPrimaryPort] = useState(443);
-  const [zoneQuery, setZoneQuery] = useState("");
-  const filteredZones = filteredZoneList(zones, zoneQuery, zoneId);
-  const [originDrafts, setOriginDrafts] = useState<Record<number, OriginDraft>>({});
+function GroupsPanel({
+  token,
+  groups,
+  targetPool,
+  act
+}: {
+  token: string;
+  groups: FailoverGroup[];
+  targetPool: TargetPoolItem[];
+  act: <T>(fn: () => Promise<T>, done?: string) => Promise<boolean>;
+}) {
+  const [poolDraft, setPoolDraft] = useState<TargetPoolDraft>(defaultTargetPoolDraft);
+  const [editingPoolId, setEditingPoolId] = useState<number | null>(null);
+  const [poolEdits, setPoolEdits] = useState<Record<number, TargetPoolDraft>>({});
+  const [addingGroupId, setAddingGroupId] = useState<number | null>(null);
+  const [originAdd, setOriginAdd] = useState<OriginAddDraft>(defaultOriginAddDraft);
   const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
   const [groupEdits, setGroupEdits] = useState<Record<number, GroupEditDraft>>({});
   const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
   const [originEdits, setOriginEdits] = useState<Record<number, OriginEditDraft>>({});
-  const seedContextMatches = Boolean(seed && zoneId === seed.zone_id && comparableHostname(hostname) === comparableHostname(seed.hostname));
-  const seededRecordMatches = Boolean(seed?.adopt_record_id && seedContextMatches && seed.adopt_record_id === adoptRecordId);
-  const adoptRecordIdForSubmit = adoptRecordId && (!seed?.adopt_record_id || seededRecordMatches) ? adoptRecordId : "";
+  const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
+  const addTargetType = inferDraftTargetType(originAdd.target);
 
-  function changeZone(nextZoneId: number | "") {
-    setZoneId(nextZoneId);
-    if (seed?.adopt_record_id && nextZoneId !== seed.zone_id) {
-      setAdoptRecordId("");
-    }
-  }
-
-  function changeHostname(value: string) {
-    setHostname(value);
-    if (seed?.adopt_record_id && comparableHostname(value) !== comparableHostname(seed.hostname)) {
-      setAdoptRecordId("");
-    }
-  }
-
-  async function createGroup(event: FormEvent) {
+  async function createPoolItem(event: FormEvent) {
     event.preventDefault();
-    await act(
+    const ok = await act(
       () =>
-        apiFetch("/api/groups", token, {
+        apiFetch("/api/target-pool", token, {
           method: "POST",
           body: JSON.stringify({
-            zone_id: zoneId,
-            hostname,
-            ttl,
-            primary_port: primaryPort,
-            enabled: true,
-            min_switch_interval_seconds: 120,
-            adopt_record_id: adoptRecordIdForSubmit || null
+            target: poolDraft.target.trim(),
+            port: poolDraft.port,
+            remark: poolDraft.remark.trim() || null,
+            enabled: poolDraft.enabled
           })
         }),
-      "切换组已创建"
+      "目标已加入池子"
     );
-    setHostname("");
-    setAdoptRecordId("");
+    if (ok) {
+      setPoolDraft(defaultTargetPoolDraft);
+    }
   }
 
-  async function createOrigin(groupId: number) {
-    const draft = originDrafts[groupId] || defaultOriginDraft;
+  function beginEditPoolItem(item: TargetPoolItem) {
+    setEditingPoolId(item.id);
+    setPoolEdits((current) => ({
+      ...current,
+      [item.id]: {
+        target: item.target,
+        port: item.port,
+        remark: item.remark || "",
+        enabled: item.enabled
+      }
+    }));
+  }
+
+  async function savePoolItem(itemId: number) {
+    const draft = poolEdits[itemId];
+    if (!draft) return;
+    const ok = await act(
+      () =>
+        apiFetch(`/api/target-pool/${itemId}`, token, {
+          method: "PATCH",
+          body: JSON.stringify({
+            target: draft.target.trim(),
+            port: draft.port,
+            remark: draft.remark.trim() || null,
+            enabled: draft.enabled
+          })
+        }),
+      "目标池已更新"
+    );
+    if (ok) {
+      setEditingPoolId(null);
+    }
+  }
+
+  function dragPoolItem(event: DragEvent, item: TargetPoolItem) {
+    event.dataTransfer.setData("application/x-target-pool", JSON.stringify({ id: item.id, target: item.target, port: item.port }));
+    event.dataTransfer.effectAllowed = "copy";
+  }
+
+  function allowPoolDrop(event: DragEvent) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  async function dropPoolItem(event: DragEvent, group: FailoverGroup) {
+    event.preventDefault();
+    const raw = event.dataTransfer.getData("application/x-target-pool");
+    if (!raw) return;
+    const item = JSON.parse(raw) as { target: string; port: number };
+    const maxPriority = group.origins.reduce((value, origin) => Math.max(value, origin.priority), 0);
     await act(
-      () => {
-        const origins = parseOriginDraft(draft);
-        if (origins.length === 0) {
-          throw new Error("请填写至少一个备用目标");
-        }
-        return apiFetch(`/api/groups/${groupId}/origins/bulk`, token, {
+      () =>
+        apiFetch(`/api/groups/${group.id}/origins`, token, {
           method: "POST",
-          body: JSON.stringify({ origins })
+          body: JSON.stringify({
+            target: item.target,
+            port: item.port || 22,
+            priority: maxPriority + 10,
+            weight: 1,
+            enabled: true
+          })
+        }),
+      "已从目标池添加备用"
+    );
+  }
+
+  function beginAddOrigin(group: FailoverGroup) {
+    const maxPriority = group.origins.reduce((value, origin) => Math.max(value, origin.priority), 0);
+    setAddingGroupId(group.id);
+    setOriginAdd({
+      target: "",
+      port: 22,
+      priority: maxPriority + 10,
+      enabled: true
+    });
+  }
+
+  async function createOrigin() {
+    if (!addingGroup) return;
+    const ok = await act(
+      () => {
+        if (!originAdd.target.trim()) {
+          throw new Error("请填写备用目标");
+        }
+        return apiFetch(`/api/groups/${addingGroup.id}/origins`, token, {
+          method: "POST",
+          body: JSON.stringify({
+            target: originAdd.target.trim(),
+            port: originAdd.port,
+            priority: originAdd.priority,
+            weight: 1,
+            enabled: originAdd.enabled
+          })
         });
       },
       "备用目标已添加"
     );
-    const group = groups.find((item) => item.id === groupId);
-    setOriginDrafts((current) => ({ ...current, [groupId]: { ...defaultOriginDraft, port: group?.origins[0]?.port || draft.port } }));
+    if (ok) {
+      setAddingGroupId(null);
+      setOriginAdd(defaultOriginAddDraft);
+    }
   }
 
   function beginEditGroup(group: FailoverGroup) {
@@ -763,66 +860,96 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
 
   return (
     <section className="stack">
-      <form className="panel createGroupPanel" onSubmit={createGroup}>
-        <div className="panelTitle">
-          <h2>新建切换组</h2>
-          <p>从解析记录进入时会自动识别当前 A/AAAA/CNAME 并加入为主目标，创建后只需要继续添加备用目标。</p>
-        </div>
-        <div className="groupCreateGrid">
-          <label>
-            搜索域名区域
-            <input placeholder="输入域名筛选" value={zoneQuery} onChange={(event) => setZoneQuery(event.target.value)} />
-          </label>
-          <label>
-            域名区域
-            <select value={zoneId} onChange={(event) => changeZone(event.target.value ? Number(event.target.value) : "")} required>
-              <option value="">请选择域名区域</option>
-              {filteredZones.map((zone) => (
-                <option key={zone.id} value={zone.id}>{zone.name}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            主机名
-            <input placeholder="例如 a.example.com" value={hostname} onChange={(event) => changeHostname(event.target.value)} required />
-          </label>
-          <label>
-            接管记录 ID（可选）
-            <input className="monoInput" placeholder="从解析记录点管理时自动填写" value={adoptRecordId} onChange={(event) => setAdoptRecordId(event.target.value)} />
-          </label>
-          <label>
-            TTL（秒）
-            <input type="number" min={30} max={86400} value={ttl} onChange={(event) => setTtl(Number(event.target.value))} />
-          </label>
-          <label>
-            检查端口
-            <input type="number" min={1} max={65535} value={primaryPort} onChange={(event) => setPrimaryPort(Number(event.target.value))} />
-          </label>
-        </div>
-        {adoptRecordId && (
-          <div className="recordIdNotice">
-            <strong>{seededRecordMatches ? "已选择要接管的 Cloudflare 记录" : "Cloudflare 记录 ID"}</strong>
-            {seededRecordMatches && <span>{seed?.record_type || "DNS"} {seed?.hostname} {seed?.content ? `-> ${seed.content}` : ""}</span>}
-            {seededRecordMatches && <span>创建后会自动加入主目标，优先级 0，检查端口 {primaryPort}。</span>}
-            {!seededRecordMatches && <span>手动输入主机名时可以留空；系统会自动接管同名唯一 DNS-only A/AAAA/CNAME 记录。</span>}
-            <code>{adoptRecordId}</code>
+      <div className="panelTitle groupsIntro">
+        <h2>故障切换组</h2>
+        <p>从解析记录页点击管理即可接管主用解析；这里负责查看状态、修改源站和添加备用目标。</p>
+      </div>
+      <div className="targetPoolPanel">
+        <form className="panel targetPoolForm" onSubmit={createPoolItem}>
+          <div className="panelTitle">
+            <h2>目标池</h2>
+            <p>把常用 IP、IPv6 或域名先放进池子，拖到下面的故障组即可加入为备用目标。</p>
           </div>
-        )}
-        {!adoptRecordId && (
-          <div className="recordIdNotice">
-            <strong>自动接管当前解析</strong>
-            <span>如果这个主机名当前只有一条 DNS-only A/AAAA/CNAME 记录，创建时会自动识别并加入为主目标。</span>
+          <div className="poolFormGrid">
+            <label>
+              IP / IPv6 / 域名
+              <input placeholder="例如 192.0.2.10" value={poolDraft.target} onChange={(event) => setPoolDraft((current) => ({ ...current, target: event.target.value }))} required />
+            </label>
+            <label>
+              检查端口
+              <input type="number" min={1} max={65535} value={poolDraft.port} onChange={(event) => setPoolDraft((current) => ({ ...current, port: Number(event.target.value) }))} />
+            </label>
           </div>
-        )}
-        <button className="createGroupButton">
-          <Plus size={16} />
-          <span>创建组</span>
-        </button>
-      </form>
+          <label>
+            备注
+            <input placeholder="例如 香港备用、洛杉矶 1 号" value={poolDraft.remark} onChange={(event) => setPoolDraft((current) => ({ ...current, remark: event.target.value }))} />
+          </label>
+          <button>
+            <Plus size={16} />
+            <span>加入池子</span>
+          </button>
+        </form>
+        <div className="panel poolListPanel">
+          <div className="panelTitle">
+            <h2>池子列表</h2>
+            <p>按住目标拖到故障组卡片上，系统会按默认备用优先级添加。</p>
+          </div>
+          <div className="poolList">
+            {targetPool.map((item) => {
+              const edit = poolEdits[item.id] || {
+                target: item.target,
+                port: item.port,
+                remark: item.remark || "",
+                enabled: item.enabled
+              };
+              return (
+                <div className="poolItem" key={item.id} draggable={editingPoolId !== item.id && item.enabled} onDragStart={(event) => dragPoolItem(event, item)}>
+                  {editingPoolId === item.id ? (
+                    <>
+                      <div className="poolEditGrid">
+                        <input value={edit.target} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, target: event.target.value } }))} />
+                        <input type="number" min={1} max={65535} value={edit.port} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, port: Number(event.target.value) } }))} />
+                        <input value={edit.remark} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, remark: event.target.value } }))} placeholder="备注" />
+                        <label className="inlineCheck">
+                          <input type="checkbox" checked={edit.enabled} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, enabled: event.target.checked } }))} />
+                          启用
+                        </label>
+                      </div>
+                      <div className="rowActions">
+                        <button className="icon" title="保存" onClick={() => savePoolItem(item.id)}>
+                          <Save size={15} />
+                        </button>
+                        <button className="icon secondaryIcon" title="取消" onClick={() => setEditingPoolId(null)}>
+                          ×
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="poolItemMain">
+                        <strong>{item.target}:{item.port}</strong>
+                        <span>{targetTypeText(item.target_type)} · 发布为 {recordTypeForTargetType(item.target_type)}{item.remark ? ` · ${item.remark}` : ""}</span>
+                      </div>
+                      <div className="rowActions">
+                        <Status value={item.enabled ? "enabled" : "disabled"} />
+                        <button className="icon secondaryIcon" title="修改" onClick={() => beginEditPoolItem(item)}>
+                          <Pencil size={15} />
+                        </button>
+                        <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/target-pool/${item.id}`, token, { method: "DELETE" }), "目标已删除")}>
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+            {targetPool.length === 0 && <div className="emptyCell">还没有池子目标</div>}
+          </div>
+        </div>
+      </div>
       <div className="groupGrid">
         {groups.map((group) => {
-          const groupDefaultDraft = { ...defaultOriginDraft, port: group.origins[0]?.port || defaultOriginDraft.port };
-          const draft = originDrafts[group.id] || groupDefaultDraft;
           const groupEdit = groupEdits[group.id] || {
             ttl: group.ttl,
             min_switch_interval_seconds: group.min_switch_interval_seconds,
@@ -834,10 +961,8 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
           const primaryOrigin = primaryOrigins[0];
           const currentOrigin = group.origins.find((origin) => origin.id === group.current_origin_id);
           const backupOrigins = group.origins.filter((origin) => origin.priority !== primaryPriority);
-          const parsedDraft = parseOriginDraft(draft);
-          const singleDraftType = parsedDraft.length === 1 ? inferDraftTargetType(parsedDraft[0].target) : "";
           return (
-            <article className="groupCard" key={group.id}>
+            <article className="groupCard" key={group.id} onDragOver={allowPoolDrop} onDrop={(event) => dropPoolItem(event, group)}>
               <div className="groupHead">
                 <div>
                   <h2>{group.hostname}</h2>
@@ -845,6 +970,10 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
                 </div>
                 <div className="rowActions">
                   <Status value={group.last_error ? "error" : group.enabled ? "enabled" : "disabled"} />
+                  <button className="secondary" title="添加备用目标" onClick={() => beginAddOrigin(group)}>
+                    <Plus size={15} />
+                    <span>添加备用</span>
+                  </button>
                   <button className="icon secondaryIcon" title="修改切换组" onClick={() => beginEditGroup(group)}>
                     <Pencil size={15} />
                   </button>
@@ -870,6 +999,7 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
                   <small>{backupOrigins.length > 0 ? backupOrigins.map((origin) => originLabel(origin)).slice(0, 2).join("，") : "还没有备用"}</small>
                 </div>
               </div>
+              <div className="dropHint">把目标池里的 IP / 域名拖到这里，即可加入为备用目标。</div>
               {editingGroupId === group.id && (
                 <div className="groupSettingsEdit">
                   <label>
@@ -978,50 +1108,61 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
                   );
                 })}
               </div>
-              <div className="originFormHeader">
-                <strong>添加备用目标</strong>
-                <span>每行一个 IPv4、IPv6 或域名；IPv4 发布 A，IPv6 发布 AAAA，域名发布 CNAME。优先级数字越小越先使用。</span>
-              </div>
-              <div className="originBulkForm">
-                <label>
-                  备用目标
-                  <textarea
-                    rows={4}
-                    placeholder={"每行一个目标，也可写：目标,端口,优先级\n192.0.2.10\n2001:db8::10\nbackup.example.com,443,20"}
-                    value={draft.targets}
-                    onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, targets: event.target.value } }))}
-                  />
-                </label>
-                <div className="originBulkControls">
-                  <label>
-                    默认端口
-                    <input title="TCP 检查端口" type="number" min={1} max={65535} value={draft.port} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, port: Number(event.target.value) } }))} />
-                  </label>
-                  <label>
-                    默认优先级
-                    <input title="优先级，数字越小越优先" type="number" min={0} value={draft.priority} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, priority: Number(event.target.value) } }))} />
-                  </label>
-                </div>
-                <button type="button" className="secondary" onClick={() => createOrigin(group.id)}>
-                  <Plus size={16} />
-                  <span>批量添加</span>
-                </button>
-              </div>
-              {singleDraftType && (
-                <div className="originHint">
-                  当前输入识别为 {targetTypeText(singleDraftType)}，故障切换时会发布为 {recordTypeForTargetType(singleDraftType)} 记录。
-                </div>
-              )}
-              {parsedDraft.length > 1 && <div className="originHint">将添加 {parsedDraft.length} 个备用目标。</div>}
             </article>
           );
         })}
+        {groups.length === 0 && (
+          <div className="panel emptyGroupPanel">
+            <h2>还没有故障切换组</h2>
+            <p>请先到解析记录页，选择一条 DNS-only A/AAAA/CNAME 记录，点击管理并确认接管。</p>
+          </div>
+        )}
       </div>
+      {addingGroup && (
+        <div className="modalBackdrop" role="dialog" aria-modal="true">
+          <div className="modalPanel">
+            <div className="panelTitle">
+              <h2>添加备用目标</h2>
+              <p>{addingGroup.hostname}</p>
+            </div>
+            <label>
+              备用 IP / IPv6 / 域名
+              <input placeholder="例如 192.0.2.10 或 backup.example.com" value={originAdd.target} onChange={(event) => setOriginAdd((current) => ({ ...current, target: event.target.value }))} />
+            </label>
+            <div className="modalFormGrid">
+              <label>
+                检查端口
+                <input type="number" min={1} max={65535} value={originAdd.port} onChange={(event) => setOriginAdd((current) => ({ ...current, port: Number(event.target.value) }))} />
+              </label>
+              <label>
+                优先级
+                <input type="number" min={0} value={originAdd.priority} onChange={(event) => setOriginAdd((current) => ({ ...current, priority: Number(event.target.value) }))} />
+              </label>
+            </div>
+            <label className="inlineCheck">
+              <input type="checkbox" checked={originAdd.enabled} onChange={(event) => setOriginAdd((current) => ({ ...current, enabled: event.target.checked }))} />
+              启用这个备用目标
+            </label>
+            {originAdd.target.trim() && (
+              <div className="originHint">
+                当前输入识别为 {targetTypeText(addTargetType)}，故障切换时会发布为 {recordTypeForTargetType(addTargetType)} 记录。
+              </div>
+            )}
+            <div className="modalActions">
+              <button type="button" className="secondary" onClick={() => setAddingGroupId(null)}>取消</button>
+              <button type="button" onClick={createOrigin}>
+                <Plus size={16} />
+                <span>添加备用</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
 
-function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token: string; agents: Agent[]; agentToken: string; setAgentToken: (value: string) => void; act: <T>(fn: () => Promise<T>, done?: string) => Promise<void> }) {
+function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token: string; agents: Agent[]; agentToken: string; setAgentToken: (value: string) => void; act: <T>(fn: () => Promise<T>, done?: string) => Promise<boolean> }) {
   const [name, setName] = useState("");
   const [copied, setCopied] = useState(false);
   const panelUrl = window.location.origin;
@@ -1179,7 +1320,7 @@ function NotificationsPanel({
   token: string;
   telegramNotifications: TelegramNotification[];
   webhooks: Webhook[];
-  act: <T>(fn: () => Promise<T>, done?: string) => Promise<void>;
+  act: <T>(fn: () => Promise<T>, done?: string) => Promise<boolean>;
 }) {
   const [telegramName, setTelegramName] = useState("");
   const [botToken, setBotToken] = useState("");
