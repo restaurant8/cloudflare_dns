@@ -629,6 +629,7 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
   const [hostname, setHostname] = useState(seed?.hostname || "");
   const [adoptRecordId, setAdoptRecordId] = useState(seed?.adopt_record_id || "");
   const [ttl, setTtl] = useState(seed?.ttl && seed.ttl >= 30 ? seed.ttl : 60);
+  const [primaryPort, setPrimaryPort] = useState(443);
   const [zoneQuery, setZoneQuery] = useState("");
   const filteredZones = filteredZoneList(zones, zoneQuery, zoneId);
   const [originDrafts, setOriginDrafts] = useState<Record<number, OriginDraft>>({});
@@ -644,6 +645,7 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
             zone_id: zoneId,
             hostname,
             ttl,
+            primary_port: primaryPort,
             enabled: true,
             min_switch_interval_seconds: 120,
             adopt_record_id: adoptRecordId || null
@@ -670,7 +672,8 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
       },
       "备用目标已添加"
     );
-    setOriginDrafts((current) => ({ ...current, [groupId]: defaultOriginDraft }));
+    const group = groups.find((item) => item.id === groupId);
+    setOriginDrafts((current) => ({ ...current, [groupId]: { ...defaultOriginDraft, port: group?.origins[0]?.port || draft.port } }));
   }
 
   return (
@@ -678,7 +681,7 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
       <form className="panel createGroupPanel" onSubmit={createGroup}>
         <div className="panelTitle">
           <h2>新建切换组</h2>
-          <p>一个切换组只管理一个主机名，备用目标在创建后继续添加。</p>
+          <p>从解析记录进入时会自动识别当前 A/AAAA/CNAME 并加入为主目标，创建后只需要继续添加备用目标。</p>
         </div>
         <div className="groupCreateGrid">
           <label>
@@ -706,11 +709,16 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
             TTL（秒）
             <input type="number" min={30} max={86400} value={ttl} onChange={(event) => setTtl(Number(event.target.value))} />
           </label>
+          <label>
+            检查端口
+            <input type="number" min={1} max={65535} value={primaryPort} onChange={(event) => setPrimaryPort(Number(event.target.value))} />
+          </label>
         </div>
         {adoptRecordId && (
           <div className="recordIdNotice">
             <strong>{seededRecordMatches ? "已选择要接管的 Cloudflare 记录" : "Cloudflare 记录 ID"}</strong>
             {seededRecordMatches && <span>{seed?.record_type || "DNS"} {seed?.hostname} {seed?.content ? `-> ${seed.content}` : ""}</span>}
+            {seededRecordMatches && <span>创建后会自动加入主目标，优先级 0，检查端口 {primaryPort}。</span>}
             <code>{adoptRecordId}</code>
           </div>
         )}
@@ -721,7 +729,8 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
       </form>
       <div className="groupGrid">
         {groups.map((group) => {
-          const draft = originDrafts[group.id] || defaultOriginDraft;
+          const groupDefaultDraft = { ...defaultOriginDraft, port: group.origins[0]?.port || defaultOriginDraft.port };
+          const draft = originDrafts[group.id] || groupDefaultDraft;
           const parsedDraft = parseOriginDraft(draft);
           const singleDraftType = parsedDraft.length === 1 ? inferDraftTargetType(parsedDraft[0].target) : "";
           return (

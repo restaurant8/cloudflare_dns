@@ -11,6 +11,7 @@ from ..health import run_local_checks
 from ..models import FailoverGroup, Origin, User, Zone
 from ..schemas import FailoverGroupCreate, FailoverGroupOut, FailoverGroupUpdate, Message, OriginBulkCreate, OriginCreate, OriginOut, OriginUpdate
 from ..security import decrypt_secret
+from ..sync import MANAGED_RECORD_TYPES
 
 
 router = APIRouter(prefix="/groups", tags=["groups"])
@@ -32,6 +33,23 @@ def _origin_from_payload(group: FailoverGroup, payload: OriginCreate) -> Origin:
         priority=payload.priority,
         weight=payload.weight,
         enabled=payload.enabled,
+    )
+
+
+def _origin_from_dns_record(group: FailoverGroup, record: dict, port: int) -> Origin:
+    if record.get("type") not in MANAGED_RECORD_TYPES:
+        raise HTTPException(status_code=400, detail="只支持接管 A/AAAA/CNAME 记录")
+    target_info = parse_target(str(record.get("content") or ""))
+    if target_info.record_type == "CNAME" and target_info.value == group.hostname:
+        raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
+    return Origin(
+        group_id=group.id,
+        target=target_info.value,
+        target_type=target_info.target_type,
+        port=port,
+        priority=0,
+        weight=1,
+        enabled=True,
     )
 
 
@@ -64,6 +82,22 @@ def create_group(payload: FailoverGroupCreate, _: User = Depends(get_current_use
     )
     db.add(group)
     db.flush()
+    managed_record_id = group.current_record_id
+    if managed_record_id:
+        current_record = next(
+            (
+                record
+                for record in client.list_dns_records(zone.cf_zone_id, name=hostname)
+                if record.get("id") == managed_record_id and record.get("type") in MANAGED_RECORD_TYPES
+            ),
+            None,
+        )
+        if current_record is None:
+            raise HTTPException(status_code=404, detail="未找到要接管的当前解析记录")
+        primary_origin = _origin_from_dns_record(group, current_record, payload.primary_port)
+        db.add(primary_origin)
+        db.flush()
+        group.current_origin_id = primary_origin.id
     add_event(db, "group.created", "info", f"{hostname} 的故障切换组已创建", {"group_id": group.id})
     db.commit()
     return _group_query(db).filter(FailoverGroup.id == group.id).one()

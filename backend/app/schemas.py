@@ -75,6 +75,7 @@ class FailoverGroupCreate(BaseModel):
     zone_id: int
     hostname: str = Field(min_length=1, max_length=255)
     ttl: int = Field(default=60, ge=30, le=86400)
+    primary_port: int = Field(default=443, ge=1, le=65535)
     enabled: bool = True
     min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
     adopt_record_id: str | None = None
