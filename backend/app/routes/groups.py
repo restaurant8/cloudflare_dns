@@ -6,9 +6,10 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import normalize_hostname, parse_target
 from ..events import add_event
-from ..failover import evaluate_failover_groups, validate_group_hostname_records
+from ..failover import evaluate_failover_groups, publish_origin, validate_group_hostname_records
 from ..health import run_local_checks
 from ..models import FailoverGroup, Origin, User, Zone
+from ..notifier import send_webhooks
 from ..schemas import FailoverGroupCreate, FailoverGroupOut, FailoverGroupUpdate, Message, OriginBulkCreate, OriginCreate, OriginOut, OriginUpdate
 from ..security import decrypt_secret
 from ..sync import MANAGED_RECORD_TYPES
@@ -109,8 +110,19 @@ def update_group(group_id: int, payload: FailoverGroupUpdate, _: User = Depends(
     if group is None:
         raise HTTPException(status_code=404, detail="切换组不存在")
     updates = payload.model_dump(exclude_unset=True)
+    ttl_changed = "ttl" in updates and updates["ttl"] != group.ttl
     for key, value in updates.items():
         setattr(group, key, value)
+    if ttl_changed and group.enabled and group.current_origin_id:
+        current_origin = db.get(Origin, group.current_origin_id)
+        if current_origin and current_origin.enabled:
+            try:
+                publish_origin(db, group, current_origin)
+            except Exception as exc:
+                db.rollback()
+                raise HTTPException(status_code=502, detail=f"DNS 发布失败，修改未保存：{exc}") from exc
+    if group.enabled:
+        evaluate_failover_groups(db)
     db.commit()
     return _group_query(db).filter(FailoverGroup.id == group_id).one()
 
@@ -163,16 +175,71 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     if origin is None:
         raise HTTPException(status_code=404, detail="源站不存在")
     updates = payload.model_dump(exclude_unset=True)
+    group = origin.group
+    new_target = origin.target
+    new_target_type = origin.target_type
+    new_port = origin.port
     if "target" in updates and updates["target"] is not None:
         target_info = parse_target(updates.pop("target"))
-        if target_info.record_type == "CNAME" and target_info.value == origin.group.hostname:
+        if target_info.record_type == "CNAME" and target_info.value == group.hostname:
             raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
-        origin.target = target_info.value
-        origin.target_type = target_info.target_type
-        origin.status = "unknown"
-        origin.probe_states.clear()
+        new_target = target_info.value
+        new_target_type = target_info.target_type
+    if "port" in updates and updates["port"] is not None:
+        new_port = updates["port"]
+
+    duplicate = (
+        db.query(Origin)
+        .filter(
+            Origin.group_id == origin.group_id,
+            Origin.id != origin.id,
+            Origin.target == new_target,
+            Origin.port == new_port,
+        )
+        .one_or_none()
+    )
+    if duplicate:
+        raise HTTPException(status_code=409, detail=f"{new_target}:{new_port} 已经在备用目标池中")
+
+    endpoint_changed = new_target != origin.target or new_port != origin.port
+    target_changed = new_target != origin.target or new_target_type != origin.target_type
+    origin.target = new_target
+    origin.target_type = new_target_type
     for key, value in updates.items():
         setattr(origin, key, value)
+
+    if endpoint_changed:
+        origin.status = "unknown"
+        origin.last_error = "等待本地和探针探测结果"
+        origin.last_checked_at = None
+        origin.last_rtt_ms = None
+        origin.probe_states.clear()
+
+    should_publish_current = group.current_origin_id == origin.id and origin.enabled and target_changed
+    if should_publish_current:
+        try:
+            record = publish_origin(db, group, origin)
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(status_code=502, detail=f"DNS 发布失败，修改未保存：{exc}") from exc
+        group.current_origin_id = origin.id
+        group.last_error = None
+        payload = {
+            "group_id": group.id,
+            "hostname": group.hostname,
+            "old_origin_id": origin.id,
+            "new_origin_id": origin.id,
+            "record_id": record["id"],
+            "record_type": record["type"],
+            "content": record["content"],
+        }
+        add_event(db, "dns.switched", "info", f"{group.hostname} 已更新到 {record['type']} {record['content']}", payload)
+        send_webhooks(db, "dns.switched", payload)
+    elif group.enabled:
+        if group.current_origin_id == origin.id and not origin.enabled:
+            group.current_origin_id = None
+        evaluate_failover_groups(db)
+
     db.commit()
     db.refresh(origin)
     return origin

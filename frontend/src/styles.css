@@ -425,7 +425,7 @@ form.panel {
 }
 
 .origin {
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
 }
 
 .event {
@@ -468,6 +468,18 @@ form.panel {
   gap: 8px;
 }
 
+.groupSettingsEdit {
+  align-items: end;
+  background: #f6f9fc;
+  border: 1px solid #dbe6ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(120px, 1fr) minmax(150px, 1fr) minmax(150px, auto) auto;
+  margin-bottom: 12px;
+  padding: 12px;
+}
+
 .editGrid {
   display: grid;
   gap: 8px;
@@ -495,6 +507,28 @@ form.panel {
 .originList {
   display: grid;
   gap: 4px;
+}
+
+.origin.originEditing {
+  align-items: end;
+  background: #f6f9fc;
+  border: 1px solid #dbe6ef;
+  border-radius: 8px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 12px;
+}
+
+.originEditGrid {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(180px, 1.6fr) minmax(90px, 0.7fr) minmax(90px, 0.7fr) auto;
+}
+
+.originEditHint {
+  color: #667789;
+  font-size: 12px;
+  grid-column: 1 / -1;
 }
 
 .probeChips {
@@ -796,6 +830,12 @@ form.panel {
 
   .originForm {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .groupSettingsEdit,
+  .origin.originEditing,
+  .originEditGrid {
+    grid-template-columns: 1fr;
   }
 }
 
