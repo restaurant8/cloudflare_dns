@@ -7,6 +7,7 @@ from ..config import get_settings
 from ..database import get_db
 from ..deps import get_current_user
 from ..models import User
+from ..request_utils import client_ip_from_request
 from ..schemas import BootstrapRequest, LoginRequest, Message, PasswordChangeRequest, SetupStatus, TokenResponse
 from ..security import create_access_token, hash_password, verify_password
 
@@ -16,10 +17,7 @@ _login_failures: dict[str, dict[str, float]] = {}
 
 
 def _client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    if forwarded_for:
-        return forwarded_for.split(",", 1)[0].strip()
-    return request.client.host if request.client else "unknown"
+    return client_ip_from_request(request) or "unknown"
 
 
 def _login_key(request: Request, username: str) -> str:
