@@ -218,6 +218,14 @@ main {
   margin-top: 4px;
 }
 
+.liveRefreshText {
+  color: #176b87;
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 700;
+  margin-left: 10px;
+}
+
 .actions,
 .rowActions,
 .toolbar,

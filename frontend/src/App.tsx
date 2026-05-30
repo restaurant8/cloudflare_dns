@@ -148,6 +148,7 @@ const emptyOverview: Overview = {
 
 const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, enabled: true };
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", enabled: true };
+const liveRefreshIntervalMs = 3000;
 
 export default function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem("accessToken"));
@@ -156,6 +157,7 @@ export default function App() {
   const [section, setSection] = useState<Section>("overview");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [liveUpdatedAt, setLiveUpdatedAt] = useState<string | null>(null);
 
   const [overview, setOverview] = useState<Overview>(emptyOverview);
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -211,6 +213,23 @@ export default function App() {
     setRecords(data);
   }
 
+  async function loadLiveStatus(activeToken = token) {
+    if (!activeToken) return;
+    const [nextOverview, nextGroups, nextTargetPool, nextAgents, nextEvents] = await Promise.all([
+      apiFetch<Overview>("/api/overview", activeToken),
+      apiFetch<FailoverGroup[]>("/api/groups", activeToken),
+      apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
+      apiFetch<Agent[]>("/api/agents", activeToken),
+      apiFetch<EventItem[]>("/api/events?limit=100", activeToken)
+    ]);
+    setOverview(nextOverview);
+    setGroups(nextGroups);
+    setTargetPool(nextTargetPool);
+    setAgents(nextAgents);
+    setEvents(nextEvents);
+    setLiveUpdatedAt(new Date().toISOString());
+  }
+
   async function act<T>(fn: () => Promise<T>, done = "已完成") {
     setBusy(true);
     setMessage("");
@@ -236,6 +255,15 @@ export default function App() {
     if (token) {
       loadAll(token).catch((error) => setMessage(error.message));
     }
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      loadLiveStatus(token).catch(() => undefined);
+    }, liveRefreshIntervalMs);
+    return () => window.clearInterval(timer);
   }, [token]);
 
   useEffect(() => {
@@ -309,7 +337,12 @@ export default function App() {
         <header className="topbar">
           <div>
             <h1>{nav.find((item) => item.id === section)?.label}</h1>
-            <p>{selectedZone ? selectedZone.name : "尚未选择域名区域"}</p>
+            <p>
+              {selectedZone ? selectedZone.name : "尚未选择域名区域"}
+              <span className="liveRefreshText">
+                实时更新{liveUpdatedAt ? ` · ${new Date(liveUpdatedAt).toLocaleTimeString()}` : ""}
+              </span>
+            </p>
           </div>
           <div className="actions">
             <button className="secondary" disabled={busy} onClick={() => act(() => loadAll(), "已刷新")}>
@@ -1026,7 +1059,7 @@ function GroupsPanel({
               )}
               {group.last_error && <div className="error">{group.last_error}</div>}
               <div className="originList">
-                {group.origins.map((origin) => {
+                {sortedOrigins.map((origin) => {
                   const originEdit = originEdits[origin.id] || {
                     target: origin.target,
                     port: origin.port,
