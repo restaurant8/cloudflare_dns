@@ -134,6 +134,11 @@ function comparableHostname(value: string): string {
   return value.trim().replace(/\.$/, "").toLowerCase();
 }
 
+function originLabel(origin: Origin | undefined): string {
+  if (!origin) return "尚未发布";
+  return `${origin.target}:${origin.port}`;
+}
+
 function zoneMatches(zone: Zone, query: string): boolean {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return true;
@@ -823,6 +828,12 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
             min_switch_interval_seconds: group.min_switch_interval_seconds,
             enabled: group.enabled
           };
+          const sortedOrigins = [...group.origins].sort((left, right) => left.priority - right.priority || left.id - right.id);
+          const primaryPriority = sortedOrigins[0]?.priority;
+          const primaryOrigins = sortedOrigins.filter((origin) => origin.priority === primaryPriority);
+          const primaryOrigin = primaryOrigins[0];
+          const currentOrigin = group.origins.find((origin) => origin.id === group.current_origin_id);
+          const backupOrigins = group.origins.filter((origin) => origin.priority !== primaryPriority);
           const parsedDraft = parseOriginDraft(draft);
           const singleDraftType = parsedDraft.length === 1 ? inferDraftTargetType(parsedDraft[0].target) : "";
           return (
@@ -840,6 +851,23 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
                   <button className="icon dangerBtn" title="删除切换组" onClick={() => act(() => apiFetch(`/api/groups/${group.id}`, token, { method: "DELETE" }), "切换组已删除")}>
                     <Trash2 size={15} />
                   </button>
+                </div>
+              </div>
+              <div className="groupSummary">
+                <div className="summaryBox primarySummary">
+                  <span>主用目标</span>
+                  <strong>{originLabel(primaryOrigin)}</strong>
+                  <small>{primaryOrigin ? `优先级 ${primaryOrigin.priority} · ${recordTypeForTargetType(primaryOrigin.target_type)}` : "还没有源站"}</small>
+                </div>
+                <div className="summaryBox currentSummary">
+                  <span>当前使用</span>
+                  <strong>{originLabel(currentOrigin)}</strong>
+                  <small>{currentOrigin ? `${recordTypeForTargetType(currentOrigin.target_type)} · ${statusText(currentOrigin.status)}` : "等待健康检查后发布"}</small>
+                </div>
+                <div className="summaryBox backupSummary">
+                  <span>备用目标</span>
+                  <strong>{backupOrigins.length} 个</strong>
+                  <small>{backupOrigins.length > 0 ? backupOrigins.map((origin) => originLabel(origin)).slice(0, 2).join("，") : "还没有备用"}</small>
                 </div>
               </div>
               {editingGroupId === group.id && (
@@ -876,8 +904,13 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
                     enabled: origin.enabled
                   };
                   const editType = inferDraftTargetType(originEdit.target);
+                  const isCurrentOrigin = group.current_origin_id === origin.id;
+                  const isPrimaryOrigin = origin.priority === primaryPriority;
                   return (
-                    <div className={`origin ${editingOriginId === origin.id ? "originEditing" : ""}`} key={origin.id}>
+                    <div
+                      className={`origin ${editingOriginId === origin.id ? "originEditing" : ""} ${isCurrentOrigin ? "originCurrent" : ""} ${isPrimaryOrigin ? "originPrimary" : "originBackup"}`}
+                      key={origin.id}
+                    >
                       <Server size={18} />
                       {editingOriginId === origin.id ? (
                         <>
@@ -912,8 +945,15 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
                       ) : (
                         <>
                           <div>
-                            <strong>{origin.target}:{origin.port}</strong>
-                            <span>{targetTypeText(origin.target_type)} · 发布为 {recordTypeForTargetType(origin.target_type)} · 优先级 {origin.priority} · {group.current_origin_id === origin.id ? "当前发布" : "备用"} · {fmtDate(origin.last_checked_at)}</span>
+                            <div className="originTitleLine">
+                              <strong>{origin.target}:{origin.port}</strong>
+                              <div className="originBadges">
+                                {isCurrentOrigin && <span className="originBadge current">当前使用</span>}
+                                <span className={`originBadge ${isPrimaryOrigin ? "primary" : "backup"}`}>{isPrimaryOrigin ? "主用" : "备用"}</span>
+                                <span className="originBadge record">{recordTypeForTargetType(origin.target_type)}</span>
+                              </div>
+                            </div>
+                            <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · {origin.enabled ? "已启用" : "已停用"} · {fmtDate(origin.last_checked_at)}</span>
                             {origin.last_error && <small className="danger">{origin.last_error}</small>}
                             {origin.probe_states.length > 0 && (
                               <div className="probeChips">
