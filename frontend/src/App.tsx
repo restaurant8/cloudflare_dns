@@ -127,6 +127,10 @@ function eventTypeText(value: string): string {
   return eventTypeLabels[value] || value;
 }
 
+function comparableHostname(value: string): string {
+  return value.trim().replace(/\.$/, "").toLowerCase();
+}
+
 function zoneMatches(zone: Zone, query: string): boolean {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return true;
@@ -633,7 +637,23 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
   const [zoneQuery, setZoneQuery] = useState("");
   const filteredZones = filteredZoneList(zones, zoneQuery, zoneId);
   const [originDrafts, setOriginDrafts] = useState<Record<number, OriginDraft>>({});
-  const seededRecordMatches = Boolean(seed?.adopt_record_id && seed.adopt_record_id === adoptRecordId);
+  const seedContextMatches = Boolean(seed && zoneId === seed.zone_id && comparableHostname(hostname) === comparableHostname(seed.hostname));
+  const seededRecordMatches = Boolean(seed?.adopt_record_id && seedContextMatches && seed.adopt_record_id === adoptRecordId);
+  const adoptRecordIdForSubmit = adoptRecordId && (!seed?.adopt_record_id || seededRecordMatches) ? adoptRecordId : "";
+
+  function changeZone(nextZoneId: number | "") {
+    setZoneId(nextZoneId);
+    if (seed?.adopt_record_id && nextZoneId !== seed.zone_id) {
+      setAdoptRecordId("");
+    }
+  }
+
+  function changeHostname(value: string) {
+    setHostname(value);
+    if (seed?.adopt_record_id && comparableHostname(value) !== comparableHostname(seed.hostname)) {
+      setAdoptRecordId("");
+    }
+  }
 
   async function createGroup(event: FormEvent) {
     event.preventDefault();
@@ -648,7 +668,7 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
             primary_port: primaryPort,
             enabled: true,
             min_switch_interval_seconds: 120,
-            adopt_record_id: adoptRecordId || null
+            adopt_record_id: adoptRecordIdForSubmit || null
           })
         }),
       "切换组已创建"
@@ -690,7 +710,7 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
           </label>
           <label>
             域名区域
-            <select value={zoneId} onChange={(event) => setZoneId(event.target.value ? Number(event.target.value) : "")} required>
+            <select value={zoneId} onChange={(event) => changeZone(event.target.value ? Number(event.target.value) : "")} required>
               <option value="">请选择域名区域</option>
               {filteredZones.map((zone) => (
                 <option key={zone.id} value={zone.id}>{zone.name}</option>
@@ -699,7 +719,7 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
           </label>
           <label>
             主机名
-            <input placeholder="例如 a.example.com" value={hostname} onChange={(event) => setHostname(event.target.value)} required />
+            <input placeholder="例如 a.example.com" value={hostname} onChange={(event) => changeHostname(event.target.value)} required />
           </label>
           <label>
             接管记录 ID（可选）
@@ -719,7 +739,14 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
             <strong>{seededRecordMatches ? "已选择要接管的 Cloudflare 记录" : "Cloudflare 记录 ID"}</strong>
             {seededRecordMatches && <span>{seed?.record_type || "DNS"} {seed?.hostname} {seed?.content ? `-> ${seed.content}` : ""}</span>}
             {seededRecordMatches && <span>创建后会自动加入主目标，优先级 0，检查端口 {primaryPort}。</span>}
+            {!seededRecordMatches && <span>手动输入主机名时可以留空；系统会自动接管同名唯一 DNS-only A/AAAA/CNAME 记录。</span>}
             <code>{adoptRecordId}</code>
+          </div>
+        )}
+        {!adoptRecordId && (
+          <div className="recordIdNotice">
+            <strong>自动接管当前解析</strong>
+            <span>如果这个主机名当前只有一条 DNS-only A/AAAA/CNAME 记录，创建时会自动识别并加入为主目标。</span>
           </div>
         )}
         <button className="createGroupButton">

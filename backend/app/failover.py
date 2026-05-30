@@ -38,7 +38,7 @@ def validate_group_hostname_records(
     if record.get("proxied"):
         raise ValueError("仅支持 DNS-only 记录，请先关闭 Cloudflare 代理")
     if current_record_id and record["id"] != current_record_id:
-        raise ValueError("该主机名已被其他 A/AAAA/CNAME 记录占用")
+        raise ValueError("接管记录 ID 与当前主机名不匹配，请从解析记录点管理或清空接管记录 ID")
     return record["id"]
 
 
