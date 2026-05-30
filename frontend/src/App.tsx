@@ -1,0 +1,827 @@
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  Activity,
+  Cloud,
+  DatabaseZap,
+  KeyRound,
+  Link2,
+  ListRestart,
+  LogOut,
+  Play,
+  Plus,
+  RadioTower,
+  RefreshCw,
+  Save,
+  Server,
+  ShieldCheck,
+  Trash2,
+  Webhook as WebhookIcon
+} from "lucide-react";
+import { apiFetch, fmtDate } from "./api";
+import type { Agent, Credential, DnsRecord, EventItem, FailoverGroup, Overview, TelegramNotification, Webhook, Zone } from "./types";
+
+type Section = "overview" | "cloudflare" | "records" | "groups" | "agents" | "webhooks" | "events";
+
+const nav: { id: Section; label: string; icon: typeof Activity }[] = [
+  { id: "overview", label: "总览", icon: Activity },
+  { id: "cloudflare", label: "Cloudflare", icon: KeyRound },
+  { id: "records", label: "解析记录", icon: Cloud },
+  { id: "groups", label: "故障切换", icon: ListRestart },
+  { id: "agents", label: "探针", icon: RadioTower },
+  { id: "webhooks", label: "通知", icon: WebhookIcon },
+  { id: "events", label: "事件", icon: DatabaseZap }
+];
+
+const statusLabels: Record<string, string> = {
+  ok: "正常",
+  error: "错误",
+  unknown: "未知",
+  healthy: "健康",
+  unhealthy: "不可用",
+  disabled: "已禁用",
+  enabled: "已启用",
+  online: "在线",
+  warning: "警告",
+  info: "信息"
+};
+
+const targetTypeLabels: Record<string, string> = {
+  ipv4: "IPv4",
+  ipv6: "IPv6",
+  hostname: "域名"
+};
+
+const eventTypeLabels: Record<string, string> = {
+  "cloudflare.synced": "Cloudflare 已同步",
+  "cloudflare.sync_failed": "Cloudflare 同步失败",
+  "group.created": "切换组已创建",
+  "probe.status_changed": "探测状态变化",
+  "origin.status_changed": "源站状态变化",
+  "failover.no_healthy_origin": "无健康源站",
+  "dns.publish_failed": "DNS 发布失败",
+  "dns.switched": "DNS 已切换",
+  "webhook.failed": "Webhook 发送失败",
+  "telegram.failed": "Telegram 发送失败",
+  "telegram.test": "Telegram 测试"
+};
+
+function statusText(value: string): string {
+  return statusLabels[value] || value;
+}
+
+function targetTypeText(value: string): string {
+  return targetTypeLabels[value] || value;
+}
+
+function recordTypeForTargetType(value: string): string {
+  if (value === "ipv4") return "A";
+  if (value === "ipv6") return "AAAA";
+  if (value === "hostname") return "CNAME";
+  return "-";
+}
+
+function inferDraftTargetType(value: string): string {
+  const cleaned = value.trim();
+  if (!cleaned) return "";
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(cleaned)) return "ipv4";
+  if (cleaned.includes(":")) return "ipv6";
+  return "hostname";
+}
+
+function eventTypeText(value: string): string {
+  return eventTypeLabels[value] || value;
+}
+
+const emptyOverview: Overview = {
+  credentials: 0,
+  zones: 0,
+  groups: 0,
+  enabled_groups: 0,
+  origins: 0,
+  unhealthy_origins: 0,
+  agents: 0,
+  recent_events: []
+};
+
+export default function App() {
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem("accessToken"));
+  const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
+  const [section, setSection] = useState<Section>("overview");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const [overview, setOverview] = useState<Overview>(emptyOverview);
+  const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [zones, setZones] = useState<Zone[]>([]);
+  const [selectedZoneId, setSelectedZoneId] = useState<number | "">("");
+  const [records, setRecords] = useState<DnsRecord[]>([]);
+  const [groups, setGroups] = useState<FailoverGroup[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [telegramNotifications, setTelegramNotifications] = useState<TelegramNotification[]>([]);
+  const [webhooks, setWebhooks] = useState<Webhook[]>([]);
+  const [events, setEvents] = useState<EventItem[]>([]);
+  const [agentToken, setAgentToken] = useState("");
+
+  const selectedZone = useMemo(() => zones.find((zone) => zone.id === selectedZoneId), [selectedZoneId, zones]);
+
+  async function loadSetup() {
+    const data = await apiFetch<{ setup_required: boolean }>("/api/auth/setup-required");
+    setSetupRequired(data.setup_required);
+  }
+
+  async function loadAll(activeToken = token) {
+    if (!activeToken) return;
+    const [nextOverview, nextCredentials, nextZones, nextGroups, nextAgents, nextTelegram, nextWebhooks, nextEvents] = await Promise.all([
+      apiFetch<Overview>("/api/overview", activeToken),
+      apiFetch<Credential[]>("/api/credentials", activeToken),
+      apiFetch<Zone[]>("/api/zones", activeToken),
+      apiFetch<FailoverGroup[]>("/api/groups", activeToken),
+      apiFetch<Agent[]>("/api/agents", activeToken),
+      apiFetch<TelegramNotification[]>("/api/telegram", activeToken),
+      apiFetch<Webhook[]>("/api/webhooks", activeToken),
+      apiFetch<EventItem[]>("/api/events?limit=100", activeToken)
+    ]);
+    setOverview(nextOverview);
+    setCredentials(nextCredentials);
+    setZones(nextZones);
+    setGroups(nextGroups);
+    setAgents(nextAgents);
+    setTelegramNotifications(nextTelegram);
+    setWebhooks(nextWebhooks);
+    setEvents(nextEvents);
+    if (!selectedZoneId && nextZones.length > 0) {
+      setSelectedZoneId(nextZones[0].id);
+    }
+  }
+
+  async function loadRecords(zoneId = selectedZoneId) {
+    if (!token || !zoneId) return;
+    const data = await apiFetch<DnsRecord[]>(`/api/zones/${zoneId}/records`, token);
+    setRecords(data);
+  }
+
+  async function act<T>(fn: () => Promise<T>, done = "已完成") {
+    setBusy(true);
+    setMessage("");
+    try {
+      await fn();
+      setMessage(done);
+      await loadAll();
+      if (selectedZoneId) await loadRecords();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "请求失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    loadSetup().catch((error) => setMessage(error.message));
+  }, []);
+
+  useEffect(() => {
+    if (token) {
+      loadAll(token).catch((error) => setMessage(error.message));
+    }
+  }, [token]);
+
+  useEffect(() => {
+    if (selectedZoneId) {
+      loadRecords(selectedZoneId).catch((error) => setMessage(error.message));
+    }
+  }, [selectedZoneId]);
+
+  function onAuth(nextToken: string) {
+    localStorage.setItem("accessToken", nextToken);
+    setToken(nextToken);
+    setSetupRequired(false);
+  }
+
+  function logout() {
+    localStorage.removeItem("accessToken");
+    setToken(null);
+  }
+
+  if (setupRequired === null) {
+    return <div className="loading">加载中</div>;
+  }
+
+  if (!token) {
+    return <AuthScreen setupRequired={setupRequired} onAuth={onAuth} />;
+  }
+
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <ShieldCheck size={28} />
+          <div>
+            <strong>DNS 故障切换</strong>
+            <span>Cloudflare</span>
+          </div>
+        </div>
+        <nav>
+          {nav.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button key={item.id} className={section === item.id ? "active" : ""} onClick={() => setSection(item.id)}>
+                <Icon size={18} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+        <button className="ghost logout" onClick={logout}>
+          <LogOut size={18} />
+          <span>退出登录</span>
+        </button>
+      </aside>
+
+      <main>
+        <header className="topbar">
+          <div>
+            <h1>{nav.find((item) => item.id === section)?.label}</h1>
+            <p>{selectedZone ? selectedZone.name : "尚未选择域名区域"}</p>
+          </div>
+          <div className="actions">
+            <button className="secondary" disabled={busy} onClick={() => act(() => loadAll(), "已刷新")}>
+              <RefreshCw size={16} />
+              <span>刷新</span>
+            </button>
+            <button disabled={busy} onClick={() => act(() => apiFetch("/api/groups/run", token, { method: "POST" }), "健康检查已完成")}>
+              <Play size={16} />
+              <span>立即检查</span>
+            </button>
+          </div>
+        </header>
+
+        {message && <div className="notice">{message}</div>}
+
+        {section === "overview" && <OverviewPanel overview={overview} />}
+        {section === "cloudflare" && (
+          <CloudflarePanel
+            token={token}
+            credentials={credentials}
+            busy={busy}
+            act={act}
+          />
+        )}
+        {section === "records" && (
+          <RecordsPanel
+            token={token}
+            zones={zones}
+            selectedZoneId={selectedZoneId}
+            setSelectedZoneId={setSelectedZoneId}
+            records={records}
+            setSection={setSection}
+            seedGroup={(record) => {
+              sessionStorage.setItem("seedGroup", JSON.stringify({ zone_id: record.zone_id, hostname: record.name, adopt_record_id: record.cf_record_id }));
+              setSection("groups");
+            }}
+            act={act}
+          />
+        )}
+        {section === "groups" && (
+          <GroupsPanel token={token} zones={zones} groups={groups} act={act} />
+        )}
+        {section === "agents" && (
+          <AgentsPanel token={token} agents={agents} agentToken={agentToken} setAgentToken={setAgentToken} act={act} />
+        )}
+        {section === "webhooks" && <NotificationsPanel token={token} telegramNotifications={telegramNotifications} webhooks={webhooks} act={act} />}
+        {section === "events" && <EventsPanel events={events} />}
+      </main>
+    </div>
+  );
+}
+
+function AuthScreen({ setupRequired, onAuth }: { setupRequired: boolean; onAuth: (token: string) => void }) {
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const path = setupRequired ? "/api/auth/bootstrap" : "/api/auth/login";
+      const data = await apiFetch<{ access_token: string }>(path, null, {
+        method: "POST",
+        body: JSON.stringify({ username, password })
+      });
+      onAuth(data.access_token);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "登录失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="auth">
+      <form className="authBox" onSubmit={submit}>
+        <div className="brand authBrand">
+          <ShieldCheck size={32} />
+          <div>
+            <strong>DNS 故障切换</strong>
+            <span>{setupRequired ? "创建管理员" : "管理员登录"}</span>
+          </div>
+        </div>
+        <label>
+          用户名
+          <input value={username} onChange={(event) => setUsername(event.target.value)} />
+        </label>
+        <label>
+          密码
+          <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+        </label>
+        {error && <div className="error">{error}</div>}
+        <button disabled={busy}>
+          <KeyRound size={16} />
+          <span>{setupRequired ? "创建" : "登录"}</span>
+        </button>
+      </form>
+    </main>
+  );
+}
+
+function OverviewPanel({ overview }: { overview: Overview }) {
+  const cards = [
+    ["凭据", overview.credentials],
+    ["域名区域", overview.zones],
+    ["切换组", `${overview.enabled_groups}/${overview.groups}`],
+    ["源站", overview.origins],
+    ["不可用", overview.unhealthy_origins],
+    ["探针", overview.agents]
+  ];
+  return (
+    <section className="stack">
+      <div className="metrics">
+        {cards.map(([label, value]) => (
+          <div className="metric" key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
+      </div>
+      <EventsPanel events={overview.recent_events} compact />
+    </section>
+  );
+}
+
+function CloudflarePanel({ token, credentials, busy, act }: { token: string; credentials: Credential[]; busy: boolean; act: <T>(fn: () => Promise<T>, done?: string) => Promise<void> }) {
+  const [name, setName] = useState("");
+  const [cfToken, setCfToken] = useState("");
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () =>
+        apiFetch("/api/credentials", token, {
+          method: "POST",
+          body: JSON.stringify({ name, token: cfToken })
+        }),
+      "Cloudflare Token 已保存"
+    );
+    setName("");
+    setCfToken("");
+  }
+
+  return (
+    <section className="gridTwo">
+      <form className="panel" onSubmit={submit}>
+        <h2>添加 Token</h2>
+        <label>
+          名称
+          <input value={name} onChange={(event) => setName(event.target.value)} required />
+        </label>
+        <label>
+          API Token
+          <input value={cfToken} onChange={(event) => setCfToken(event.target.value)} required />
+        </label>
+        <button disabled={busy}>
+          <Save size={16} />
+          <span>保存</span>
+        </button>
+      </form>
+      <div className="panel">
+        <h2>Token 列表</h2>
+        <div className="list">
+          {credentials.map((item) => (
+            <div className="row" key={item.id}>
+              <div>
+                <strong>{item.name}</strong>
+                <span>{statusText(item.status)} · {fmtDate(item.synced_at)}</span>
+                {item.last_error && <small className="danger">{item.last_error}</small>}
+              </div>
+              <div className="rowActions">
+                <button className="icon" disabled={busy} title="同步" onClick={() => act(() => apiFetch(`/api/credentials/${item.id}/sync`, token, { method: "POST" }), "已同步")}>
+                  <RefreshCw size={16} />
+                </button>
+                <button className="icon dangerBtn" disabled={busy} title="删除" onClick={() => act(() => apiFetch(`/api/credentials/${item.id}`, token, { method: "DELETE" }), "Cloudflare Token 已删除")}>
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function RecordsPanel({
+  token,
+  zones,
+  selectedZoneId,
+  setSelectedZoneId,
+  records,
+  seedGroup,
+  act
+}: {
+  token: string;
+  zones: Zone[];
+  selectedZoneId: number | "";
+  setSelectedZoneId: (value: number | "") => void;
+  records: DnsRecord[];
+  setSection: (section: Section) => void;
+  seedGroup: (record: DnsRecord) => void;
+  act: <T>(fn: () => Promise<T>, done?: string) => Promise<void>;
+}) {
+  return (
+    <section className="panel">
+      <div className="toolbar">
+        <select value={selectedZoneId} onChange={(event) => setSelectedZoneId(event.target.value ? Number(event.target.value) : "")}>
+          <option value="">选择域名区域</option>
+          {zones.map((zone) => (
+            <option key={zone.id} value={zone.id}>{zone.name}</option>
+          ))}
+        </select>
+        <button className="secondary" disabled={!selectedZoneId} onClick={() => act(() => apiFetch(`/api/zones/${selectedZoneId}/records/sync`, token, { method: "POST" }), "解析记录已同步")}>
+          <RefreshCw size={16} />
+          <span>同步</span>
+        </button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>类型</th>
+            <th>内容</th>
+            <th>TTL</th>
+            <th>代理状态</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {records.map((record) => (
+            <tr key={record.id}>
+              <td>{record.name}</td>
+              <td><Badge value={record.type} /></td>
+              <td className="mono">{record.content}</td>
+              <td>{record.ttl}</td>
+              <td>{record.proxied ? "已代理" : "仅 DNS"}</td>
+              <td>
+                <button className="icon" title="管理" disabled={record.proxied} onClick={() => seedGroup(record)}>
+                  <Link2 size={16} />
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone[]; groups: FailoverGroup[]; act: <T>(fn: () => Promise<T>, done?: string) => Promise<void> }) {
+  const seed = (() => {
+    const raw = sessionStorage.getItem("seedGroup");
+    if (!raw) return null;
+    sessionStorage.removeItem("seedGroup");
+    try {
+      return JSON.parse(raw) as { zone_id: number; hostname: string; adopt_record_id: string };
+    } catch {
+      return null;
+    }
+  })();
+  const [zoneId, setZoneId] = useState<number | "">(seed?.zone_id || zones[0]?.id || "");
+  const [hostname, setHostname] = useState(seed?.hostname || "");
+  const [adoptRecordId, setAdoptRecordId] = useState(seed?.adopt_record_id || "");
+  const [ttl, setTtl] = useState(60);
+  const [originDrafts, setOriginDrafts] = useState<Record<number, { target: string; port: number; priority: number; weight: number }>>({});
+
+  async function createGroup(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () =>
+        apiFetch("/api/groups", token, {
+          method: "POST",
+          body: JSON.stringify({
+            zone_id: zoneId,
+            hostname,
+            ttl,
+            enabled: true,
+            min_switch_interval_seconds: 120,
+            adopt_record_id: adoptRecordId || null
+          })
+        }),
+      "切换组已创建"
+    );
+    setHostname("");
+    setAdoptRecordId("");
+  }
+
+  async function createOrigin(groupId: number) {
+    const draft = originDrafts[groupId] || { target: "", port: 443, priority: 10, weight: 1 };
+    await act(
+      () =>
+        apiFetch(`/api/groups/${groupId}/origins`, token, {
+          method: "POST",
+          body: JSON.stringify(draft)
+        }),
+      "源站已添加"
+    );
+    setOriginDrafts((current) => ({ ...current, [groupId]: { target: "", port: 443, priority: 10, weight: 1 } }));
+  }
+
+  return (
+    <section className="stack">
+      <form className="panel formRow" onSubmit={createGroup}>
+        <select value={zoneId} onChange={(event) => setZoneId(event.target.value ? Number(event.target.value) : "")} required>
+          <option value="">域名区域</option>
+          {zones.map((zone) => (
+            <option key={zone.id} value={zone.id}>{zone.name}</option>
+          ))}
+        </select>
+        <input placeholder="主机名" value={hostname} onChange={(event) => setHostname(event.target.value)} required />
+        <input placeholder="记录 ID" value={adoptRecordId} onChange={(event) => setAdoptRecordId(event.target.value)} />
+        <input type="number" min={30} max={86400} value={ttl} onChange={(event) => setTtl(Number(event.target.value))} />
+        <button>
+          <Plus size={16} />
+          <span>创建组</span>
+        </button>
+      </form>
+      <div className="groupGrid">
+        {groups.map((group) => {
+          const draft = originDrafts[group.id] || { target: "", port: 443, priority: 10, weight: 1 };
+          const draftType = inferDraftTargetType(draft.target);
+          return (
+            <article className="groupCard" key={group.id}>
+              <div className="groupHead">
+                <div>
+                  <h2>{group.hostname}</h2>
+                  <span>TTL {group.ttl} · 记录 {group.current_record_id || "-"}</span>
+                </div>
+                <div className="rowActions">
+                  <Status value={group.last_error ? "error" : group.enabled ? "enabled" : "disabled"} />
+                  <button className="icon dangerBtn" title="删除切换组" onClick={() => act(() => apiFetch(`/api/groups/${group.id}`, token, { method: "DELETE" }), "切换组已删除")}>
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </div>
+              {group.last_error && <div className="error">{group.last_error}</div>}
+              <div className="originList">
+                {group.origins.map((origin) => (
+                  <div className="origin" key={origin.id}>
+                    <Server size={18} />
+                    <div>
+                      <strong>{origin.target}:{origin.port}</strong>
+                      <span>{targetTypeText(origin.target_type)} · 发布为 {recordTypeForTargetType(origin.target_type)} · 优先级 {origin.priority} · 权重 {origin.weight} · {fmtDate(origin.last_checked_at)}</span>
+                      {origin.last_error && <small className="danger">{origin.last_error}</small>}
+                    </div>
+                    <Status value={origin.status} />
+                    <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}`, token, { method: "DELETE" }), "源站已删除")}>
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="originFormHeader">
+                <strong>添加备用目标</strong>
+                <span>IPv4 自动切换为 A，IPv6 自动切换为 AAAA，域名自动切换为 CNAME。</span>
+              </div>
+              <div className="originForm">
+                <input title="备用目标，支持 IPv4、IPv6、域名" placeholder="IPv4 / IPv6 / 域名" value={draft.target} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, target: event.target.value } }))} />
+                <input title="TCP 检查端口" type="number" min={1} max={65535} value={draft.port} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, port: Number(event.target.value) } }))} />
+                <input title="优先级，数字越小越优先" type="number" min={0} value={draft.priority} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, priority: Number(event.target.value) } }))} />
+                <input title="同优先级内的权重" type="number" min={1} value={draft.weight} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, weight: Number(event.target.value) } }))} />
+                <button className="secondary" onClick={() => createOrigin(group.id)}>
+                  <Plus size={16} />
+                </button>
+              </div>
+              {draftType && (
+                <div className="originHint">
+                  当前输入识别为 {targetTypeText(draftType)}，故障切换时会发布为 {recordTypeForTargetType(draftType)} 记录。
+                </div>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token: string; agents: Agent[]; agentToken: string; setAgentToken: (value: string) => void; act: <T>(fn: () => Promise<T>, done?: string) => Promise<void> }) {
+  const [name, setName] = useState("");
+  const panelUrl = window.location.origin;
+
+  async function createAgent(event: FormEvent) {
+    event.preventDefault();
+    await act(async () => {
+      const data = await apiFetch<{ token: string }>("/api/agents", token, {
+        method: "POST",
+        body: JSON.stringify({ name })
+      });
+      setAgentToken(data.token);
+    }, "探针已创建");
+    setName("");
+  }
+
+  return (
+    <section className="gridTwo">
+      <form className="panel" onSubmit={createAgent}>
+        <h2>新建探针</h2>
+        <label>
+          名称
+          <input value={name} onChange={(event) => setName(event.target.value)} required />
+        </label>
+        <button>
+          <RadioTower size={16} />
+          <span>创建</span>
+        </button>
+        {agentToken && (
+          <div className="agentSecret">
+            <h3>探针注册令牌</h3>
+            <p>这串内容是中国服务器 Agent 的身份令牌，只显示这一次。把它填到中国服务器的 <code>AGENT_TOKEN</code>，<code>CONTROL_URL</code> 填你的面板公网地址。</p>
+            <pre className="tokenBox">{agentToken}</pre>
+            <pre className="tokenBox commandBox">{`CONTROL_URL=${panelUrl} AGENT_TOKEN=${agentToken} python agent.py`}</pre>
+          </div>
+        )}
+      </form>
+      <div className="panel">
+        <h2>探针列表</h2>
+        <div className="list">
+          {agents.map((agent) => (
+            <div className="row" key={agent.id}>
+              <div>
+                <strong>{agent.name}</strong>
+                <span>{agent.last_ip || "-"} · {fmtDate(agent.last_seen_at)}</span>
+              </div>
+              <div className="rowActions">
+                <Status value={agent.status} />
+                <button className="icon dangerBtn" title="删除探针" onClick={() => act(() => apiFetch(`/api/agents/${agent.id}`, token, { method: "DELETE" }), "探针已删除")}>
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function NotificationsPanel({
+  token,
+  telegramNotifications,
+  webhooks,
+  act
+}: {
+  token: string;
+  telegramNotifications: TelegramNotification[];
+  webhooks: Webhook[];
+  act: <T>(fn: () => Promise<T>, done?: string) => Promise<void>;
+}) {
+  const [telegramName, setTelegramName] = useState("");
+  const [botToken, setBotToken] = useState("");
+  const [chatId, setChatId] = useState("");
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [secret, setSecret] = useState("");
+
+  async function submitTelegram(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () =>
+        apiFetch("/api/telegram", token, {
+          method: "POST",
+          body: JSON.stringify({ name: telegramName, bot_token: botToken, chat_id: chatId, enabled: true })
+        }),
+      "Telegram 通知已保存"
+    );
+    setTelegramName("");
+    setBotToken("");
+    setChatId("");
+  }
+
+  async function submitWebhook(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () =>
+        apiFetch("/api/webhooks", token, {
+          method: "POST",
+          body: JSON.stringify({ name, url, secret: secret || null, enabled: true })
+        }),
+      "Webhook 已保存"
+    );
+    setName("");
+    setUrl("");
+    setSecret("");
+  }
+
+  return (
+    <section className="stack">
+      <div className="gridTwo">
+        <form className="panel" onSubmit={submitTelegram}>
+          <h2>添加 Telegram</h2>
+          <label>名称<input value={telegramName} onChange={(event) => setTelegramName(event.target.value)} required /></label>
+          <label>Bot Token<input value={botToken} onChange={(event) => setBotToken(event.target.value)} required /></label>
+          <label>Chat ID<input value={chatId} onChange={(event) => setChatId(event.target.value)} placeholder="例如 123456789 或 -100..." required /></label>
+          <button><RadioTower size={16} /><span>保存</span></button>
+        </form>
+        <div className="panel">
+          <h2>Telegram 通知</h2>
+          <div className="list">
+            {telegramNotifications.map((item) => (
+              <div className="row" key={item.id}>
+                <div>
+                  <strong>{item.name}</strong>
+                  <span>{item.chat_id} · {fmtDate(item.last_sent_at)}</span>
+                  {item.last_error && <small className="danger">{item.last_error}</small>}
+                </div>
+                <div className="rowActions">
+                  <Status value={item.enabled ? "enabled" : "disabled"} />
+                  <button className="icon" title="发送测试" onClick={() => act(() => apiFetch(`/api/telegram/${item.id}/test`, token, { method: "POST" }), "Telegram 测试通知已发送")}>
+                    <Play size={15} />
+                  </button>
+                  <button className="icon dangerBtn" title="删除 Telegram" onClick={() => act(() => apiFetch(`/api/telegram/${item.id}`, token, { method: "DELETE" }), "Telegram 通知已删除")}>
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="gridTwo">
+        <form className="panel" onSubmit={submitWebhook}>
+          <h2>添加 Webhook</h2>
+          <label>名称<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+          <label>URL<input value={url} onChange={(event) => setUrl(event.target.value)} required /></label>
+          <label>签名密钥<input value={secret} onChange={(event) => setSecret(event.target.value)} /></label>
+          <button><WebhookIcon size={16} /><span>保存</span></button>
+        </form>
+      <div className="panel">
+        <h2>通知列表</h2>
+        <div className="list">
+          {webhooks.map((webhook) => (
+            <div className="row" key={webhook.id}>
+              <div>
+                <strong>{webhook.name}</strong>
+                <span>{webhook.url}</span>
+                {webhook.last_error && <small className="danger">{webhook.last_error}</small>}
+              </div>
+              <div className="rowActions">
+                <Status value={webhook.enabled ? "enabled" : "disabled"} />
+                <button className="icon dangerBtn" title="删除 Webhook" onClick={() => act(() => apiFetch(`/api/webhooks/${webhook.id}`, token, { method: "DELETE" }), "Webhook 已删除")}>
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      </div>
+    </section>
+  );
+}
+
+function EventsPanel({ events, compact = false }: { events: EventItem[]; compact?: boolean }) {
+  return (
+    <section className={compact ? "panel" : "panel"}>
+      <h2>{compact ? "最近事件" : "事件"}</h2>
+      <div className="timeline">
+        {events.map((event) => (
+          <div className="event" key={event.id}>
+            <Status value={event.severity} />
+            <div>
+              <strong>{event.message}</strong>
+              <span>{eventTypeText(event.type)} · {fmtDate(event.created_at)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function Badge({ value }: { value: string }) {
+  return <span className="badge">{value}</span>;
+}
+
+function Status({ value }: { value: string }) {
+  return <span className={`status ${value}`}>{statusText(value)}</span>;
+}

@@ -1,0 +1,155 @@
+import json
+from html import escape
+from datetime import datetime
+from typing import Any
+
+import httpx
+from sqlalchemy.orm import Session
+
+from .events import add_event
+from .models import TelegramNotification, Webhook
+from .security import decrypt_secret, sign_webhook_payload
+
+
+EVENT_NAMES = {
+    "dns.switched": "DNS 已切换",
+    "origin.status_changed": "源站状态变化",
+    "failover.no_healthy_origin": "无健康源站",
+    "dns.publish_failed": "DNS 发布失败",
+    "cloudflare.sync_failed": "Cloudflare 同步失败",
+    "cloudflare.synced": "Cloudflare 已同步",
+}
+
+
+STATUS_NAMES = {
+    "healthy": "健康",
+    "unhealthy": "不可用",
+    "unknown": "未知",
+    "disabled": "已禁用",
+    "enabled": "已启用",
+}
+
+
+def _line(label: str, value: Any) -> str:
+    if value is None or value == "":
+        value = "-"
+    return f"{escape(label)}: <code>{escape(str(value))}</code>"
+
+
+def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
+    title = EVENT_NAMES.get(event_type, "系统事件")
+    lines = [f"<b>{escape(title)}</b>"]
+
+    if event_type == "dns.switched":
+        lines.extend(
+            [
+                _line("主机名", payload.get("hostname")),
+                _line("记录", f"{payload.get('record_type', '-')} {payload.get('content', '-')}"),
+                _line("源站 ID", payload.get("new_origin_id")),
+                _line("旧源站 ID", payload.get("old_origin_id")),
+            ]
+        )
+    elif event_type == "origin.status_changed":
+        lines.extend(
+            [
+                _line("源站", f"{payload.get('target', '-')}:{payload.get('port', '-')}"),
+                _line("状态", STATUS_NAMES.get(str(payload.get("status")), payload.get("status"))),
+            ]
+        )
+    elif event_type == "failover.no_healthy_origin":
+        lines.extend([_line("主机名", payload.get("hostname")), "请检查源站池和探针连通性。"])
+    elif event_type == "dns.publish_failed":
+        lines.extend([_line("主机名", payload.get("hostname")), _line("错误", payload.get("error"))])
+    elif event_type.startswith("cloudflare."):
+        lines.extend([_line("凭据 ID", payload.get("credential_id")), _line("错误", payload.get("error"))])
+    else:
+        for key, value in payload.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                lines.append(_line(key, value))
+
+    lines.append(_line("时间", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")))
+    return "\n".join(lines)
+
+
+def send_webhooks(db: Session, event_type: str, payload: dict[str, Any]) -> None:
+    send_telegram_notifications(db, event_type, payload)
+    webhooks = db.query(Webhook).filter(Webhook.enabled.is_(True)).all()
+    if not webhooks:
+        return
+
+    body = json.dumps({"type": event_type, "payload": payload}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    for webhook in webhooks:
+        headers = {"Content-Type": "application/json", "User-Agent": "cloudflare-dns-failover/1.0"}
+        if webhook.secret:
+            headers["X-Failover-Signature"] = sign_webhook_payload(webhook.secret, body)
+        last_error = None
+        for _ in range(3):
+            try:
+                response = httpx.post(webhook.url, content=body, headers=headers, timeout=10)
+                response.raise_for_status()
+                webhook.last_sent_at = datetime.utcnow()
+                webhook.last_error = None
+                break
+            except Exception as exc:  # pragma: no cover - network dependent
+                last_error = str(exc)
+        else:
+            webhook.last_error = last_error
+            add_event(
+                db,
+                "webhook.failed",
+                "warning",
+                f"Webhook {webhook.name} 发送失败",
+                {"webhook_id": webhook.id, "error": last_error},
+            )
+
+
+def send_telegram_notifications(db: Session, event_type: str, payload: dict[str, Any]) -> None:
+    channels = db.query(TelegramNotification).filter(TelegramNotification.enabled.is_(True)).all()
+    if not channels:
+        return
+
+    text = render_telegram_message(event_type, payload)
+    for channel in channels:
+        send_telegram_channel(db, channel, event_type, payload, text=text)
+
+
+def send_telegram_channel(
+    db: Session,
+    channel: TelegramNotification,
+    event_type: str,
+    payload: dict[str, Any],
+    text: str | None = None,
+) -> None:
+    last_error = None
+    message_text = text or render_telegram_message(event_type, payload)
+    for _ in range(3):
+        try:
+            token = decrypt_secret(channel.bot_token_encrypted)
+            response = httpx.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={
+                    "chat_id": channel.chat_id,
+                    "text": message_text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if not result.get("ok", False):
+                raise RuntimeError(result.get("description") or "Telegram API 返回失败")
+            channel.last_sent_at = datetime.utcnow()
+            channel.last_error = None
+            break
+        except Exception as exc:  # pragma: no cover - network dependent
+            last_error = str(exc)
+    else:
+        channel.last_error = last_error
+        add_event(
+            db,
+            "telegram.failed",
+            "warning",
+            f"Telegram 通知 {channel.name} 发送失败",
+            {"telegram_id": channel.id, "error": last_error},
+        )

@@ -1,0 +1,33 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ./agent
+    profiles:
+      - agent
+    environment:
+      CONTROL_URL: ${CONTROL_URL:-http://backend:8000}
+      AGENT_TOKEN: ${AGENT_TOKEN:-}
+      AGENT_INTERVAL_SECONDS: ${AGENT_INTERVAL_SECONDS:-30}
+      AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-3}
+    restart: unless-stopped
+
