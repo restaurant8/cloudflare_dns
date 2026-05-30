@@ -1,5 +1,4 @@
 import secrets
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
@@ -9,7 +8,7 @@ from ..agent_installer import build_install_script
 from ..config import get_settings
 from ..database import get_db
 from ..deps import get_agent, get_current_user
-from ..health import apply_probe_result
+from ..health import apply_probe_result, mark_agent_online
 from ..models import Agent, Origin, User
 from ..schemas import AgentCreate, AgentCreated, AgentOut, AgentResultsIn, AgentTasksResponse, AgentTask, Message
 from ..security import hash_token
@@ -63,9 +62,7 @@ def delete_agent(agent_id: int, _: User = Depends(get_current_user), db: Session
 @router.get("/agent/tasks", response_model=AgentTasksResponse)
 def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session = Depends(get_db)):
     settings = get_settings()
-    agent.last_seen_at = datetime.utcnow()
-    agent.last_ip = request.client.host if request.client else None
-    agent.status = "online"
+    mark_agent_online(db, agent, request.client.host if request.client else None)
     origins = (
         db.query(Origin)
         .join(Origin.group)
@@ -83,9 +80,7 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
 
 @router.post("/agent/results", response_model=Message)
 def agent_results(payload: AgentResultsIn, request: Request, agent: Agent = Depends(get_agent), db: Session = Depends(get_db)):
-    agent.last_seen_at = datetime.utcnow()
-    agent.last_ip = request.client.host if request.client else None
-    agent.status = "online"
+    mark_agent_online(db, agent, request.client.host if request.client else None)
     for item in payload.results:
         origin = db.get(Origin, item.origin_id)
         if origin is None:

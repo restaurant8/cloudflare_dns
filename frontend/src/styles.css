@@ -19,7 +19,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -78,7 +79,8 @@ button.miniBtn {
 }
 
 input,
-select {
+select,
+textarea {
   background: #ffffff;
   border: 1px solid #ccd6e0;
   border-radius: 6px;
@@ -86,6 +88,13 @@ select {
   min-height: 38px;
   padding: 0 10px;
   width: 100%;
+}
+
+textarea {
+  line-height: 1.5;
+  min-height: 104px;
+  padding: 10px;
+  resize: vertical;
 }
 
 label {
@@ -245,6 +254,46 @@ main {
   gap: 10px;
   grid-template-columns: minmax(180px, 1fr) auto;
   margin-bottom: 10px;
+}
+
+.zoneSearchBox {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.zoneResultList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.zoneResultList > span,
+.selectedZoneLabel {
+  color: #667789;
+  font-size: 13px;
+}
+
+button.zonePill {
+  background: #e8eef3;
+  color: #26374a;
+  min-height: 30px;
+  padding: 0 10px;
+}
+
+button.zonePill.active {
+  background: #176b87;
+  color: #ffffff;
+}
+
+.selectedZoneLabel {
+  align-items: center;
+  background: #f6f9fc;
+  border: 1px solid #dbe6ef;
+  border-radius: 6px;
+  display: flex;
+  min-height: 38px;
+  padding: 0 10px;
 }
 
 .searchBar span,
@@ -448,11 +497,53 @@ form.panel {
   gap: 4px;
 }
 
+.probeChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.probeChip {
+  background: #edf1f5;
+  border-radius: 999px;
+  color: #516070;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 8px;
+}
+
+.probeChip.healthy {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.probeChip.unhealthy {
+  background: #fee2e2;
+  color: #b42318;
+}
+
 .originForm {
   display: grid;
   gap: 8px;
   grid-template-columns: minmax(140px, 1.7fr) 74px 74px 74px 42px;
   margin-top: 12px;
+}
+
+.originBulkForm {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.originBulkControls {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+}
+
+.originBulkForm button {
+  justify-self: start;
 }
 
 .originFormHeader {
@@ -501,18 +592,23 @@ form.panel {
 
 .status.healthy,
 .status.enabled,
+.status.online,
 .status.info {
   background: #dcfce7;
   color: #166534;
 }
 
 .status.unhealthy,
+.status.blocked,
+.status.machine_down,
+.status.offline,
 .status.error {
   background: #fee2e2;
   color: #b42318;
 }
 
 .status.warning,
+.status.regional_issue,
 .status.unknown {
   background: #fff1c2;
   color: #854d0e;
@@ -560,6 +656,39 @@ form.panel {
   border-radius: 4px;
   color: #26374a;
   padding: 1px 4px;
+}
+
+.agentStatusGrid {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.agentStatusCard {
+  border: 1px solid #edf1f5;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 12px;
+}
+
+.agentStatusCard > span {
+  color: #667789;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.agentStatusCard > button {
+  grid-row: 1 / span 3;
+  grid-column: 2;
+}
+
+.agentStatusHead {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .commandHeader {

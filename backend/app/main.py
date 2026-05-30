@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .database import SessionLocal, init_db
 from .failover import evaluate_failover_groups
-from .health import run_local_checks
+from .health import mark_stale_agents, run_local_checks
 from .routes import routers
 
 
@@ -16,6 +16,7 @@ async def scheduler_loop(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         try:
             with SessionLocal() as db:
+                mark_stale_agents(db)
                 run_local_checks(db)
                 evaluate_failover_groups(db)
                 db.commit()

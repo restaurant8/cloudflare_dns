@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import get_current_user
+from ..health import ORIGIN_UNAVAILABLE_STATUSES
 from ..models import Agent, CloudflareCredential, Event, FailoverGroup, Origin, User, Zone
 from ..schemas import Overview
 
@@ -19,8 +20,7 @@ def overview(_: User = Depends(get_current_user), db: Session = Depends(get_db))
         groups=db.query(FailoverGroup).count(),
         enabled_groups=db.query(FailoverGroup).filter(FailoverGroup.enabled.is_(True)).count(),
         origins=db.query(Origin).count(),
-        unhealthy_origins=db.query(Origin).filter(Origin.status == "unhealthy").count(),
+        unhealthy_origins=db.query(Origin).filter(Origin.status.in_(ORIGIN_UNAVAILABLE_STATUSES)).count(),
         agents=db.query(Agent).count(),
         recent_events=recent_events,
     )
-

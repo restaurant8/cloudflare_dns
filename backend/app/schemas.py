@@ -94,6 +94,10 @@ class OriginCreate(BaseModel):
     enabled: bool = True
 
 
+class OriginBulkCreate(BaseModel):
+    origins: list[OriginCreate] = Field(min_length=1, max_length=100)
+
+
 class OriginUpdate(BaseModel):
     target: str | None = Field(default=None, min_length=1, max_length=255)
     port: int | None = Field(default=None, ge=1, le=65535)

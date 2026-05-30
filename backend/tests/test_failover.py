@@ -12,12 +12,22 @@ def origin(id_: int, status: str, priority: int, weight: int = 1) -> Origin:
     return Origin(id=id_, target=f"192.0.2.{id_}", target_type="ipv4", port=443, status=status, priority=priority, weight=weight, enabled=True)
 
 
-def test_choose_desired_origin_prefers_priority_then_weight():
+def test_choose_desired_origin_prefers_priority_then_oldest_origin():
     origins = [
         origin(1, "healthy", 20, 100),
         origin(2, "unhealthy", 5, 100),
         origin(3, "healthy", 10, 1),
         origin(4, "healthy", 10, 5),
+    ]
+    assert choose_desired_origin(origins).id == 3
+
+
+def test_choose_desired_origin_ignores_unavailable_regional_statuses():
+    origins = [
+        origin(1, "blocked", 1, 100),
+        origin(2, "machine_down", 2, 100),
+        origin(3, "regional_issue", 3, 100),
+        origin(4, "healthy", 10, 1),
     ]
     assert choose_desired_origin(origins).id == 4
 

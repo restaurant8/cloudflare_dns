@@ -20,7 +20,7 @@ def choose_desired_origin(origins: list[Origin], current_origin_id: int | None =
     if current is not None and current.priority <= best_priority:
         return current
     candidates = [origin for origin in healthy if origin.priority == best_priority]
-    return sorted(candidates, key=lambda item: (-item.weight, item.id))[0]
+    return sorted(candidates, key=lambda item: item.id)[0]
 
 
 def validate_group_hostname_records(

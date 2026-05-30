@@ -9,7 +9,7 @@ from ..events import add_event
 from ..failover import evaluate_failover_groups, validate_group_hostname_records
 from ..health import run_local_checks
 from ..models import FailoverGroup, Origin, User, Zone
-from ..schemas import FailoverGroupCreate, FailoverGroupOut, FailoverGroupUpdate, Message, OriginCreate, OriginOut, OriginUpdate
+from ..schemas import FailoverGroupCreate, FailoverGroupOut, FailoverGroupUpdate, Message, OriginBulkCreate, OriginCreate, OriginOut, OriginUpdate
 from ..security import decrypt_secret
 
 
@@ -18,6 +18,21 @@ router = APIRouter(prefix="/groups", tags=["groups"])
 
 def _group_query(db: Session):
     return db.query(FailoverGroup).options(selectinload(FailoverGroup.origins).selectinload(Origin.probe_states))
+
+
+def _origin_from_payload(group: FailoverGroup, payload: OriginCreate) -> Origin:
+    target_info = parse_target(payload.target)
+    if target_info.record_type == "CNAME" and target_info.value == group.hostname:
+        raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
+    return Origin(
+        group_id=group.id,
+        target=target_info.value,
+        target_type=target_info.target_type,
+        port=payload.port,
+        priority=payload.priority,
+        weight=payload.weight,
+        enabled=payload.enabled,
+    )
 
 
 @router.get("", response_model=list[FailoverGroupOut])
@@ -81,22 +96,31 @@ def create_origin(group_id: int, payload: OriginCreate, _: User = Depends(get_cu
     group = db.get(FailoverGroup, group_id)
     if group is None:
         raise HTTPException(status_code=404, detail="切换组不存在")
-    target_info = parse_target(payload.target)
-    if target_info.record_type == "CNAME" and target_info.value == group.hostname:
-        raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
-    origin = Origin(
-        group_id=group.id,
-        target=target_info.value,
-        target_type=target_info.target_type,
-        port=payload.port,
-        priority=payload.priority,
-        weight=payload.weight,
-        enabled=payload.enabled,
-    )
+    origin = _origin_from_payload(group, payload)
     db.add(origin)
     db.commit()
     db.refresh(origin)
     return origin
+
+
+@router.post("/{group_id}/origins/bulk", response_model=FailoverGroupOut)
+def create_origins_bulk(group_id: int, payload: OriginBulkCreate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    group = db.get(FailoverGroup, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="切换组不存在")
+    existing_keys = {(origin.target, origin.port) for origin in group.origins}
+    new_origins: list[Origin] = []
+    new_keys: set[tuple[str, int]] = set()
+    for item in payload.origins:
+        origin = _origin_from_payload(group, item)
+        key = (origin.target, origin.port)
+        if key in existing_keys or key in new_keys:
+            raise HTTPException(status_code=409, detail=f"{origin.target}:{origin.port} 已经在备用目标池中")
+        new_keys.add(key)
+        new_origins.append(origin)
+    db.add_all(new_origins)
+    db.commit()
+    return _group_query(db).filter(FailoverGroup.id == group_id).one()
 
 
 @router.patch("/origins/{origin_id}", response_model=OriginOut)

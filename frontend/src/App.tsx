@@ -23,6 +23,7 @@ import { apiFetch, fmtDate } from "./api";
 import type { Agent, Credential, DnsRecord, EventItem, FailoverGroup, Overview, TelegramNotification, Webhook, Zone } from "./types";
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "agents" | "webhooks" | "account" | "events";
+type OriginDraft = { targets: string; port: number; priority: number };
 
 const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "overview", label: "总览", icon: Activity },
@@ -41,9 +42,13 @@ const statusLabels: Record<string, string> = {
   unknown: "未知",
   healthy: "健康",
   unhealthy: "不可用",
+  blocked: "疑似被墙",
+  machine_down: "机器疑似挂了",
+  regional_issue: "本地探测异常",
   disabled: "已禁用",
   enabled: "已启用",
   online: "在线",
+  offline: "离线",
   warning: "警告",
   info: "信息"
 };
@@ -60,6 +65,7 @@ const eventTypeLabels: Record<string, string> = {
   "group.created": "切换组已创建",
   "probe.status_changed": "探测状态变化",
   "origin.status_changed": "源站状态变化",
+  "agent.status_changed": "探针状态变化",
   "failover.no_healthy_origin": "无健康源站",
   "dns.publish_failed": "DNS 发布失败",
   "dns.switched": "DNS 已切换",
@@ -81,6 +87,28 @@ function recordTypeForTargetType(value: string): string {
   if (value === "ipv6") return "AAAA";
   if (value === "hostname") return "CNAME";
   return "-";
+}
+
+function probeSourceText(value: string): string {
+  if (value === "local") return "本地";
+  if (value.startsWith("agent:")) return `探针 ${value.slice(6)}`;
+  return value;
+}
+
+function parseOriginDraft(draft: OriginDraft): Array<{ target: string; port: number; priority: number; weight: number }> {
+  return draft.targets
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => {
+      const parts = (line.includes(",") ? line.split(",") : line.split(/\s+/)).map((part) => part.trim()).filter(Boolean);
+      return {
+        target: parts[0],
+        port: parts[1] ? Number(parts[1]) : draft.port,
+        priority: parts[2] ? Number(parts[2]) : draft.priority,
+        weight: 1
+      };
+    });
 }
 
 function inferDraftTargetType(value: string): string {
@@ -124,6 +152,8 @@ const emptyOverview: Overview = {
   agents: 0,
   recent_events: []
 };
+
+const defaultOriginDraft: OriginDraft = { targets: "", port: 443, priority: 10 };
 
 export default function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem("accessToken"));
@@ -491,11 +521,12 @@ function RecordsPanel({
 }) {
   const [query, setQuery] = useState("");
   const [zoneQuery, setZoneQuery] = useState("");
-  const filteredZones = filteredZoneList(zones, zoneQuery, selectedZoneId);
+  const filteredZones = zones.filter((zone) => zoneMatches(zone, zoneQuery));
+  const selectedZone = zones.find((zone) => zone.id === selectedZoneId);
   const normalizedQuery = query.trim().toLowerCase();
   const filteredRecords = normalizedQuery
     ? records.filter((record) =>
-        [record.name, record.type, record.content, record.proxied ? "已代理 proxied" : "仅 DNS DNS-only"]
+        [record.name, record.type, record.content, record.cf_record_id, record.proxied ? "已代理 proxied" : "仅 DNS DNS-only"]
           .join(" ")
           .toLowerCase()
           .includes(normalizedQuery)
@@ -504,21 +535,26 @@ function RecordsPanel({
 
   return (
     <section className="panel">
-      <div className="searchBar">
-        <input
-          value={zoneQuery}
-          onChange={(event) => setZoneQuery(event.target.value)}
-          placeholder="搜索域名区域"
-        />
-        <span>{filteredZones.length}/{zones.length}</span>
+      <div className="zoneSearchBox">
+        <div className="searchBar">
+          <input
+            value={zoneQuery}
+            onChange={(event) => setZoneQuery(event.target.value)}
+            placeholder="搜索域名区域"
+          />
+          <span>{filteredZones.length}/{zones.length}</span>
+        </div>
+        <div className="zoneResultList">
+          {filteredZones.slice(0, 12).map((zone) => (
+            <button type="button" className={zone.id === selectedZoneId ? "zonePill active" : "zonePill"} key={zone.id} onClick={() => setSelectedZoneId(zone.id)}>
+              {zone.name}
+            </button>
+          ))}
+          {filteredZones.length === 0 && <span>没有匹配的域名区域</span>}
+        </div>
       </div>
       <div className="toolbar">
-        <select value={selectedZoneId} onChange={(event) => setSelectedZoneId(event.target.value ? Number(event.target.value) : "")}>
-          <option value="">选择域名区域</option>
-          {filteredZones.map((zone) => (
-            <option key={zone.id} value={zone.id}>{zone.name}</option>
-          ))}
-        </select>
+        <div className="selectedZoneLabel">当前域名：{selectedZone ? selectedZone.name : "未选择"}</div>
         <button className="secondary" disabled={!selectedZoneId} onClick={() => act(() => apiFetch(`/api/zones/${selectedZoneId}/records/sync`, token, { method: "POST" }), "解析记录已同步")}>
           <RefreshCw size={16} />
           <span>同步</span>
@@ -595,7 +631,7 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
   const [ttl, setTtl] = useState(seed?.ttl && seed.ttl >= 30 ? seed.ttl : 60);
   const [zoneQuery, setZoneQuery] = useState("");
   const filteredZones = filteredZoneList(zones, zoneQuery, zoneId);
-  const [originDrafts, setOriginDrafts] = useState<Record<number, { target: string; port: number; priority: number; weight: number }>>({});
+  const [originDrafts, setOriginDrafts] = useState<Record<number, OriginDraft>>({});
   const seededRecordMatches = Boolean(seed?.adopt_record_id && seed.adopt_record_id === adoptRecordId);
 
   async function createGroup(event: FormEvent) {
@@ -620,16 +656,21 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
   }
 
   async function createOrigin(groupId: number) {
-    const draft = originDrafts[groupId] || { target: "", port: 443, priority: 10, weight: 1 };
+    const draft = originDrafts[groupId] || defaultOriginDraft;
     await act(
-      () =>
-        apiFetch(`/api/groups/${groupId}/origins`, token, {
+      () => {
+        const origins = parseOriginDraft(draft);
+        if (origins.length === 0) {
+          throw new Error("请填写至少一个备用目标");
+        }
+        return apiFetch(`/api/groups/${groupId}/origins/bulk`, token, {
           method: "POST",
-          body: JSON.stringify(draft)
-        }),
-      "源站已添加"
+          body: JSON.stringify({ origins })
+        });
+      },
+      "备用目标已添加"
     );
-    setOriginDrafts((current) => ({ ...current, [groupId]: { target: "", port: 443, priority: 10, weight: 1 } }));
+    setOriginDrafts((current) => ({ ...current, [groupId]: defaultOriginDraft }));
   }
 
   return (
@@ -680,8 +721,9 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
       </form>
       <div className="groupGrid">
         {groups.map((group) => {
-          const draft = originDrafts[group.id] || { target: "", port: 443, priority: 10, weight: 1 };
-          const draftType = inferDraftTargetType(draft.target);
+          const draft = originDrafts[group.id] || defaultOriginDraft;
+          const parsedDraft = parseOriginDraft(draft);
+          const singleDraftType = parsedDraft.length === 1 ? inferDraftTargetType(parsedDraft[0].target) : "";
           return (
             <article className="groupCard" key={group.id}>
               <div className="groupHead">
@@ -703,8 +745,17 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
                     <Server size={18} />
                     <div>
                       <strong>{origin.target}:{origin.port}</strong>
-                      <span>{targetTypeText(origin.target_type)} · 发布为 {recordTypeForTargetType(origin.target_type)} · 优先级 {origin.priority} · 权重 {origin.weight} · {fmtDate(origin.last_checked_at)}</span>
+                      <span>{targetTypeText(origin.target_type)} · 发布为 {recordTypeForTargetType(origin.target_type)} · 优先级 {origin.priority} · {fmtDate(origin.last_checked_at)}</span>
                       {origin.last_error && <small className="danger">{origin.last_error}</small>}
+                      {origin.probe_states.length > 0 && (
+                        <div className="probeChips">
+                          {origin.probe_states.map((probe) => (
+                            <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || ""}>
+                              {probeSourceText(probe.source_key)}：{statusText(probe.status)}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <Status value={origin.status} />
                     <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}`, token, { method: "DELETE" }), "源站已删除")}>
@@ -715,22 +766,39 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
               </div>
               <div className="originFormHeader">
                 <strong>添加备用目标</strong>
-                <span>IPv4 自动切换为 A，IPv6 自动切换为 AAAA，域名自动切换为 CNAME。</span>
+                <span>每行一个 IPv4、IPv6 或域名；IPv4 发布 A，IPv6 发布 AAAA，域名发布 CNAME。优先级数字越小越先使用。</span>
               </div>
-              <div className="originForm">
-                <input title="备用目标，支持 IPv4、IPv6、域名" placeholder="IPv4 / IPv6 / 域名" value={draft.target} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, target: event.target.value } }))} />
-                <input title="TCP 检查端口" type="number" min={1} max={65535} value={draft.port} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, port: Number(event.target.value) } }))} />
-                <input title="优先级，数字越小越优先" type="number" min={0} value={draft.priority} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, priority: Number(event.target.value) } }))} />
-                <input title="同优先级内的权重" type="number" min={1} value={draft.weight} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, weight: Number(event.target.value) } }))} />
-                <button className="secondary" onClick={() => createOrigin(group.id)}>
+              <div className="originBulkForm">
+                <label>
+                  备用目标
+                  <textarea
+                    rows={4}
+                    placeholder={"每行一个目标，也可写：目标,端口,优先级\n192.0.2.10\n2001:db8::10\nbackup.example.com,443,20"}
+                    value={draft.targets}
+                    onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, targets: event.target.value } }))}
+                  />
+                </label>
+                <div className="originBulkControls">
+                  <label>
+                    默认端口
+                    <input title="TCP 检查端口" type="number" min={1} max={65535} value={draft.port} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, port: Number(event.target.value) } }))} />
+                  </label>
+                  <label>
+                    默认优先级
+                    <input title="优先级，数字越小越优先" type="number" min={0} value={draft.priority} onChange={(event) => setOriginDrafts((current) => ({ ...current, [group.id]: { ...draft, priority: Number(event.target.value) } }))} />
+                  </label>
+                </div>
+                <button type="button" className="secondary" onClick={() => createOrigin(group.id)}>
                   <Plus size={16} />
+                  <span>批量添加</span>
                 </button>
               </div>
-              {draftType && (
+              {singleDraftType && (
                 <div className="originHint">
-                  当前输入识别为 {targetTypeText(draftType)}，故障切换时会发布为 {recordTypeForTargetType(draftType)} 记录。
+                  当前输入识别为 {targetTypeText(singleDraftType)}，故障切换时会发布为 {recordTypeForTargetType(singleDraftType)} 记录。
                 </div>
               )}
+              {parsedDraft.length > 1 && <div className="originHint">将添加 {parsedDraft.length} 个备用目标。</div>}
             </article>
           );
         })}
@@ -799,22 +867,25 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
         )}
       </form>
       <div className="panel">
-        <h2>探针列表</h2>
-        <div className="list">
+        <div className="panelTitle">
+          <h2>探针服务器状态</h2>
+          <p>探针会主动拉取任务；超过约 3 个检查周期未上报会自动标记为离线并发送通知。</p>
+        </div>
+        <div className="agentStatusGrid">
           {agents.map((agent) => (
-            <div className="row" key={agent.id}>
-              <div>
+            <div className="agentStatusCard" key={agent.id}>
+              <div className="agentStatusHead">
                 <strong>{agent.name}</strong>
-                <span>{agent.last_ip || "-"} · {fmtDate(agent.last_seen_at)}</span>
-              </div>
-              <div className="rowActions">
                 <Status value={agent.status} />
-                <button className="icon dangerBtn" title="删除探针" onClick={() => act(() => apiFetch(`/api/agents/${agent.id}`, token, { method: "DELETE" }), "探针已删除")}>
-                  <Trash2 size={15} />
-                </button>
               </div>
+              <span>最后 IP：{agent.last_ip || "-"}</span>
+              <span>最后上报：{fmtDate(agent.last_seen_at)}</span>
+              <button className="icon dangerBtn" title="删除探针" onClick={() => act(() => apiFetch(`/api/agents/${agent.id}`, token, { method: "DELETE" }), "探针已删除")}>
+                <Trash2 size={15} />
+              </button>
             </div>
           ))}
+          {agents.length === 0 && <div className="emptyCell">还没有探针服务器</div>}
         </div>
       </div>
     </section>

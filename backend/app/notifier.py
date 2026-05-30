@@ -14,6 +14,7 @@ from .security import decrypt_secret, sign_webhook_payload
 EVENT_NAMES = {
     "dns.switched": "DNS 已切换",
     "origin.status_changed": "源站状态变化",
+    "agent.status_changed": "探针状态变化",
     "failover.no_healthy_origin": "无健康源站",
     "dns.publish_failed": "DNS 发布失败",
     "cloudflare.sync_failed": "Cloudflare 同步失败",
@@ -24,9 +25,14 @@ EVENT_NAMES = {
 STATUS_NAMES = {
     "healthy": "健康",
     "unhealthy": "不可用",
+    "blocked": "疑似被墙",
+    "machine_down": "机器疑似挂了",
+    "regional_issue": "本地探测异常",
     "unknown": "未知",
     "disabled": "已禁用",
     "enabled": "已启用",
+    "online": "在线",
+    "offline": "离线",
 }
 
 
@@ -61,6 +67,15 @@ def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
             [
                 _line("源站", f"{payload.get('target', '-')}:{payload.get('port', '-')}"),
                 _line("状态", STATUS_NAMES.get(str(payload.get("status")), payload.get("status"))),
+            ]
+        )
+    elif event_type == "agent.status_changed":
+        lines.extend(
+            [
+                _line("探针", payload.get("name") or payload.get("agent_id")),
+                _line("状态", STATUS_NAMES.get(str(payload.get("status")), payload.get("status"))),
+                _line("最后 IP", payload.get("last_ip")),
+                _line("最后上报", payload.get("last_seen_at")),
             ]
         )
     elif event_type == "failover.no_healthy_origin":
