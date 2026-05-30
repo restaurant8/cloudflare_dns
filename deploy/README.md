@@ -44,5 +44,20 @@ Copy `deploy/nginx-cloudflare-dns.conf` into your Nginx site config and update `
 
 ## Agent
 
-On the China probe server, copy the project or just the `agent` directory, install `agent/requirements.txt`, then run it with Supervisor using `deploy/supervisor-agent.ini`.
+Create a probe in the dashboard. The UI will show a one-line installer command once. Copy that command to the China probe server and run it as root.
 
+The generated command uses this shape:
+
+```bash
+curl -fsSL 'https://your-panel.example.com/api/agent/install.sh' -o /tmp/cloudflare-dns-agent-install.sh && CONTROL_URL='https://your-panel.example.com' AGENT_TOKEN='the-one-time-token' bash /tmp/cloudflare-dns-agent-install.sh
+```
+
+It installs the agent under `/opt/cloudflare-dns-agent`, writes `/etc/cloudflare-dns-agent.env`, creates the `cloudflare-dns-agent` systemd service, and starts it automatically.
+
+Useful commands:
+
+```bash
+systemctl status cloudflare-dns-agent
+journalctl -u cloudflare-dns-agent -f
+systemctl restart cloudflare-dns-agent
+```

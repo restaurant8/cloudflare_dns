@@ -2,8 +2,10 @@ import secrets
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
+from ..agent_installer import build_install_script
 from ..config import get_settings
 from ..database import get_db
 from ..deps import get_agent, get_current_user
@@ -14,6 +16,11 @@ from ..security import hash_token
 
 
 router = APIRouter(tags=["agents"])
+
+
+@router.get("/agent/install.sh", response_class=PlainTextResponse)
+def agent_install_script():
+    return PlainTextResponse(build_install_script(), media_type="text/x-shellscript; charset=utf-8")
 
 
 @router.get("/agents", response_model=list[AgentOut])

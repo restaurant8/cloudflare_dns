@@ -5,6 +5,7 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..models import User, Webhook
 from ..schemas import Message, WebhookCreate, WebhookOut, WebhookUpdate
+from ..security import encrypt_secret
 
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -20,7 +21,7 @@ def create_webhook(payload: WebhookCreate, _: User = Depends(get_current_user), 
     webhook = Webhook(
         name=payload.name,
         url=str(payload.url),
-        secret=payload.secret,
+        secret=encrypt_secret(payload.secret) if payload.secret else None,
         enabled=payload.enabled,
     )
     db.add(webhook)
@@ -37,6 +38,9 @@ def update_webhook(webhook_id: int, payload: WebhookUpdate, _: User = Depends(ge
     updates = payload.model_dump(exclude_unset=True)
     if "url" in updates and updates["url"] is not None:
         updates["url"] = str(updates["url"])
+    if "secret" in updates:
+        secret = updates.pop("secret")
+        webhook.secret = encrypt_secret(secret) if secret else None
     for key, value in updates.items():
         setattr(webhook, key, value)
     db.commit()

@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     fail_threshold: int = 3
     recovery_threshold: int = 2
     access_token_ttl_seconds: int = 7 * 24 * 60 * 60
+    login_max_failures: int = 5
+    login_failure_window_seconds: int = 15 * 60
+    login_lockout_seconds: int = 15 * 60
 
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 

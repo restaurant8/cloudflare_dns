@@ -65,6 +65,18 @@ button.dangerBtn {
   color: #b42318;
 }
 
+button.secondaryIcon {
+  background: #e8eef3;
+  color: #26374a;
+}
+
+button.miniBtn {
+  background: #e8eef3;
+  color: #26374a;
+  min-height: 30px;
+  padding: 0 10px;
+}
+
 input,
 select {
   background: #ffffff;
@@ -210,6 +222,42 @@ main {
   margin-bottom: 14px;
 }
 
+.panelTitle {
+  display: grid;
+  gap: 4px;
+}
+
+.panelTitle h2 {
+  font-size: 18px;
+  margin: 0;
+}
+
+.panelTitle p {
+  color: #667789;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.searchBar {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  margin-bottom: 10px;
+}
+
+.searchBar span,
+.emptyCell {
+  color: #667789;
+  font-size: 13px;
+}
+
+.emptyCell {
+  padding: 24px 10px;
+  text-align: center;
+}
+
 .panel,
 .groupCard,
 .authBox,
@@ -233,6 +281,16 @@ main {
   display: grid;
   gap: 16px;
   grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+}
+
+.accountPanel {
+  max-width: 520px;
+}
+
+.accountPanel form {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
 }
 
 .metrics {
@@ -262,6 +320,48 @@ main {
 form.panel {
   display: grid;
   gap: 12px;
+}
+
+.groupCreateGrid {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+}
+
+.monoInput,
+.recordIdNotice code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.recordIdNotice {
+  background: #f6f9fc;
+  border: 1px solid #dbe6ef;
+  border-radius: 6px;
+  color: #516070;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+}
+
+.recordIdNotice strong {
+  color: #18212f;
+  font-size: 13px;
+}
+
+.recordIdNotice span {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.recordIdNotice code {
+  color: #176b87;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.createGroupButton {
+  justify-self: start;
 }
 
 .row,
@@ -317,6 +417,30 @@ form.panel {
 .rowActions {
   flex-shrink: 0;
   gap: 8px;
+}
+
+.editGrid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+}
+
+.editGrid input:nth-child(3) {
+  grid-column: 1 / -1;
+}
+
+.inlineCheck {
+  align-items: center;
+  color: #516070;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  gap: 8px;
+}
+
+.inlineCheck input {
+  min-height: auto;
+  width: auto;
 }
 
 .originList {
@@ -427,6 +551,10 @@ form.panel {
   line-height: 1.5;
 }
 
+.agentSecret .warningText {
+  color: #a15c07;
+}
+
 .agentSecret code {
   background: #e8eef3;
   border-radius: 4px;
@@ -434,8 +562,21 @@ form.panel {
   padding: 1px 4px;
 }
 
+.commandHeader {
+  align-items: center;
+  color: #516070;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  gap: 10px;
+  justify-content: space-between;
+}
+
 .commandBox {
   color: #bfdbfe;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .notice,
@@ -460,11 +601,26 @@ form.panel {
 }
 
 .auth,
-.loading {
+.loadingState {
   align-items: center;
   display: flex;
   justify-content: center;
   min-height: 100vh;
+}
+
+.loadingBox {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+  max-width: 420px;
+  padding: 24px;
+  text-align: center;
+}
+
+.loadingBox p {
+  color: #667789;
+  line-height: 1.5;
 }
 
 .authBox {
@@ -503,6 +659,10 @@ form.panel {
   .formRow {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .groupCreateGrid {
+    grid-template-columns: 1fr;
   }
 
   .originForm {

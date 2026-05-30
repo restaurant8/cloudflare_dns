@@ -2,6 +2,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import httpx
 
@@ -9,8 +10,8 @@ import httpx
 @dataclass(frozen=True)
 class TcpResult:
     success: bool
-    rtt_ms: float | None
-    error: str | None
+    rtt_ms: Optional[float]
+    error: Optional[str]
 
 
 def tcp_check(target: str, port: int, timeout: float) -> TcpResult:
@@ -73,4 +74,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

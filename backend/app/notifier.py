@@ -30,6 +30,13 @@ STATUS_NAMES = {
 }
 
 
+def _decrypt_or_plaintext(value: str) -> str:
+    try:
+        return decrypt_secret(value)
+    except Exception:
+        return value
+
+
 def _line(label: str, value: Any) -> str:
     if value is None or value == "":
         value = "-"
@@ -81,7 +88,7 @@ def send_webhooks(db: Session, event_type: str, payload: dict[str, Any]) -> None
     for webhook in webhooks:
         headers = {"Content-Type": "application/json", "User-Agent": "cloudflare-dns-failover/1.0"}
         if webhook.secret:
-            headers["X-Failover-Signature"] = sign_webhook_payload(webhook.secret, body)
+            headers["X-Failover-Signature"] = sign_webhook_payload(_decrypt_or_plaintext(webhook.secret), body)
         last_error = None
         for _ in range(3):
             try:

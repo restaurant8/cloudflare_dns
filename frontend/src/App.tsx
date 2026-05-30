@@ -2,10 +2,12 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Cloud,
+  Copy,
   DatabaseZap,
   KeyRound,
   Link2,
   ListRestart,
+  LockKeyhole,
   LogOut,
   Play,
   Plus,
@@ -20,7 +22,7 @@ import {
 import { apiFetch, fmtDate } from "./api";
 import type { Agent, Credential, DnsRecord, EventItem, FailoverGroup, Overview, TelegramNotification, Webhook, Zone } from "./types";
 
-type Section = "overview" | "cloudflare" | "records" | "groups" | "agents" | "webhooks" | "events";
+type Section = "overview" | "cloudflare" | "records" | "groups" | "agents" | "webhooks" | "account" | "events";
 
 const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "overview", label: "总览", icon: Activity },
@@ -29,6 +31,7 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "groups", label: "故障切换", icon: ListRestart },
   { id: "agents", label: "探针", icon: RadioTower },
   { id: "webhooks", label: "通知", icon: WebhookIcon },
+  { id: "account", label: "账户", icon: LockKeyhole },
   { id: "events", label: "事件", icon: DatabaseZap }
 ];
 
@@ -88,8 +91,27 @@ function inferDraftTargetType(value: string): string {
   return "hostname";
 }
 
+function shellQuote(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
 function eventTypeText(value: string): string {
   return eventTypeLabels[value] || value;
+}
+
+function zoneMatches(zone: Zone, query: string): boolean {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return true;
+  return [zone.name, zone.account_name || "", zone.status || ""].join(" ").toLowerCase().includes(normalized);
+}
+
+function filteredZoneList(zones: Zone[], query: string, selectedZoneId: number | ""): Zone[] {
+  const filtered = zones.filter((zone) => zoneMatches(zone, query));
+  const selected = zones.find((zone) => zone.id === selectedZoneId);
+  if (selected && !filtered.some((zone) => zone.id === selected.id)) {
+    return [selected, ...filtered];
+  }
+  return filtered;
 }
 
 const emptyOverview: Overview = {
@@ -106,6 +128,7 @@ const emptyOverview: Overview = {
 export default function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem("accessToken"));
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
+  const [bootError, setBootError] = useState("");
   const [section, setSection] = useState<Section>("overview");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -125,6 +148,7 @@ export default function App() {
   const selectedZone = useMemo(() => zones.find((zone) => zone.id === selectedZoneId), [selectedZoneId, zones]);
 
   async function loadSetup() {
+    setBootError("");
     const data = await apiFetch<{ setup_required: boolean }>("/api/auth/setup-required");
     setSetupRequired(data.setup_required);
   }
@@ -176,7 +200,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    loadSetup().catch((error) => setMessage(error.message));
+    loadSetup().catch((error) => setBootError(error instanceof Error ? error.message : "无法连接后端 API"));
   }, []);
 
   useEffect(() => {
@@ -203,7 +227,22 @@ export default function App() {
   }
 
   if (setupRequired === null) {
-    return <div className="loading">加载中</div>;
+    return (
+      <div className="loadingState">
+        <div className="loadingBox">
+          <strong>{bootError ? "后端连接失败" : "加载中"}</strong>
+          {bootError && (
+            <>
+              <p>{bootError}</p>
+              <button onClick={() => loadSetup().catch((error) => setBootError(error instanceof Error ? error.message : "无法连接后端 API"))}>
+                <RefreshCw size={16} />
+                <span>重试</span>
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
   }
 
   if (!token) {
@@ -275,7 +314,7 @@ export default function App() {
             records={records}
             setSection={setSection}
             seedGroup={(record) => {
-              sessionStorage.setItem("seedGroup", JSON.stringify({ zone_id: record.zone_id, hostname: record.name, adopt_record_id: record.cf_record_id }));
+              sessionStorage.setItem("seedGroup", JSON.stringify({ zone_id: record.zone_id, hostname: record.name, adopt_record_id: record.cf_record_id, record_type: record.type, content: record.content, ttl: record.ttl }));
               setSection("groups");
             }}
             act={act}
@@ -288,6 +327,7 @@ export default function App() {
           <AgentsPanel token={token} agents={agents} agentToken={agentToken} setAgentToken={setAgentToken} act={act} />
         )}
         {section === "webhooks" && <NotificationsPanel token={token} telegramNotifications={telegramNotifications} webhooks={webhooks} act={act} />}
+        {section === "account" && <AccountPanel token={token} onPasswordChanged={logout} />}
         {section === "events" && <EventsPanel events={events} />}
       </main>
     </div>
@@ -449,12 +489,33 @@ function RecordsPanel({
   seedGroup: (record: DnsRecord) => void;
   act: <T>(fn: () => Promise<T>, done?: string) => Promise<void>;
 }) {
+  const [query, setQuery] = useState("");
+  const [zoneQuery, setZoneQuery] = useState("");
+  const filteredZones = filteredZoneList(zones, zoneQuery, selectedZoneId);
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredRecords = normalizedQuery
+    ? records.filter((record) =>
+        [record.name, record.type, record.content, record.proxied ? "已代理 proxied" : "仅 DNS DNS-only"]
+          .join(" ")
+          .toLowerCase()
+          .includes(normalizedQuery)
+      )
+    : records;
+
   return (
     <section className="panel">
+      <div className="searchBar">
+        <input
+          value={zoneQuery}
+          onChange={(event) => setZoneQuery(event.target.value)}
+          placeholder="搜索域名区域"
+        />
+        <span>{filteredZones.length}/{zones.length}</span>
+      </div>
       <div className="toolbar">
         <select value={selectedZoneId} onChange={(event) => setSelectedZoneId(event.target.value ? Number(event.target.value) : "")}>
           <option value="">选择域名区域</option>
-          {zones.map((zone) => (
+          {filteredZones.map((zone) => (
             <option key={zone.id} value={zone.id}>{zone.name}</option>
           ))}
         </select>
@@ -462,6 +523,14 @@ function RecordsPanel({
           <RefreshCw size={16} />
           <span>同步</span>
         </button>
+      </div>
+      <div className="searchBar">
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="搜索记录名称、类型或内容"
+        />
+        <span>{filteredRecords.length}/{records.length}</span>
       </div>
       <table>
         <thead>
@@ -475,7 +544,7 @@ function RecordsPanel({
           </tr>
         </thead>
         <tbody>
-          {records.map((record) => (
+          {filteredRecords.map((record) => (
             <tr key={record.id}>
               <td>{record.name}</td>
               <td><Badge value={record.type} /></td>
@@ -489,28 +558,45 @@ function RecordsPanel({
               </td>
             </tr>
           ))}
+          {filteredRecords.length === 0 && (
+            <tr>
+              <td colSpan={6} className="emptyCell">没有匹配的解析记录</td>
+            </tr>
+          )}
         </tbody>
       </table>
     </section>
   );
 }
 
+type GroupSeed = {
+  zone_id: number;
+  hostname: string;
+  adopt_record_id: string;
+  record_type?: string;
+  content?: string;
+  ttl?: number;
+};
+
 function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone[]; groups: FailoverGroup[]; act: <T>(fn: () => Promise<T>, done?: string) => Promise<void> }) {
-  const seed = (() => {
+  const [seed] = useState<GroupSeed | null>(() => {
     const raw = sessionStorage.getItem("seedGroup");
     if (!raw) return null;
     sessionStorage.removeItem("seedGroup");
     try {
-      return JSON.parse(raw) as { zone_id: number; hostname: string; adopt_record_id: string };
+      return JSON.parse(raw) as GroupSeed;
     } catch {
       return null;
     }
-  })();
+  });
   const [zoneId, setZoneId] = useState<number | "">(seed?.zone_id || zones[0]?.id || "");
   const [hostname, setHostname] = useState(seed?.hostname || "");
   const [adoptRecordId, setAdoptRecordId] = useState(seed?.adopt_record_id || "");
-  const [ttl, setTtl] = useState(60);
+  const [ttl, setTtl] = useState(seed?.ttl && seed.ttl >= 30 ? seed.ttl : 60);
+  const [zoneQuery, setZoneQuery] = useState("");
+  const filteredZones = filteredZoneList(zones, zoneQuery, zoneId);
   const [originDrafts, setOriginDrafts] = useState<Record<number, { target: string; port: number; priority: number; weight: number }>>({});
+  const seededRecordMatches = Boolean(seed?.adopt_record_id && seed.adopt_record_id === adoptRecordId);
 
   async function createGroup(event: FormEvent) {
     event.preventDefault();
@@ -548,17 +634,46 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
 
   return (
     <section className="stack">
-      <form className="panel formRow" onSubmit={createGroup}>
-        <select value={zoneId} onChange={(event) => setZoneId(event.target.value ? Number(event.target.value) : "")} required>
-          <option value="">域名区域</option>
-          {zones.map((zone) => (
-            <option key={zone.id} value={zone.id}>{zone.name}</option>
-          ))}
-        </select>
-        <input placeholder="主机名" value={hostname} onChange={(event) => setHostname(event.target.value)} required />
-        <input placeholder="记录 ID" value={adoptRecordId} onChange={(event) => setAdoptRecordId(event.target.value)} />
-        <input type="number" min={30} max={86400} value={ttl} onChange={(event) => setTtl(Number(event.target.value))} />
-        <button>
+      <form className="panel createGroupPanel" onSubmit={createGroup}>
+        <div className="panelTitle">
+          <h2>新建切换组</h2>
+          <p>一个切换组只管理一个主机名，备用目标在创建后继续添加。</p>
+        </div>
+        <div className="groupCreateGrid">
+          <label>
+            搜索域名区域
+            <input placeholder="输入域名筛选" value={zoneQuery} onChange={(event) => setZoneQuery(event.target.value)} />
+          </label>
+          <label>
+            域名区域
+            <select value={zoneId} onChange={(event) => setZoneId(event.target.value ? Number(event.target.value) : "")} required>
+              <option value="">请选择域名区域</option>
+              {filteredZones.map((zone) => (
+                <option key={zone.id} value={zone.id}>{zone.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            主机名
+            <input placeholder="例如 a.example.com" value={hostname} onChange={(event) => setHostname(event.target.value)} required />
+          </label>
+          <label>
+            接管记录 ID（可选）
+            <input className="monoInput" placeholder="从解析记录点管理时自动填写" value={adoptRecordId} onChange={(event) => setAdoptRecordId(event.target.value)} />
+          </label>
+          <label>
+            TTL（秒）
+            <input type="number" min={30} max={86400} value={ttl} onChange={(event) => setTtl(Number(event.target.value))} />
+          </label>
+        </div>
+        {adoptRecordId && (
+          <div className="recordIdNotice">
+            <strong>{seededRecordMatches ? "已选择要接管的 Cloudflare 记录" : "Cloudflare 记录 ID"}</strong>
+            {seededRecordMatches && <span>{seed?.record_type || "DNS"} {seed?.hostname} {seed?.content ? `-> ${seed.content}` : ""}</span>}
+            <code>{adoptRecordId}</code>
+          </div>
+        )}
+        <button className="createGroupButton">
           <Plus size={16} />
           <span>创建组</span>
         </button>
@@ -626,10 +741,23 @@ function GroupsPanel({ token, zones, groups, act }: { token: string; zones: Zone
 
 function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token: string; agents: Agent[]; agentToken: string; setAgentToken: (value: string) => void; act: <T>(fn: () => Promise<T>, done?: string) => Promise<void> }) {
   const [name, setName] = useState("");
+  const [copied, setCopied] = useState(false);
   const panelUrl = window.location.origin;
+  const installScriptUrl = `${panelUrl}/api/agent/install.sh`;
+  const runInstallCommand = `CONTROL_URL=${shellQuote(panelUrl)} AGENT_TOKEN=${shellQuote(agentToken)} bash /tmp/cloudflare-dns-agent-install.sh`;
+  const sudoInstallCommand = `sudo env CONTROL_URL=${shellQuote(panelUrl)} AGENT_TOKEN=${shellQuote(agentToken)} bash /tmp/cloudflare-dns-agent-install.sh`;
+  const installCommand = `curl -fsSL ${shellQuote(installScriptUrl)} -o /tmp/cloudflare-dns-agent-install.sh && if [ "$(id -u)" -eq 0 ]; then ${runInstallCommand}; else ${sudoInstallCommand}; fi`;
+  const isLocalPanelUrl = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/.test(panelUrl);
+
+  async function copyInstallCommand() {
+    await navigator.clipboard.writeText(installCommand);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1800);
+  }
 
   async function createAgent(event: FormEvent) {
     event.preventDefault();
+    setCopied(false);
     await act(async () => {
       const data = await apiFetch<{ token: string }>("/api/agents", token, {
         method: "POST",
@@ -654,10 +782,19 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
         </button>
         {agentToken && (
           <div className="agentSecret">
+            <h3>一键安装命令</h3>
+            <p>复制下面整条命令到中国服务器的 root 终端执行。安装后会自动创建 <code>cloudflare-dns-agent</code> 服务，并持续从面板拉取探测任务。</p>
+            {isLocalPanelUrl && <p className="warningText">当前面板地址是本地地址，复制到服务器前请把命令里的 <code>{panelUrl}</code> 改成你的面板公网 HTTPS 地址。</p>}
+            <div className="commandHeader">
+              <span>只显示这一次，创建后请立即保存或执行。</span>
+              <button type="button" className="miniBtn" onClick={copyInstallCommand}>
+                <Copy size={14} />
+                <span>{copied ? "已复制" : "复制"}</span>
+              </button>
+            </div>
+            <pre className="tokenBox commandBox">{installCommand}</pre>
             <h3>探针注册令牌</h3>
-            <p>这串内容是中国服务器 Agent 的身份令牌，只显示这一次。把它填到中国服务器的 <code>AGENT_TOKEN</code>，<code>CONTROL_URL</code> 填你的面板公网地址。</p>
             <pre className="tokenBox">{agentToken}</pre>
-            <pre className="tokenBox commandBox">{`CONTROL_URL=${panelUrl} AGENT_TOKEN=${agentToken} python agent.py`}</pre>
           </div>
         )}
       </form>
@@ -684,6 +821,70 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
   );
 }
 
+function AccountPanel({ token, onPasswordChanged }: { token: string; onPasswordChanged: () => void }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setMessage("");
+    setError("");
+    if (newPassword !== confirmPassword) {
+      setError("两次输入的新密码不一致");
+      return;
+    }
+    setBusy(true);
+    try {
+      await apiFetch("/api/auth/password", token, {
+        method: "PATCH",
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+      });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setMessage("密码已修改，请用新密码重新登录");
+      window.setTimeout(onPasswordChanged, 900);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "密码修改失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel accountPanel">
+      <div className="panelTitle">
+        <h2>修改登录密码</h2>
+        <p>输入当前密码和新密码。修改成功后会自动退出登录。</p>
+      </div>
+      {message && <div className="notice">{message}</div>}
+      {error && <div className="error">{error}</div>}
+      <form onSubmit={submit}>
+        <label>
+          当前密码
+          <input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required />
+        </label>
+        <label>
+          新密码
+          <input type="password" minLength={8} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required />
+        </label>
+        <label>
+          确认新密码
+          <input type="password" minLength={8} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required />
+        </label>
+        <button disabled={busy}>
+          <LockKeyhole size={16} />
+          <span>{busy ? "保存中" : "保存新密码"}</span>
+        </button>
+      </form>
+    </section>
+  );
+}
+
 function NotificationsPanel({
   token,
   telegramNotifications,
@@ -698,6 +899,13 @@ function NotificationsPanel({
   const [telegramName, setTelegramName] = useState("");
   const [botToken, setBotToken] = useState("");
   const [chatId, setChatId] = useState("");
+  const [editingTelegramId, setEditingTelegramId] = useState<number | null>(null);
+  const [telegramEdit, setTelegramEdit] = useState<{ name: string; chat_id: string; bot_token: string; enabled: boolean }>({
+    name: "",
+    chat_id: "",
+    bot_token: "",
+    enabled: true
+  });
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [secret, setSecret] = useState("");
@@ -732,6 +940,32 @@ function NotificationsPanel({
     setSecret("");
   }
 
+  function beginEditTelegram(item: TelegramNotification) {
+    setEditingTelegramId(item.id);
+    setTelegramEdit({ name: item.name, chat_id: item.chat_id, bot_token: "", enabled: item.enabled });
+  }
+
+  async function saveTelegramEdit(itemId: number) {
+    const payload: Record<string, string | boolean> = {
+      name: telegramEdit.name,
+      chat_id: telegramEdit.chat_id,
+      enabled: telegramEdit.enabled
+    };
+    if (telegramEdit.bot_token.trim()) {
+      payload.bot_token = telegramEdit.bot_token.trim();
+    }
+    await act(
+      () =>
+        apiFetch(`/api/telegram/${itemId}`, token, {
+          method: "PATCH",
+          body: JSON.stringify(payload)
+        }),
+      "Telegram 通知已更新"
+    );
+    setEditingTelegramId(null);
+    setTelegramEdit({ name: "", chat_id: "", bot_token: "", enabled: true });
+  }
+
   return (
     <section className="stack">
       <div className="gridTwo">
@@ -747,20 +981,47 @@ function NotificationsPanel({
           <div className="list">
             {telegramNotifications.map((item) => (
               <div className="row" key={item.id}>
-                <div>
-                  <strong>{item.name}</strong>
-                  <span>{item.chat_id} · {fmtDate(item.last_sent_at)}</span>
-                  {item.last_error && <small className="danger">{item.last_error}</small>}
-                </div>
-                <div className="rowActions">
-                  <Status value={item.enabled ? "enabled" : "disabled"} />
-                  <button className="icon" title="发送测试" onClick={() => act(() => apiFetch(`/api/telegram/${item.id}/test`, token, { method: "POST" }), "Telegram 测试通知已发送")}>
-                    <Play size={15} />
-                  </button>
-                  <button className="icon dangerBtn" title="删除 Telegram" onClick={() => act(() => apiFetch(`/api/telegram/${item.id}`, token, { method: "DELETE" }), "Telegram 通知已删除")}>
-                    <Trash2 size={15} />
-                  </button>
-                </div>
+                {editingTelegramId === item.id ? (
+                  <>
+                    <div className="editGrid">
+                      <input value={telegramEdit.name} onChange={(event) => setTelegramEdit((current) => ({ ...current, name: event.target.value }))} placeholder="名称" />
+                      <input value={telegramEdit.chat_id} onChange={(event) => setTelegramEdit((current) => ({ ...current, chat_id: event.target.value }))} placeholder="Chat ID" />
+                      <input value={telegramEdit.bot_token} onChange={(event) => setTelegramEdit((current) => ({ ...current, bot_token: event.target.value }))} placeholder="新 Bot Token，留空不修改" />
+                      <label className="inlineCheck">
+                        <input type="checkbox" checked={telegramEdit.enabled} onChange={(event) => setTelegramEdit((current) => ({ ...current, enabled: event.target.checked }))} />
+                        启用
+                      </label>
+                    </div>
+                    <div className="rowActions">
+                      <button className="icon" title="保存" onClick={() => saveTelegramEdit(item.id)}>
+                        <Save size={15} />
+                      </button>
+                      <button className="icon secondaryIcon" title="取消" onClick={() => setEditingTelegramId(null)}>
+                        ×
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <strong>{item.name}</strong>
+                      <span>{item.chat_id} · {fmtDate(item.last_sent_at)}</span>
+                      {item.last_error && <small className="danger">{item.last_error}</small>}
+                    </div>
+                    <div className="rowActions">
+                      <Status value={item.enabled ? "enabled" : "disabled"} />
+                      <button className="icon secondaryIcon" title="修改" onClick={() => beginEditTelegram(item)}>
+                        ✎
+                      </button>
+                      <button className="icon" title="发送测试" onClick={() => act(() => apiFetch(`/api/telegram/${item.id}/test`, token, { method: "POST" }), "Telegram 测试通知已发送")}>
+                        <Play size={15} />
+                      </button>
+                      <button className="icon dangerBtn" title="删除 Telegram" onClick={() => act(() => apiFetch(`/api/telegram/${item.id}`, token, { method: "DELETE" }), "Telegram 通知已删除")}>
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             ))}
           </div>
