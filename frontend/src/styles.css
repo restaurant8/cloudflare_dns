@@ -520,15 +520,10 @@ form.panel {
   background: #f6f9fc;
   border: 1px solid #dbe6ef;
   border-radius: 8px;
-  cursor: grab;
   display: grid;
   gap: 10px;
   grid-template-columns: minmax(0, 1fr) auto;
   padding: 10px 12px;
-}
-
-.poolItem:active {
-  cursor: grabbing;
 }
 
 .poolItemMain {
@@ -568,16 +563,6 @@ form.panel {
 .groupHead h2 {
   font-size: 17px;
   margin: 0;
-}
-
-.dropHint {
-  background: #f6f9fc;
-  border: 1px dashed #b7c7d8;
-  border-radius: 6px;
-  color: #667789;
-  font-size: 12px;
-  margin: 12px 16px;
-  padding: 6px 8px;
 }
 
 .rowActions {
@@ -1129,11 +1114,6 @@ form.panel {
 
   .originList {
     padding: 0 10px 12px;
-  }
-
-  .dropHint {
-    margin-left: 10px;
-    margin-right: 10px;
   }
 
   table {

@@ -1,4 +1,4 @@
-import { DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   Cloud,
@@ -826,7 +826,9 @@ function GroupsPanel({
   const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
   const [originEdits, setOriginEdits] = useState<Record<number, OriginEditDraft>>({});
   const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
+  const enabledPoolItems = targetPool.filter((item) => item.enabled);
   const addTargetType = inferDraftTargetType(originAdd.target);
+  const selectedPoolItemId = enabledPoolItems.find((item) => item.target === originAdd.target && item.port === originAdd.port)?.id || "";
 
   async function createPoolItem(event: FormEvent) {
     event.preventDefault();
@@ -882,38 +884,6 @@ function GroupsPanel({
     }
   }
 
-  function dragPoolItem(event: DragEvent, item: TargetPoolItem) {
-    event.dataTransfer.setData("application/x-target-pool", JSON.stringify({ id: item.id, target: item.target, port: item.port }));
-    event.dataTransfer.effectAllowed = "copy";
-  }
-
-  function allowPoolDrop(event: DragEvent) {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-  }
-
-  async function dropPoolItem(event: DragEvent, group: FailoverGroup) {
-    event.preventDefault();
-    const raw = event.dataTransfer.getData("application/x-target-pool");
-    if (!raw) return;
-    const item = JSON.parse(raw) as { target: string; port: number };
-    const maxPriority = group.origins.reduce((value, origin) => Math.max(value, origin.priority), 0);
-    await act(
-      () =>
-        apiFetch(`/api/groups/${group.id}/origins`, token, {
-          method: "POST",
-          body: JSON.stringify({
-            target: item.target,
-            port: item.port || 22,
-            priority: maxPriority + 10,
-            publish_mode: "direct",
-            enabled: true
-          })
-        }),
-      "已从目标池添加备用"
-    );
-  }
-
   function beginAddOrigin(group: FailoverGroup) {
     const maxPriority = group.origins.reduce((value, origin) => Math.max(value, origin.priority), 0);
     setAddingGroupId(group.id);
@@ -924,6 +894,18 @@ function GroupsPanel({
       publish_mode: "direct",
       enabled: true
     });
+  }
+
+  function selectPoolItem(itemId: number) {
+    const item = targetPool.find((poolItem) => poolItem.id === itemId);
+    if (!item) return;
+    setOriginAdd((current) => ({
+      ...current,
+      target: item.target,
+      port: item.port || 22,
+      publish_mode: "direct",
+      enabled: true
+    }));
   }
 
   async function createOrigin() {
@@ -1018,7 +1000,7 @@ function GroupsPanel({
         <form className="panel targetPoolForm" onSubmit={createPoolItem}>
           <div className="panelTitle">
             <h2>目标池</h2>
-            <p>把常用 IP、IPv6 或域名先放进池子，拖到下面的故障组即可加入为备用目标。</p>
+            <p>把常用 IP、IPv6 或域名先放进池子，添加备用时可直接选择。</p>
           </div>
           <div className="poolFormGrid">
             <label>
@@ -1042,7 +1024,7 @@ function GroupsPanel({
         <div className="panel poolListPanel">
           <div className="panelTitle">
             <h2>池子列表</h2>
-            <p>按住目标拖到故障组卡片上，系统会按默认备用优先级添加。</p>
+            <p>点击故障组里的添加备用按钮，即可从这里选择目标。</p>
           </div>
           <div className="poolList">
             {targetPool.map((item) => {
@@ -1053,7 +1035,7 @@ function GroupsPanel({
                 enabled: item.enabled
               };
               return (
-                <div className="poolItem" key={item.id} draggable={editingPoolId !== item.id && item.enabled} onDragStart={(event) => dragPoolItem(event, item)}>
+                <div className="poolItem" key={item.id}>
                   {editingPoolId === item.id ? (
                     <>
                       <div className="poolEditGrid">
@@ -1108,7 +1090,7 @@ function GroupsPanel({
           const sortedOrigins = [...group.origins].sort((left, right) => left.priority - right.priority || left.id - right.id);
           const primaryPriority = sortedOrigins[0]?.priority;
           return (
-            <article className="groupCard" key={group.id} onDragOver={allowPoolDrop} onDrop={(event) => dropPoolItem(event, group)}>
+            <article className="groupCard" key={group.id}>
               <div className="groupHead">
                 <div>
                   <h2>{group.hostname}</h2>
@@ -1132,7 +1114,6 @@ function GroupsPanel({
                   </button>
                 </div>
               </div>
-              <div className="dropHint">把目标池里的 IP / 域名拖到这里，即可加入为备用目标。</div>
               {editingGroupId === group.id && (
                 <div className="groupSettingsEdit">
                   <label>
@@ -1290,6 +1271,17 @@ function GroupsPanel({
               <h2>添加备用目标</h2>
               <p>{addingGroup.hostname}</p>
             </div>
+            <label>
+              从目标池选择
+              <select value={selectedPoolItemId} onChange={(event) => selectPoolItem(Number(event.target.value))} disabled={enabledPoolItems.length === 0}>
+                <option value="">{enabledPoolItems.length > 0 ? "选择一个池子目标，或在下方手动输入" : "目标池暂无可用目标"}</option>
+                {enabledPoolItems.map((item) => (
+                  <option value={item.id} key={item.id}>
+                    {item.target}:{item.port}{item.remark ? ` · ${item.remark}` : ""} · {targetTypeText(item.target_type)}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label>
               备用 IP / IPv6 / 域名
               <input placeholder="例如 192.0.2.10 或 backup.example.com" value={originAdd.target} onChange={(event) => setOriginAdd((current) => ({ ...current, target: event.target.value }))} />
