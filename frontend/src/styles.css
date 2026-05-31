@@ -37,11 +37,50 @@ button {
   justify-content: center;
   min-height: 38px;
   padding: 0 14px;
+  position: relative;
+  transition: background-color 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease, transform 0.1s ease;
 }
 
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+button:not(:disabled):hover {
+  filter: brightness(0.97);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+}
+
+button:not(:disabled):active,
+button.buttonClicked:not(:disabled) {
+  transform: translateY(1px) scale(0.985);
+}
+
+button.buttonClicked:not(:disabled)::after {
+  animation: buttonClickPulse 360ms ease-out;
+  border: 2px solid currentColor;
+  border-radius: inherit;
+  content: "";
+  inset: -3px;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+button:focus-visible {
+  outline: 3px solid rgba(23, 107, 135, 0.24);
+  outline-offset: 2px;
+}
+
+@keyframes buttonClickPulse {
+  0% {
+    opacity: 0.4;
+    transform: scale(0.98);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.08);
+  }
 }
 
 button.secondary {
@@ -335,7 +374,11 @@ button.zonePill.active {
 }
 
 .groupCard {
-  padding: 12px 14px;
+  border-color: #cfdbe7;
+  border-left: 4px solid #176b87;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
+  overflow: hidden;
+  padding: 0;
 }
 
 .stack {
@@ -427,7 +470,7 @@ form.panel {
 
 .groupGrid {
   display: grid;
-  gap: 12px;
+  gap: 22px;
   grid-template-columns: 1fr;
 }
 
@@ -513,61 +556,18 @@ form.panel {
 
 .groupHead {
   align-items: flex-start;
+  background: #f8fbfd;
+  border-bottom: 1px solid #e2eaf2;
   display: flex;
   gap: 12px;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: 0;
+  padding: 14px 16px 12px;
 }
 
-.groupSummary {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin-bottom: 8px;
-}
-
-.summaryBox {
-  border: 1px solid #dbe6ef;
-  border-radius: 8px;
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  padding: 8px 10px;
-}
-
-.summaryBox span {
-  color: #667789;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.summaryBox strong {
-  color: #18212f;
-  font-size: 14px;
-  overflow-wrap: anywhere;
-}
-
-.summaryBox small {
-  color: #667789;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.primarySummary {
-  background: #f0fdf4;
-  border-color: #bbf7d0;
-}
-
-.currentSummary {
-  background: #eff6ff;
-  border-color: #bfdbfe;
-}
-
-.backupSummary {
-  background: #fff7ed;
-  border-color: #fed7aa;
+.groupHead h2 {
+  font-size: 17px;
+  margin: 0;
 }
 
 .dropHint {
@@ -576,7 +576,7 @@ form.panel {
   border-radius: 6px;
   color: #667789;
   font-size: 12px;
-  margin-bottom: 8px;
+  margin: 12px 16px;
   padding: 6px 8px;
 }
 
@@ -623,7 +623,18 @@ form.panel {
 
 .originList {
   display: grid;
-  gap: 4px;
+  gap: 8px;
+  padding: 0 16px 14px;
+}
+
+.originList .origin {
+  border: 1px solid #edf1f5;
+  border-radius: 8px;
+  padding: 10px 10px;
+}
+
+.originList .origin:not(.originCurrent):not(.originEditing) {
+  background: #ffffff;
 }
 
 .origin.originCurrent {
@@ -696,6 +707,51 @@ form.panel {
   color: #667789;
   font-size: 12px;
   grid-column: 1 / -1;
+}
+
+.expandedIpList {
+  background: #f6f9fc;
+  border: 1px solid #dbe6ef;
+  border-radius: 6px;
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 10px;
+}
+
+.ipListRow {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 70px minmax(0, 1fr);
+}
+
+.ipListRow > span {
+  color: #667789;
+  font-size: 12px;
+  font-weight: 800;
+  margin: 0;
+}
+
+.ipListRow > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.ipListRow code,
+.ipListRow em {
+  background: #e9eff6;
+  border-radius: 999px;
+  color: #26374a;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+  padding: 3px 7px;
+}
+
+.ipListRow em {
+  color: #667789;
 }
 
 .probeChips {
@@ -1014,8 +1070,9 @@ form.panel {
     flex-direction: column;
   }
 
-  .groupSummary {
-    grid-template-columns: 1fr;
+  .groupHead {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .groupSettingsEdit,
@@ -1039,6 +1096,15 @@ form.panel {
 
   .origin {
     grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .originList {
+    padding: 0 10px 12px;
+  }
+
+  .dropHint {
+    margin-left: 10px;
+    margin-right: 10px;
   }
 
   table {

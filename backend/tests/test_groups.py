@@ -1,8 +1,11 @@
+from types import SimpleNamespace
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import CloudflareCredential, FailoverGroup, Origin, User, Zone
+from app.origin_expansion import EXPANDED_PUBLISH_MODE, resolved_ips
 from app.routes.groups import create_group, update_origin
 from app.schemas import FailoverGroupCreate, OriginUpdate
 from app.security import encrypt_secret
@@ -112,3 +115,22 @@ def test_update_current_origin_publishes_new_dns_target(monkeypatch):
     assert updated.target_type == "ipv6"
     assert FakeCloudflareClient.records[0]["type"] == "AAAA"
     assert FakeCloudflareClient.records[0]["content"] == "2001:db8::5"
+
+
+def test_update_hostname_origin_to_expanded_resolves_ips_immediately(monkeypatch):
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com", ttl=60)
+    db.add(group)
+    db.flush()
+    origin = Origin(group_id=group.id, target="backup.example.net", target_type="hostname", port=443, status="unknown", priority=10)
+    db.add(origin)
+    db.commit()
+
+    monkeypatch.setattr("app.health.resolve_hostname_ips", lambda hostname: ["192.0.2.10", "2001:db8::10"])
+    monkeypatch.setattr("app.health.tcp_check", lambda target, port, timeout: SimpleNamespace(success=True, rtt_ms=1.0, error=None))
+
+    updated = update_origin(origin.id, OriginUpdate(publish_mode=EXPANDED_PUBLISH_MODE), user, db)
+
+    assert updated.publish_mode == EXPANDED_PUBLISH_MODE
+    assert resolved_ips(updated) == ["192.0.2.10", "2001:db8::10"]

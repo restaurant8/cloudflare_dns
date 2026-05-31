@@ -24,23 +24,17 @@ def init_db() -> None:
     from . import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
-    if settings.database_url.startswith("sqlite"):
-        _migrate_sqlite()
+    _migrate_existing_schema()
 
 
-def _migrate_sqlite() -> None:
+def _migrate_existing_schema() -> None:
     inspector = inspect(engine)
     table_names = inspector.get_table_names()
+    dialect = engine.dialect.name
     with engine.begin() as connection:
         if "origins" in table_names:
             existing = {column["name"] for column in inspector.get_columns("origins")}
-            statements = {
-                "publish_mode": "ALTER TABLE origins ADD COLUMN publish_mode VARCHAR(20) NOT NULL DEFAULT 'direct'",
-                "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NOT NULL DEFAULT '[]'",
-                "healthy_ips_json": "ALTER TABLE origins ADD COLUMN healthy_ips_json TEXT NOT NULL DEFAULT '[]'",
-                "published_ips_json": "ALTER TABLE origins ADD COLUMN published_ips_json TEXT NOT NULL DEFAULT '[]'",
-            }
-            for column_name, statement in statements.items():
+            for column_name, statement in _origin_migration_statements(dialect).items():
                 if column_name not in existing:
                     connection.execute(text(statement))
 
@@ -48,6 +42,22 @@ def _migrate_sqlite() -> None:
             existing = {column["name"] for column in inspector.get_columns("agents")}
             if "region" not in existing:
                 connection.execute(text("ALTER TABLE agents ADD COLUMN region VARCHAR(20) NOT NULL DEFAULT 'china'"))
+
+
+def _origin_migration_statements(dialect: str) -> dict[str, str]:
+    if dialect == "mysql":
+        return {
+            "publish_mode": "ALTER TABLE origins ADD COLUMN publish_mode VARCHAR(20) NOT NULL DEFAULT 'direct'",
+            "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NULL",
+            "healthy_ips_json": "ALTER TABLE origins ADD COLUMN healthy_ips_json TEXT NULL",
+            "published_ips_json": "ALTER TABLE origins ADD COLUMN published_ips_json TEXT NULL",
+        }
+    return {
+        "publish_mode": "ALTER TABLE origins ADD COLUMN publish_mode VARCHAR(20) NOT NULL DEFAULT 'direct'",
+        "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NOT NULL DEFAULT '[]'",
+        "healthy_ips_json": "ALTER TABLE origins ADD COLUMN healthy_ips_json TEXT NOT NULL DEFAULT '[]'",
+        "published_ips_json": "ALTER TABLE origins ADD COLUMN published_ips_json TEXT NOT NULL DEFAULT '[]'",
+    }
 
 
 def get_db():

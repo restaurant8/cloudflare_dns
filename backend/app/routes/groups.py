@@ -227,10 +227,15 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
         set_healthy_ips(origin, [])
         set_published_ips(origin, [])
 
+    checked_expanded_now = False
+    if endpoint_changed and origin.publish_mode == EXPANDED_PUBLISH_MODE:
+        run_local_checks(db, origin_id=origin.id, include_all=True)
+        checked_expanded_now = True
+
     should_publish_current = group.current_origin_id == origin.id and origin.enabled and target_changed
     if should_publish_current:
         try:
-            if origin.publish_mode == EXPANDED_PUBLISH_MODE:
+            if origin.publish_mode == EXPANDED_PUBLISH_MODE and not checked_expanded_now:
                 run_local_checks(db, origin_id=origin.id, include_all=True)
             record = publish_origin(db, group, origin)
         except Exception as exc:

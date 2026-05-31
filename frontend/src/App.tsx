@@ -40,6 +40,8 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "events", label: "事件", icon: DatabaseZap }
 ];
 
+const sectionStorageKey = "cloudflareDnsActiveSection";
+
 const statusLabels: Record<string, string> = {
   ok: "正常",
   error: "错误",
@@ -104,6 +106,17 @@ function probeSourceText(value: string): string {
   return value;
 }
 
+function IpList({ label, values, empty = "暂无" }: { label: string; values: string[]; empty?: string }) {
+  return (
+    <div className="ipListRow">
+      <span>{label}</span>
+      <div>
+        {values.length > 0 ? values.map((value) => <code key={value}>{value}</code>) : <em>{empty}</em>}
+      </div>
+    </div>
+  );
+}
+
 function inferDraftTargetType(value: string): string {
   const cleaned = value.trim();
   if (!cleaned) return "";
@@ -120,9 +133,25 @@ function eventTypeText(value: string): string {
   return eventTypeLabels[value] || value;
 }
 
-function originLabel(origin: Origin | undefined): string {
-  if (!origin) return "尚未发布";
-  return `${origin.target}:${origin.port}`;
+function isSection(value: string | null | undefined): value is Section {
+  return nav.some((item) => item.id === value);
+}
+
+function sectionFromHash(): Section | null {
+  if (typeof window === "undefined") return null;
+  const value = window.location.hash.replace(/^#/, "");
+  return isSection(value) ? value : null;
+}
+
+function initialSection(): Section {
+  const hashSection = sectionFromHash();
+  if (hashSection) return hashSection;
+  try {
+    const stored = localStorage.getItem(sectionStorageKey);
+    return isSection(stored) ? stored : "overview";
+  } catch {
+    return "overview";
+  }
 }
 
 function zoneMatches(zone: Zone, query: string): boolean {
@@ -159,7 +188,7 @@ export default function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem("accessToken"));
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
   const [bootError, setBootError] = useState("");
-  const [section, setSection] = useState<Section>("overview");
+  const [section, setSection] = useState<Section>(() => initialSection());
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [liveUpdatedAt, setLiveUpdatedAt] = useState<string | null>(null);
@@ -237,7 +266,7 @@ export default function App() {
 
   async function act<T>(fn: () => Promise<T>, done = "已完成") {
     setBusy(true);
-    setMessage("");
+    setMessage("正在处理，请稍候...");
     try {
       await fn();
       setMessage(done);
@@ -257,10 +286,49 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    function markClickedButton(event: MouseEvent) {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const button = target.closest("button");
+      if (!button || button.disabled) return;
+      button.classList.remove("buttonClicked");
+      void button.offsetWidth;
+      button.classList.add("buttonClicked");
+      window.setTimeout(() => button.classList.remove("buttonClicked"), 360);
+    }
+
+    document.addEventListener("click", markClickedButton, true);
+    return () => document.removeEventListener("click", markClickedButton, true);
+  }, []);
+
+  useEffect(() => {
     if (token) {
       loadAll(token).catch((error) => setMessage(error.message));
     }
   }, [token]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(sectionStorageKey, section);
+    } catch {
+      // Ignore private browsing or storage-disabled environments.
+    }
+    const nextHash = `#${section}`;
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${nextHash}`);
+    }
+  }, [section]);
+
+  useEffect(() => {
+    function syncSectionFromHash() {
+      const nextSection = sectionFromHash();
+      if (nextSection) {
+        setSection(nextSection);
+      }
+    }
+    window.addEventListener("hashchange", syncSectionFromHash);
+    return () => window.removeEventListener("hashchange", syncSectionFromHash);
+  }, []);
 
   useEffect(() => {
     if (!token) return;
@@ -361,7 +429,7 @@ export default function App() {
           </div>
         </header>
 
-        {message && <div className="notice">{message}</div>}
+        {message && <div className="notice" aria-live="polite">{message}</div>}
 
         {section === "overview" && <OverviewPanel overview={overview} />}
         {section === "cloudflare" && (
@@ -878,7 +946,7 @@ function GroupsPanel({
         target: origin.target,
         port: origin.port,
         priority: origin.priority,
-        publish_mode: origin.publish_mode,
+        publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
         enabled: origin.enabled
       }
     }));
@@ -999,10 +1067,6 @@ function GroupsPanel({
           };
           const sortedOrigins = [...group.origins].sort((left, right) => left.priority - right.priority || left.id - right.id);
           const primaryPriority = sortedOrigins[0]?.priority;
-          const primaryOrigins = sortedOrigins.filter((origin) => origin.priority === primaryPriority);
-          const primaryOrigin = primaryOrigins[0];
-          const currentOrigin = group.origins.find((origin) => origin.id === group.current_origin_id);
-          const backupOrigins = group.origins.filter((origin) => origin.priority !== primaryPriority);
           return (
             <article className="groupCard" key={group.id} onDragOver={allowPoolDrop} onDrop={(event) => dropPoolItem(event, group)}>
               <div className="groupHead">
@@ -1026,23 +1090,6 @@ function GroupsPanel({
                   <button className="icon dangerBtn" title="删除切换组" onClick={() => act(() => apiFetch(`/api/groups/${group.id}`, token, { method: "DELETE" }), "切换组已删除")}>
                     <Trash2 size={15} />
                   </button>
-                </div>
-              </div>
-              <div className="groupSummary">
-                <div className="summaryBox primarySummary">
-                  <span>主用目标</span>
-                  <strong>{originLabel(primaryOrigin)}</strong>
-                  <small>{primaryOrigin ? `优先级 ${primaryOrigin.priority} · ${recordTypeForTargetType(primaryOrigin.target_type, primaryOrigin.publish_mode)}` : "还没有源站"}</small>
-                </div>
-                <div className="summaryBox currentSummary">
-                  <span>当前使用</span>
-                  <strong>{originLabel(currentOrigin)}</strong>
-                  <small>{currentOrigin ? `${recordTypeForTargetType(currentOrigin.target_type, currentOrigin.publish_mode)} · ${statusText(currentOrigin.status)}` : "等待健康检查后发布"}</small>
-                </div>
-                <div className="summaryBox backupSummary">
-                  <span>备用目标</span>
-                  <strong>{backupOrigins.length} 个</strong>
-                  <small>{backupOrigins.length > 0 ? backupOrigins.map((origin) => originLabel(origin)).slice(0, 2).join("，") : "还没有备用"}</small>
                 </div>
               </div>
               <div className="dropHint">把目标池里的 IP / 域名拖到这里，即可加入为备用目标。</div>
@@ -1077,6 +1124,7 @@ function GroupsPanel({
                     target: origin.target,
                     port: origin.port,
                     priority: origin.priority,
+                    publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
                     enabled: origin.enabled
                   };
                   const editType = inferDraftTargetType(originEdit.target);
@@ -1108,7 +1156,12 @@ function GroupsPanel({
                                 type="checkbox"
                                 disabled={editType !== "hostname"}
                                 checked={editType === "hostname" && originEdit.publish_mode === "expanded"}
-                                onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, publish_mode: event.target.checked ? "expanded" : "direct" } }))}
+                                onChange={(event) =>
+                                  setOriginEdits((current) => {
+                                    const draft = current[origin.id] || originEdit;
+                                    return { ...current, [origin.id]: { ...draft, publish_mode: event.target.checked ? "expanded" : "direct" } };
+                                  })
+                                }
                               />
                               展开 IP 池
                             </label>
@@ -1140,9 +1193,11 @@ function GroupsPanel({
                             </div>
                             <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · {origin.enabled ? "已启用" : "已停用"} · {fmtDate(origin.last_checked_at)}</span>
                             {origin.publish_mode === "expanded" && (
-                              <small>
-                                解析 {origin.resolved_ips.length} 个 · 健康 {origin.healthy_ips.length} 个 · 已发布 {origin.published_ips.length} 个
-                              </small>
+                              <div className="expandedIpList">
+                                <IpList label="解析 IP" values={origin.resolved_ips} empty="尚未解析，点击手动检测或等待下个周期" />
+                                <IpList label="健康 IP" values={origin.healthy_ips} />
+                                <IpList label="已发布" values={origin.published_ips} empty="当前未发布该目标" />
+                              </div>
                             )}
                             {origin.last_error && <small className="danger">{origin.last_error}</small>}
                             {origin.probe_states.length > 0 && (
