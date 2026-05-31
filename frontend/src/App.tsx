@@ -106,6 +106,20 @@ function probeSourceText(value: string): string {
   return value;
 }
 
+function probeSourceIp(value: string): string | null {
+  const [, ip] = value.split("|");
+  return ip || null;
+}
+
+function currentProbeStates(origin: Origin) {
+  if (origin.publish_mode !== "expanded") return origin.probe_states;
+  const currentIps = new Set(origin.resolved_ips);
+  return origin.probe_states.filter((probe) => {
+    const ip = probeSourceIp(probe.source_key);
+    return !ip || currentIps.has(ip);
+  });
+}
+
 function IpList({ label, values, empty = "暂无" }: { label: string; values: string[]; empty?: string }) {
   return (
     <div className="ipListRow">
@@ -1146,6 +1160,8 @@ function GroupsPanel({
                   const editType = inferDraftTargetType(originEdit.target);
                   const isCurrentOrigin = group.current_origin_id === origin.id;
                   const isPrimaryOrigin = origin.priority === primaryPriority;
+                  const visibleProbeStates = currentProbeStates(origin);
+                  const hiddenProbeCount = origin.probe_states.length - visibleProbeStates.length;
                   return (
                     <div
                       className={`origin ${editingOriginId === origin.id ? "originEditing" : ""} ${isCurrentOrigin ? "originCurrent" : ""} ${isPrimaryOrigin ? "originPrimary" : "originBackup"}`}
@@ -1216,13 +1232,18 @@ function GroupsPanel({
                               </div>
                             )}
                             {origin.last_error && <small className="danger">{origin.last_error}</small>}
-                            {origin.probe_states.length > 0 && (
+                            {(visibleProbeStates.length > 0 || hiddenProbeCount > 0) && (
                               <div className="probeChips">
-                                {origin.probe_states.map((probe) => (
+                                {visibleProbeStates.map((probe) => (
                                   <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || ""}>
                                     {probeSourceText(probe.source_key)}：{statusText(probe.status)}
                                   </span>
                                 ))}
+                                {hiddenProbeCount > 0 && (
+                                  <span className="probeChip muted" title="这些是已经不在当前解析 IP 列表里的历史探测状态">
+                                    已隐藏历史 IP {hiddenProbeCount} 条
+                                  </span>
+                                )}
                               </div>
                             )}
                           </div>

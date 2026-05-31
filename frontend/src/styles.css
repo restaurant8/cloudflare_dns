@@ -780,6 +780,12 @@ form.panel {
   color: #b42318;
 }
 
+.probeChip.muted {
+  background: #f1f5f9;
+  color: #64748b;
+  font-weight: 600;
+}
+
 .originHint {
   color: #667789;
   font-size: 12px;
