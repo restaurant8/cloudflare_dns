@@ -109,6 +109,7 @@ export type TelegramNotification = {
   id: number;
   name: string;
   chat_id: string;
+  notify_level: string;
   enabled: boolean;
   last_sent_at: string | null;
   last_error: string | null;

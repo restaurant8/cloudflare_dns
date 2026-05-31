@@ -261,6 +261,7 @@ class TelegramNotificationCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     bot_token: str = Field(min_length=20, max_length=200)
     chat_id: str = Field(min_length=1, max_length=120)
+    notify_level: Literal["important", "critical", "all"] = "important"
     enabled: bool = True
 
 
@@ -268,6 +269,7 @@ class TelegramNotificationUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     bot_token: str | None = Field(default=None, min_length=20, max_length=200)
     chat_id: str | None = Field(default=None, min_length=1, max_length=120)
+    notify_level: Literal["important", "critical", "all"] | None = None
     enabled: bool | None = None
 
 
@@ -275,6 +277,7 @@ class TelegramNotificationOut(BaseModel):
     id: int
     name: str
     chat_id: str
+    notify_level: str
     enabled: bool
     last_sent_at: datetime | None
     last_error: str | None

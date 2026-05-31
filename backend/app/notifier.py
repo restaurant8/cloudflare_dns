@@ -41,6 +41,22 @@ REGION_NAMES = {
     "foreign": "国外",
 }
 
+TELEGRAM_LEVEL_PRIORITIES = {
+    "all": 10,
+    "important": 20,
+    "critical": 30,
+}
+
+TELEGRAM_EVENT_PRIORITIES = {
+    "origin.status_changed": 10,
+    "agent.status_changed": 10,
+    "cloudflare.synced": 10,
+    "dns.switched": 20,
+    "dns.publish_failed": 30,
+    "failover.no_healthy_origin": 30,
+    "cloudflare.sync_failed": 30,
+}
+
 
 def _decrypt_or_plaintext(value: str) -> str:
     try:
@@ -100,6 +116,20 @@ def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def telegram_event_priority(event_type: str, payload: dict[str, Any]) -> int:
+    if event_type == "telegram.test":
+        return 30
+    if event_type == "agent.status_changed":
+        return 30 if payload.get("status") in {"offline", "disabled"} else 10
+    return TELEGRAM_EVENT_PRIORITIES.get(event_type, 10)
+
+
+def should_send_telegram(channel: TelegramNotification, event_type: str, payload: dict[str, Any]) -> bool:
+    level = getattr(channel, "notify_level", None) or "important"
+    minimum_priority = TELEGRAM_LEVEL_PRIORITIES.get(level, TELEGRAM_LEVEL_PRIORITIES["important"])
+    return telegram_event_priority(event_type, payload) >= minimum_priority
+
+
 def send_webhooks(db: Session, event_type: str, payload: dict[str, Any]) -> None:
     send_telegram_notifications(db, event_type, payload)
     webhooks = db.query(Webhook).filter(Webhook.enabled.is_(True)).all()
@@ -137,8 +167,10 @@ def send_telegram_notifications(db: Session, event_type: str, payload: dict[str,
     if not channels:
         return
 
-    text = render_telegram_message(event_type, payload)
     for channel in channels:
+        if not should_send_telegram(channel, event_type, payload):
+            continue
+        text = render_telegram_message(event_type, payload)
         send_telegram_channel(db, channel, event_type, payload, text=text)
 
 

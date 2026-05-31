@@ -215,6 +215,7 @@ class TelegramNotification(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     bot_token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     chat_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    notify_level: Mapped[str] = mapped_column(String(20), default="important", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_error: Mapped[str | None] = mapped_column(Text)

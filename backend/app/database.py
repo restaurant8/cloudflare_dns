@@ -53,6 +53,11 @@ def _migrate_existing_schema() -> None:
                 elif dialect == "postgresql" and "text" not in column_type:
                     connection.execute(text("ALTER TABLE failover_groups ALTER COLUMN current_record_id TYPE TEXT"))
 
+        if "telegram_notifications" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("telegram_notifications")}
+            if "notify_level" not in existing:
+                connection.execute(text("ALTER TABLE telegram_notifications ADD COLUMN notify_level VARCHAR(20) NOT NULL DEFAULT 'important'"))
+
 
 def _origin_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":

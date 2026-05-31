@@ -80,6 +80,12 @@ const eventTypeLabels: Record<string, string> = {
   "telegram.test": "Telegram 测试"
 };
 
+const telegramNotifyLevelLabels: Record<string, string> = {
+  important: "重要通知",
+  critical: "仅故障",
+  all: "全部通知"
+};
+
 function statusText(value: string): string {
   return statusLabels[value] || value;
 }
@@ -90,6 +96,10 @@ function targetTypeText(value: string): string {
 
 function agentRegionText(value: string): string {
   return value === "foreign" ? "国外探针" : "国内探针";
+}
+
+function telegramNotifyLevelText(value: string): string {
+  return telegramNotifyLevelLabels[value] || value;
 }
 
 function recordTypeForTargetType(value: string, publishMode = "direct"): string {
@@ -1500,11 +1510,13 @@ function NotificationsPanel({
   const [telegramName, setTelegramName] = useState("");
   const [botToken, setBotToken] = useState("");
   const [chatId, setChatId] = useState("");
+  const [telegramNotifyLevel, setTelegramNotifyLevel] = useState("important");
   const [editingTelegramId, setEditingTelegramId] = useState<number | null>(null);
-  const [telegramEdit, setTelegramEdit] = useState<{ name: string; chat_id: string; bot_token: string; enabled: boolean }>({
+  const [telegramEdit, setTelegramEdit] = useState<{ name: string; chat_id: string; bot_token: string; notify_level: string; enabled: boolean }>({
     name: "",
     chat_id: "",
     bot_token: "",
+    notify_level: "important",
     enabled: true
   });
   const [name, setName] = useState("");
@@ -1517,13 +1529,14 @@ function NotificationsPanel({
       () =>
         apiFetch("/api/telegram", token, {
           method: "POST",
-          body: JSON.stringify({ name: telegramName, bot_token: botToken, chat_id: chatId, enabled: true })
+          body: JSON.stringify({ name: telegramName, bot_token: botToken, chat_id: chatId, notify_level: telegramNotifyLevel, enabled: true })
         }),
       "Telegram 通知已保存"
     );
     setTelegramName("");
     setBotToken("");
     setChatId("");
+    setTelegramNotifyLevel("important");
   }
 
   async function submitWebhook(event: FormEvent) {
@@ -1543,13 +1556,14 @@ function NotificationsPanel({
 
   function beginEditTelegram(item: TelegramNotification) {
     setEditingTelegramId(item.id);
-    setTelegramEdit({ name: item.name, chat_id: item.chat_id, bot_token: "", enabled: item.enabled });
+    setTelegramEdit({ name: item.name, chat_id: item.chat_id, bot_token: "", notify_level: item.notify_level || "important", enabled: item.enabled });
   }
 
   async function saveTelegramEdit(itemId: number) {
     const payload: Record<string, string | boolean> = {
       name: telegramEdit.name,
       chat_id: telegramEdit.chat_id,
+      notify_level: telegramEdit.notify_level,
       enabled: telegramEdit.enabled
     };
     if (telegramEdit.bot_token.trim()) {
@@ -1564,7 +1578,7 @@ function NotificationsPanel({
       "Telegram 通知已更新"
     );
     setEditingTelegramId(null);
-    setTelegramEdit({ name: "", chat_id: "", bot_token: "", enabled: true });
+    setTelegramEdit({ name: "", chat_id: "", bot_token: "", notify_level: "important", enabled: true });
   }
 
   return (
@@ -1575,6 +1589,14 @@ function NotificationsPanel({
           <label>名称<input value={telegramName} onChange={(event) => setTelegramName(event.target.value)} required /></label>
           <label>Bot Token<input value={botToken} onChange={(event) => setBotToken(event.target.value)} required /></label>
           <label>Chat ID<input value={chatId} onChange={(event) => setChatId(event.target.value)} placeholder="例如 123456789 或 -100..." required /></label>
+          <label>
+            通知级别
+            <select value={telegramNotifyLevel} onChange={(event) => setTelegramNotifyLevel(event.target.value)}>
+              <option value="important">重要通知：DNS 切换、故障、探针离线</option>
+              <option value="critical">仅故障：失败、无可用源站、探针离线</option>
+              <option value="all">全部通知：包含源站健康/被墙变化</option>
+            </select>
+          </label>
           <button><RadioTower size={16} /><span>保存</span></button>
         </form>
         <div className="panel">
@@ -1588,6 +1610,11 @@ function NotificationsPanel({
                       <input value={telegramEdit.name} onChange={(event) => setTelegramEdit((current) => ({ ...current, name: event.target.value }))} placeholder="名称" />
                       <input value={telegramEdit.chat_id} onChange={(event) => setTelegramEdit((current) => ({ ...current, chat_id: event.target.value }))} placeholder="Chat ID" />
                       <input value={telegramEdit.bot_token} onChange={(event) => setTelegramEdit((current) => ({ ...current, bot_token: event.target.value }))} placeholder="新 Bot Token，留空不修改" />
+                      <select value={telegramEdit.notify_level} onChange={(event) => setTelegramEdit((current) => ({ ...current, notify_level: event.target.value }))}>
+                        <option value="important">重要通知</option>
+                        <option value="critical">仅故障</option>
+                        <option value="all">全部通知</option>
+                      </select>
                       <label className="inlineCheck">
                         <input type="checkbox" checked={telegramEdit.enabled} onChange={(event) => setTelegramEdit((current) => ({ ...current, enabled: event.target.checked }))} />
                         启用
@@ -1606,7 +1633,7 @@ function NotificationsPanel({
                   <>
                     <div>
                       <strong>{item.name}</strong>
-                      <span>{item.chat_id} · {fmtDate(item.last_sent_at)}</span>
+                      <span>{item.chat_id} · {telegramNotifyLevelText(item.notify_level || "important")} · {fmtDate(item.last_sent_at)}</span>
                       {item.last_error && <small className="danger">{item.last_error}</small>}
                     </div>
                     <div className="rowActions">

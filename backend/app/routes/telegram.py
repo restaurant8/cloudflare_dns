@@ -23,6 +23,7 @@ def create_telegram(payload: TelegramNotificationCreate, _: User = Depends(get_c
         name=payload.name,
         bot_token_encrypted=encrypt_secret(payload.bot_token),
         chat_id=payload.chat_id,
+        notify_level=payload.notify_level,
         enabled=payload.enabled,
     )
     db.add(channel)
