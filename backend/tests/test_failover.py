@@ -3,37 +3,38 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.dns_utils import parse_target
-from app.failover import choose_desired_origin, publish_origin, validate_group_hostname_records
+from app.failover import choose_desired_origin, evaluate_failover_groups, publish_origin, validate_group_hostname_records
 from app.models import CloudflareCredential, FailoverGroup, Origin, Zone
+from app.origin_expansion import EXPANDED_PUBLISH_MODE, set_healthy_ips
 from app.security import encrypt_secret
 
 
-def origin(id_: int, status: str, priority: int, weight: int = 1) -> Origin:
-    return Origin(id=id_, target=f"192.0.2.{id_}", target_type="ipv4", port=443, status=status, priority=priority, weight=weight, enabled=True)
+def origin(id_: int, status: str, priority: int) -> Origin:
+    return Origin(id=id_, target=f"192.0.2.{id_}", target_type="ipv4", port=443, status=status, priority=priority, enabled=True)
 
 
 def test_choose_desired_origin_prefers_priority_then_oldest_origin():
     origins = [
-        origin(1, "healthy", 20, 100),
-        origin(2, "unhealthy", 5, 100),
-        origin(3, "healthy", 10, 1),
-        origin(4, "healthy", 10, 5),
+        origin(1, "healthy", 20),
+        origin(2, "unhealthy", 5),
+        origin(3, "healthy", 10),
+        origin(4, "healthy", 10),
     ]
     assert choose_desired_origin(origins).id == 3
 
 
 def test_choose_desired_origin_ignores_unavailable_regional_statuses():
     origins = [
-        origin(1, "blocked", 1, 100),
-        origin(2, "machine_down", 2, 100),
-        origin(3, "regional_issue", 3, 100),
-        origin(4, "healthy", 10, 1),
+        origin(1, "blocked", 1),
+        origin(2, "machine_down", 2),
+        origin(3, "regional_issue", 3),
+        origin(4, "healthy", 10),
     ]
     assert choose_desired_origin(origins).id == 4
 
 
 def test_choose_desired_origin_keeps_current_when_same_best_priority():
-    origins = [origin(1, "healthy", 10, 1), origin(2, "healthy", 10, 100)]
+    origins = [origin(1, "healthy", 10), origin(2, "healthy", 10)]
     assert choose_desired_origin(origins, current_origin_id=1).id == 1
 
 
@@ -75,7 +76,7 @@ def setup_group(db, target: str, current_record_id: str | None = "record-1"):
     db.add(zone)
     db.flush()
     group = FailoverGroup(zone_id=zone.id, hostname="www.example.com", ttl=60, current_record_id=current_record_id)
-    origin_model = Origin(group_id=group.id, target=target_info.value, target_type=target_info.target_type, port=443, status="healthy", priority=10, weight=1)
+    origin_model = Origin(group_id=group.id, target=target_info.value, target_type=target_info.target_type, port=443, status="healthy", priority=10)
     db.add(group)
     db.flush()
     origin_model.group_id = group.id
@@ -109,6 +110,78 @@ def test_publish_origin_creates_cname_for_hostname(monkeypatch):
     assert record["type"] == "CNAME"
     assert record["content"] == "backup.example.net"
     assert group.current_record_id == "new-record"
+
+
+def test_publish_expanded_hostname_creates_healthy_a_and_aaaa_records(monkeypatch):
+    class ExpandedClient:
+        records = [{"id": "record-1", "name": "www.example.com", "type": "CNAME", "content": "backup.example.net", "ttl": 60, "proxied": False}]
+        created = 0
+
+        def __init__(self, token: str):
+            self.token = token
+
+        def list_dns_records(self, zone_id: str, name: str | None = None):
+            return [record for record in self.__class__.records if name is None or record["name"] == name]
+
+        def create_dns_record(self, zone_id: str, record: dict):
+            self.__class__.created += 1
+            created = {"id": f"new-record-{self.created}", **record}
+            self.__class__.records.append(created)
+            return created
+
+        def update_dns_record(self, zone_id: str, record_id: str, record: dict):
+            raise AssertionError("expanded publishing should recreate the managed record set")
+
+        def delete_dns_record(self, zone_id: str, record_id: str):
+            self.__class__.records = [record for record in self.__class__.records if record["id"] != record_id]
+
+    monkeypatch.setattr("app.failover.CloudflareClient", ExpandedClient)
+    db = make_session()
+    group, origin_model = setup_group(db, "backup.example.net")
+    origin_model.publish_mode = EXPANDED_PUBLISH_MODE
+    set_healthy_ips(origin_model, ["192.0.2.10", "2001:db8::10"])
+
+    record = publish_origin(db, group, origin_model)
+
+    assert record["type"] == "A/AAAA"
+    assert set(group.current_record_id.split(",")) == {"new-record-1", "new-record-2"}
+    assert {(item["type"], item["content"]) for item in ExpandedClient.records} == {
+        ("A", "192.0.2.10"),
+        ("AAAA", "2001:db8::10"),
+    }
+
+
+def test_evaluate_probes_group_before_switching_from_failed_current(monkeypatch):
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    backup = Origin(group_id=group.id, target="192.0.2.20", target_type="ipv4", port=443, status="unknown", priority=10)
+    current.status = "machine_down"
+    current.priority = 0
+    group.current_origin_id = current.id
+    db.add(backup)
+    db.commit()
+    db.refresh(group)
+    db.refresh(current)
+    db.refresh(backup)
+    calls = []
+
+    def fake_run_local_checks(db, group_id=None, include_all=False, **_kwargs):
+        calls.append((group_id, include_all))
+        current.status = "machine_down"
+        backup.status = "healthy"
+        return 2
+
+    def fake_publish_origin(db, group_arg, origin_arg):
+        return {"id": "record-1", "type": "A", "content": origin_arg.target}
+
+    monkeypatch.setattr("app.failover.run_local_checks", fake_run_local_checks)
+    monkeypatch.setattr("app.failover.publish_origin", fake_publish_origin)
+
+    switches = evaluate_failover_groups(db)
+
+    assert switches == 1
+    assert calls == [(group.id, True)]
+    assert group.current_origin_id == backup.id
 
 
 def test_validate_group_hostname_records_rejects_cname_conflict():

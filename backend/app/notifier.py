@@ -36,6 +36,12 @@ STATUS_NAMES = {
 }
 
 
+REGION_NAMES = {
+    "china": "国内",
+    "foreign": "国外",
+}
+
+
 def _decrypt_or_plaintext(value: str) -> str:
     try:
         return decrypt_secret(value)
@@ -73,6 +79,7 @@ def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
         lines.extend(
             [
                 _line("探针", payload.get("name") or payload.get("agent_id")),
+                _line("区域", REGION_NAMES.get(str(payload.get("region")), payload.get("region"))),
                 _line("状态", STATUS_NAMES.get(str(payload.get("status")), payload.get("status"))),
                 _line("最后 IP", payload.get("last_ip")),
                 _line("最后上报", payload.get("last_seen_at")),

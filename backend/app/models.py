@@ -4,6 +4,7 @@ from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Te
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+from .origin_expansion import healthy_ips, published_ips, resolved_ips
 
 
 def utcnow() -> datetime:
@@ -97,6 +98,7 @@ class Origin(Base, TimestampMixin):
     group_id: Mapped[int] = mapped_column(ForeignKey("failover_groups.id", ondelete="CASCADE"), nullable=False)
     target: Mapped[str] = mapped_column(String(255), nullable=False)
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    publish_mode: Mapped[str] = mapped_column(String(20), default="direct", nullable=False)
     port: Mapped[int] = mapped_column(Integer, nullable=False)
     priority: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
     weight: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
@@ -105,9 +107,24 @@ class Origin(Base, TimestampMixin):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
     last_rtt_ms: Mapped[float | None] = mapped_column(Float)
+    resolved_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    healthy_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    published_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
 
     group: Mapped["FailoverGroup"] = relationship("FailoverGroup", back_populates="origins")
     probe_states: Mapped[list["ProbeState"]] = relationship("ProbeState", back_populates="origin", cascade="all, delete-orphan")
+
+    @property
+    def resolved_ips(self) -> list[str]:
+        return resolved_ips(self)
+
+    @property
+    def healthy_ips(self) -> list[str]:
+        return healthy_ips(self)
+
+    @property
+    def published_ips(self) -> list[str]:
+        return published_ips(self)
 
 
 class TargetPoolItem(Base, TimestampMixin):
@@ -127,6 +144,7 @@ class Agent(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    region: Mapped[str] = mapped_column(String(20), default="china", nullable=False)
     token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)

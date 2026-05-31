@@ -24,8 +24,8 @@ import { apiFetch, fmtDate } from "./api";
 import type { Agent, Credential, DnsRecord, EventItem, FailoverGroup, Origin, Overview, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "agents" | "webhooks" | "account" | "events";
-type OriginAddDraft = { target: string; port: number; priority: number; enabled: boolean };
-type OriginEditDraft = { target: string; port: number; priority: number; enabled: boolean };
+type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; enabled: boolean };
+type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; enabled: boolean };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
 type TargetPoolDraft = { target: string; port: number; remark: string; enabled: boolean };
 
@@ -86,16 +86,21 @@ function targetTypeText(value: string): string {
   return targetTypeLabels[value] || value;
 }
 
-function recordTypeForTargetType(value: string): string {
+function agentRegionText(value: string): string {
+  return value === "foreign" ? "国外探针" : "国内探针";
+}
+
+function recordTypeForTargetType(value: string, publishMode = "direct"): string {
   if (value === "ipv4") return "A";
   if (value === "ipv6") return "AAAA";
-  if (value === "hostname") return "CNAME";
+  if (value === "hostname") return publishMode === "expanded" ? "A/AAAA IP池" : "CNAME";
   return "-";
 }
 
 function probeSourceText(value: string): string {
-  if (value === "local") return "本地";
-  if (value.startsWith("agent:")) return `探针 ${value.slice(6)}`;
+  const [source, ip] = value.split("|");
+  if (source === "local") return ip ? `本地 ${ip}` : "本地";
+  if (source.startsWith("agent:")) return ip ? `探针 ${source.slice(6)} ${ip}` : `探针 ${source.slice(6)}`;
   return value;
 }
 
@@ -146,7 +151,7 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, enabled: true };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", enabled: true };
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", enabled: true };
 const liveRefreshIntervalMs = 3000;
 
@@ -793,7 +798,7 @@ function GroupsPanel({
             target: item.target,
             port: item.port || 22,
             priority: maxPriority + 10,
-            weight: 1,
+            publish_mode: "direct",
             enabled: true
           })
         }),
@@ -808,6 +813,7 @@ function GroupsPanel({
       target: "",
       port: 22,
       priority: maxPriority + 10,
+      publish_mode: "direct",
       enabled: true
     });
   }
@@ -825,7 +831,7 @@ function GroupsPanel({
             target: originAdd.target.trim(),
             port: originAdd.port,
             priority: originAdd.priority,
-            weight: 1,
+            publish_mode: addTargetType === "hostname" ? originAdd.publish_mode : "direct",
             enabled: originAdd.enabled
           })
         });
@@ -872,6 +878,7 @@ function GroupsPanel({
         target: origin.target,
         port: origin.port,
         priority: origin.priority,
+        publish_mode: origin.publish_mode,
         enabled: origin.enabled
       }
     }));
@@ -880,11 +887,13 @@ function GroupsPanel({
   async function saveOriginEdit(originId: number) {
     const draft = originEdits[originId];
     if (!draft) return;
+    const targetType = inferDraftTargetType(draft.target);
+    const payload = { ...draft, publish_mode: targetType === "hostname" ? draft.publish_mode : "direct" };
     await act(
       () =>
         apiFetch(`/api/groups/origins/${originId}`, token, {
           method: "PATCH",
-          body: JSON.stringify(draft)
+          body: JSON.stringify(payload)
         }),
       "源站已更新并应用"
     );
@@ -1003,6 +1012,10 @@ function GroupsPanel({
                 </div>
                 <div className="rowActions">
                   <Status value={group.last_error ? "error" : group.enabled ? "enabled" : "disabled"} />
+                  <button className="secondary compactBtn" title="手动检测该组全部目标" onClick={() => act(() => apiFetch(`/api/groups/${group.id}/run`, token, { method: "POST" }), "切换组检测已完成")}>
+                    <Play size={15} />
+                    <span>检测全部</span>
+                  </button>
                   <button className="secondary" title="添加备用目标" onClick={() => beginAddOrigin(group)}>
                     <Plus size={15} />
                     <span>添加备用</span>
@@ -1019,12 +1032,12 @@ function GroupsPanel({
                 <div className="summaryBox primarySummary">
                   <span>主用目标</span>
                   <strong>{originLabel(primaryOrigin)}</strong>
-                  <small>{primaryOrigin ? `优先级 ${primaryOrigin.priority} · ${recordTypeForTargetType(primaryOrigin.target_type)}` : "还没有源站"}</small>
+                  <small>{primaryOrigin ? `优先级 ${primaryOrigin.priority} · ${recordTypeForTargetType(primaryOrigin.target_type, primaryOrigin.publish_mode)}` : "还没有源站"}</small>
                 </div>
                 <div className="summaryBox currentSummary">
                   <span>当前使用</span>
                   <strong>{originLabel(currentOrigin)}</strong>
-                  <small>{currentOrigin ? `${recordTypeForTargetType(currentOrigin.target_type)} · ${statusText(currentOrigin.status)}` : "等待健康检查后发布"}</small>
+                  <small>{currentOrigin ? `${recordTypeForTargetType(currentOrigin.target_type, currentOrigin.publish_mode)} · ${statusText(currentOrigin.status)}` : "等待健康检查后发布"}</small>
                 </div>
                 <div className="summaryBox backupSummary">
                   <span>备用目标</span>
@@ -1091,10 +1104,19 @@ function GroupsPanel({
                               <input type="number" min={0} value={originEdit.priority} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, priority: Number(event.target.value) } }))} />
                             </label>
                             <label className="inlineCheck">
+                              <input
+                                type="checkbox"
+                                disabled={editType !== "hostname"}
+                                checked={editType === "hostname" && originEdit.publish_mode === "expanded"}
+                                onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, publish_mode: event.target.checked ? "expanded" : "direct" } }))}
+                              />
+                              展开 IP 池
+                            </label>
+                            <label className="inlineCheck">
                               <input type="checkbox" checked={originEdit.enabled} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, enabled: event.target.checked } }))} />
                               启用
                             </label>
-                            <span className="originEditHint">当前会识别为 {targetTypeText(editType)}，发布为 {recordTypeForTargetType(editType)}。</span>
+                            <span className="originEditHint">当前会识别为 {targetTypeText(editType)}，发布为 {recordTypeForTargetType(editType, originEdit.publish_mode)}。</span>
                           </div>
                           <div className="rowActions">
                             <button className="icon" title="保存并应用" onClick={() => saveOriginEdit(origin.id)}>
@@ -1113,10 +1135,15 @@ function GroupsPanel({
                               <div className="originBadges">
                                 {isCurrentOrigin && <span className="originBadge current">当前使用</span>}
                                 <span className={`originBadge ${isPrimaryOrigin ? "primary" : "backup"}`}>{isPrimaryOrigin ? "主用" : "备用"}</span>
-                                <span className="originBadge record">{recordTypeForTargetType(origin.target_type)}</span>
+                                <span className="originBadge record">{recordTypeForTargetType(origin.target_type, origin.publish_mode)}</span>
                               </div>
                             </div>
                             <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · {origin.enabled ? "已启用" : "已停用"} · {fmtDate(origin.last_checked_at)}</span>
+                            {origin.publish_mode === "expanded" && (
+                              <small>
+                                解析 {origin.resolved_ips.length} 个 · 健康 {origin.healthy_ips.length} 个 · 已发布 {origin.published_ips.length} 个
+                              </small>
+                            )}
                             {origin.last_error && <small className="danger">{origin.last_error}</small>}
                             {origin.probe_states.length > 0 && (
                               <div className="probeChips">
@@ -1129,6 +1156,9 @@ function GroupsPanel({
                             )}
                           </div>
                           <Status value={origin.status} />
+                          <button className="icon secondaryIcon" title="手动检测这个目标" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}/run`, token, { method: "POST" }), "目标检测已完成")}>
+                            <Play size={15} />
+                          </button>
                           <button className="icon secondaryIcon" title="修改源站" onClick={() => beginEditOrigin(origin)}>
                             <Pencil size={15} />
                           </button>
@@ -1176,9 +1206,19 @@ function GroupsPanel({
               <input type="checkbox" checked={originAdd.enabled} onChange={(event) => setOriginAdd((current) => ({ ...current, enabled: event.target.checked }))} />
               启用这个备用目标
             </label>
+            {addTargetType === "hostname" && (
+              <label className="inlineCheck">
+                <input
+                  type="checkbox"
+                  checked={originAdd.publish_mode === "expanded"}
+                  onChange={(event) => setOriginAdd((current) => ({ ...current, publish_mode: event.target.checked ? "expanded" : "direct" }))}
+                />
+                展开解析为 IP 池，只发布健康 A/AAAA
+              </label>
+            )}
             {originAdd.target.trim() && (
               <div className="originHint">
-                当前输入识别为 {targetTypeText(addTargetType)}，故障切换时会发布为 {recordTypeForTargetType(addTargetType)} 记录。
+                当前输入识别为 {targetTypeText(addTargetType)}，故障切换时会发布为 {recordTypeForTargetType(addTargetType, originAdd.publish_mode)}。
               </div>
             )}
             <div className="modalActions">
@@ -1197,6 +1237,7 @@ function GroupsPanel({
 
 function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token: string; agents: Agent[]; agentToken: string; setAgentToken: (value: string) => void; act: <T>(fn: () => Promise<T>, done?: string) => Promise<boolean> }) {
   const [name, setName] = useState("");
+  const [region, setRegion] = useState<"china" | "foreign">("china");
   const [copied, setCopied] = useState(false);
   const panelUrl = window.location.origin;
   const installScriptUrl = `${panelUrl}/api/agent/install.sh`;
@@ -1217,11 +1258,12 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
     await act(async () => {
       const data = await apiFetch<{ token: string }>("/api/agents", token, {
         method: "POST",
-        body: JSON.stringify({ name })
+        body: JSON.stringify({ name, region })
       });
       setAgentToken(data.token);
     }, "探针已创建");
     setName("");
+    setRegion("china");
   }
 
   return (
@@ -1232,6 +1274,13 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
           名称
           <input value={name} onChange={(event) => setName(event.target.value)} required />
         </label>
+        <label>
+          探针区域
+          <select value={region} onChange={(event) => setRegion(event.target.value as "china" | "foreign")}>
+            <option value="china">国内探针</option>
+            <option value="foreign">国外探针</option>
+          </select>
+        </label>
         <button>
           <RadioTower size={16} />
           <span>创建</span>
@@ -1239,7 +1288,7 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
         {agentToken && (
           <div className="agentSecret">
             <h3>一键安装命令</h3>
-            <p>复制下面整条命令到中国服务器的 root 终端执行。安装后会自动创建 <code>cloudflare-dns-agent</code> 服务，并持续从面板拉取探测任务。</p>
+            <p>复制下面整条命令到对应区域服务器的 root 终端执行。安装后会自动创建 <code>cloudflare-dns-agent</code> 服务，并持续从面板拉取探测任务。</p>
             {isLocalPanelUrl && <p className="warningText">当前面板地址是本地地址，复制到服务器前请把命令里的 <code>{panelUrl}</code> 改成你的面板公网 HTTPS 地址。</p>}
             <div className="commandHeader">
               <span>只显示这一次，创建后请立即保存或执行。</span>
@@ -1266,6 +1315,7 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
                 <strong>{agent.name}</strong>
                 <Status value={agent.status} />
               </div>
+              <span>区域：{agentRegionText(agent.region)}</span>
               <span>最后 IP：{agent.last_ip || "-"}</span>
               <span>最后上报：{fmtDate(agent.last_seen_at)}</span>
               <button className="icon dangerBtn" title="删除探针" onClick={() => act(() => apiFetch(`/api/agents/${agent.id}`, token, { method: "DELETE" }), "探针已删除")}>

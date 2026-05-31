@@ -5,14 +5,23 @@ from sqlalchemy.orm import Session, selectinload
 from .cloudflare import CloudflareClient, CloudflareError
 from .dns_utils import record_type_for_target_type
 from .events import add_event
+from .health import ORIGIN_AVAILABLE_STATUS, run_local_checks
 from .models import DnsRecord, FailoverGroup, Origin
 from .notifier import send_webhooks
+from .origin_expansion import (
+    DIRECT_PUBLISH_MODE,
+    healthy_ips,
+    is_expanded_origin,
+    published_ips,
+    record_type_for_ip,
+    set_published_ips,
+)
 from .security import decrypt_secret
 from .sync import MANAGED_RECORD_TYPES, sync_zone_records
 
 
 def choose_desired_origin(origins: list[Origin], current_origin_id: int | None = None) -> Origin | None:
-    healthy = [origin for origin in origins if origin.enabled and origin.status == "healthy"]
+    healthy = [origin for origin in origins if origin.enabled and origin.status == ORIGIN_AVAILABLE_STATUS]
     if not healthy:
         return None
     best_priority = min(origin.priority for origin in healthy)
@@ -21,6 +30,15 @@ def choose_desired_origin(origins: list[Origin], current_origin_id: int | None =
         return current
     candidates = [origin for origin in healthy if origin.priority == best_priority]
     return sorted(candidates, key=lambda item: item.id)[0]
+
+
+def _current_origin(group: FailoverGroup) -> Origin | None:
+    return next((origin for origin in group.origins if origin.id == group.current_origin_id), None)
+
+
+def _should_probe_group_before_switch(group: FailoverGroup) -> bool:
+    current = _current_origin(group)
+    return current is None or not current.enabled or current.status != ORIGIN_AVAILABLE_STATUS
 
 
 def validate_group_hostname_records(
@@ -42,7 +60,41 @@ def validate_group_hostname_records(
     return record["id"]
 
 
+def _record_ids(group: FailoverGroup) -> set[str]:
+    if not group.current_record_id:
+        return set()
+    return {item.strip() for item in group.current_record_id.split(",") if item.strip()}
+
+
+def _store_record_ids(group: FailoverGroup, record_ids: list[str]) -> None:
+    group.current_record_id = ",".join(record_ids) if record_ids else None
+
+
+def _same_name_records(client: CloudflareClient, group: FailoverGroup) -> list[dict]:
+    return [
+        record for record in client.list_dns_records(group.zone.cf_zone_id, name=group.hostname)
+        if record.get("type") in MANAGED_RECORD_TYPES
+    ]
+
+
+def _validate_same_name_records(group: FailoverGroup, records: list[dict]) -> list[dict]:
+    managed_ids = _record_ids(group)
+    if managed_ids:
+        conflicts = [record for record in records if record["id"] not in managed_ids]
+        if conflicts:
+            raise ValueError("该主机名存在未托管的 A/AAAA/CNAME 冲突记录")
+        return [record for record in records if record["id"] in managed_ids]
+    if len(records) > 1:
+        raise ValueError("该主机名存在多个 A/AAAA/CNAME 记录，启用故障切换前必须先清理为唯一记录")
+    if records and records[0].get("proxied"):
+        raise ValueError("仅支持 DNS-only 记录，请先关闭 Cloudflare 代理")
+    return records
+
+
 def publish_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
+    if is_expanded_origin(origin):
+        return publish_expanded_origin(db, group, origin)
+
     record_type = record_type_for_target_type(origin.target_type)
     if record_type == "CNAME" and origin.target.rstrip(".").lower() == group.hostname.rstrip(".").lower():
         raise ValueError("CNAME 目标不能和当前主机名相同")
@@ -50,24 +102,10 @@ def publish_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
     credential = group.zone.credential
     token = decrypt_secret(credential.token_encrypted)
     client = CloudflareClient(token)
-    same_name_records = [
-        record for record in client.list_dns_records(group.zone.cf_zone_id, name=group.hostname)
-        if record.get("type") in MANAGED_RECORD_TYPES
-    ]
-
-    if group.current_record_id:
-        conflicts = [record for record in same_name_records if record["id"] != group.current_record_id]
-        if conflicts:
-            raise ValueError("该主机名存在未托管的 A/AAAA/CNAME 冲突记录")
-        target_record_id = group.current_record_id
-    elif same_name_records:
-        if len(same_name_records) > 1:
-            raise ValueError("该主机名存在多个 A/AAAA/CNAME 记录，启用故障切换前必须先清理为唯一记录")
-        if same_name_records[0].get("proxied"):
-            raise ValueError("仅支持 DNS-only 记录，请先关闭 Cloudflare 代理")
-        target_record_id = same_name_records[0]["id"]
-    else:
-        target_record_id = None
+    managed_records = _validate_same_name_records(group, _same_name_records(client, group))
+    target_record_id = managed_records[0]["id"] if managed_records else None
+    for extra_record in managed_records[1:]:
+        client.delete_dns_record(group.zone.cf_zone_id, extra_record["id"])
 
     body = {
         "type": record_type,
@@ -87,7 +125,9 @@ def publish_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
     else:
         record = client.create_dns_record(group.zone.cf_zone_id, body)
 
-    group.current_record_id = record["id"]
+    _store_record_ids(group, [record["id"]])
+    origin.publish_mode = DIRECT_PUBLISH_MODE
+    set_published_ips(origin, [])
     sync_zone_records(db, credential, group.zone, client=client)
     local_record = (
         db.query(DnsRecord)
@@ -100,6 +140,46 @@ def publish_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
         local_record.ttl = group.ttl
         local_record.proxied = False
     return record
+
+
+def publish_expanded_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
+    if origin.target_type != "hostname":
+        raise ValueError("只有域名目标可以展开发布为 IP 池")
+    ips = healthy_ips(origin)
+    if not ips:
+        raise ValueError("展开域名当前没有健康 IP，无法发布")
+
+    credential = group.zone.credential
+    token = decrypt_secret(credential.token_encrypted)
+    client = CloudflareClient(token)
+    managed_records = _validate_same_name_records(group, _same_name_records(client, group))
+    for record in managed_records:
+        client.delete_dns_record(group.zone.cf_zone_id, record["id"])
+
+    created_records = []
+    for ip in ips:
+        created_records.append(
+            client.create_dns_record(
+                group.zone.cf_zone_id,
+                {
+                    "type": record_type_for_ip(ip),
+                    "name": group.hostname,
+                    "content": ip,
+                    "ttl": group.ttl,
+                    "proxied": False,
+                    "comment": f"managed by cloudflare-dns-failover expanded from {origin.target}",
+                },
+            )
+        )
+
+    _store_record_ids(group, [record["id"] for record in created_records])
+    set_published_ips(origin, ips)
+    sync_zone_records(db, credential, group.zone, client=client)
+    return {
+        "id": group.current_record_id or "",
+        "type": "A/AAAA",
+        "content": ", ".join(ips),
+    }
 
 
 def evaluate_failover_groups(db: Session) -> int:
@@ -115,6 +195,9 @@ def evaluate_failover_groups(db: Session) -> int:
     switches = 0
     now = datetime.utcnow()
     for group in groups:
+        if _should_probe_group_before_switch(group):
+            run_local_checks(db, group_id=group.id, include_all=True)
+
         desired = choose_desired_origin(group.origins, group.current_origin_id)
         if desired is None:
             if group.last_error != "没有可用的健康源站":
@@ -124,6 +207,27 @@ def evaluate_failover_groups(db: Session) -> int:
                 send_webhooks(db, "failover.no_healthy_origin", payload)
             continue
         if desired.id == group.current_origin_id and not group.last_error:
+            if is_expanded_origin(desired) and sorted(healthy_ips(desired)) != sorted(published_ips(desired)):
+                try:
+                    record = publish_origin(db, group, desired)
+                except Exception as exc:
+                    message = str(exc)
+                    group.last_error = message
+                    payload = {"group_id": group.id, "hostname": group.hostname, "error": message}
+                    add_event(db, "dns.publish_failed", "error", f"{group.hostname} 发布 DNS 失败: {message}", payload)
+                    send_webhooks(db, "dns.publish_failed", payload)
+                else:
+                    payload = {
+                        "group_id": group.id,
+                        "hostname": group.hostname,
+                        "old_origin_id": desired.id,
+                        "new_origin_id": desired.id,
+                        "record_id": record["id"],
+                        "record_type": record["type"],
+                        "content": record["content"],
+                    }
+                    add_event(db, "dns.switched", "info", f"{group.hostname} 已更新健康 IP 池 {record['content']}", payload)
+                    send_webhooks(db, "dns.switched", payload)
             continue
         if group.last_switch_at:
             elapsed = (now - group.last_switch_at).total_seconds()

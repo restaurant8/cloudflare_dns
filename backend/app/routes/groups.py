@@ -10,6 +10,7 @@ from ..failover import evaluate_failover_groups, publish_origin, validate_group_
 from ..health import run_local_checks
 from ..models import FailoverGroup, Origin, User, Zone
 from ..notifier import send_webhooks
+from ..origin_expansion import DIRECT_PUBLISH_MODE, EXPANDED_PUBLISH_MODE, set_healthy_ips, set_published_ips, set_resolved_ips
 from ..schemas import FailoverGroupCreate, FailoverGroupOut, FailoverGroupUpdate, Message, OriginBulkCreate, OriginCreate, OriginOut, OriginUpdate
 from ..security import decrypt_secret
 from ..sync import MANAGED_RECORD_TYPES
@@ -26,13 +27,15 @@ def _origin_from_payload(group: FailoverGroup, payload: OriginCreate) -> Origin:
     target_info = parse_target(payload.target)
     if target_info.record_type == "CNAME" and target_info.value == group.hostname:
         raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
+    if payload.publish_mode == EXPANDED_PUBLISH_MODE and target_info.target_type != "hostname":
+        raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
     return Origin(
         group_id=group.id,
         target=target_info.value,
         target_type=target_info.target_type,
+        publish_mode=payload.publish_mode if target_info.target_type == "hostname" else DIRECT_PUBLISH_MODE,
         port=payload.port,
         priority=payload.priority,
-        weight=payload.weight,
         enabled=payload.enabled,
     )
 
@@ -47,9 +50,9 @@ def _origin_from_dns_record(group: FailoverGroup, record: dict, port: int) -> Or
         group_id=group.id,
         target=target_info.value,
         target_type=target_info.target_type,
+        publish_mode=DIRECT_PUBLISH_MODE,
         port=port,
         priority=0,
-        weight=1,
         enabled=True,
     )
 
@@ -179,6 +182,7 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     new_target = origin.target
     new_target_type = origin.target_type
     new_port = origin.port
+    new_publish_mode = origin.publish_mode
     if "target" in updates and updates["target"] is not None:
         target_info = parse_target(updates.pop("target"))
         if target_info.record_type == "CNAME" and target_info.value == group.hostname:
@@ -187,6 +191,10 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
         new_target_type = target_info.target_type
     if "port" in updates and updates["port"] is not None:
         new_port = updates["port"]
+    if "publish_mode" in updates and updates["publish_mode"] is not None:
+        new_publish_mode = updates.pop("publish_mode")
+    if new_target_type != "hostname" and new_publish_mode == EXPANDED_PUBLISH_MODE:
+        raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
 
     duplicate = (
         db.query(Origin)
@@ -201,10 +209,11 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     if duplicate:
         raise HTTPException(status_code=409, detail=f"{new_target}:{new_port} 已经在备用目标池中")
 
-    endpoint_changed = new_target != origin.target or new_port != origin.port
-    target_changed = new_target != origin.target or new_target_type != origin.target_type
+    endpoint_changed = new_target != origin.target or new_port != origin.port or new_publish_mode != origin.publish_mode
+    target_changed = new_target != origin.target or new_target_type != origin.target_type or new_publish_mode != origin.publish_mode
     origin.target = new_target
     origin.target_type = new_target_type
+    origin.publish_mode = new_publish_mode if new_target_type == "hostname" else DIRECT_PUBLISH_MODE
     for key, value in updates.items():
         setattr(origin, key, value)
 
@@ -214,10 +223,15 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
         origin.last_checked_at = None
         origin.last_rtt_ms = None
         origin.probe_states.clear()
+        set_resolved_ips(origin, [])
+        set_healthy_ips(origin, [])
+        set_published_ips(origin, [])
 
     should_publish_current = group.current_origin_id == origin.id and origin.enabled and target_changed
     if should_publish_current:
         try:
+            if origin.publish_mode == EXPANDED_PUBLISH_MODE:
+                run_local_checks(db, origin_id=origin.id, include_all=True)
             record = publish_origin(db, group, origin)
         except Exception as exc:
             db.rollback()
@@ -245,6 +259,17 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     return origin
 
 
+@router.post("/origins/{origin_id}/run", response_model=Message)
+def run_origin_now(origin_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    origin = db.get(Origin, origin_id)
+    if origin is None:
+        raise HTTPException(status_code=404, detail="源站不存在")
+    checked = run_local_checks(db, origin_id=origin_id, include_all=True)
+    switches = evaluate_failover_groups(db)
+    db.commit()
+    return Message(message="目标检测已完成", detail={"checked": checked, "switches": switches})
+
+
 @router.delete("/origins/{origin_id}", response_model=Message)
 def delete_origin(origin_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
     origin = db.get(Origin, origin_id)
@@ -255,9 +280,20 @@ def delete_origin(origin_id: int, _: User = Depends(get_current_user), db: Sessi
     return Message(message="源站已删除")
 
 
+@router.post("/{group_id}/run", response_model=Message)
+def run_group_now(group_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    group = db.get(FailoverGroup, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="切换组不存在")
+    checked = run_local_checks(db, group_id=group_id, include_all=True)
+    switches = evaluate_failover_groups(db)
+    db.commit()
+    return Message(message="切换组检测已完成", detail={"checked": checked, "switches": switches})
+
+
 @router.post("/run", response_model=Message)
 def run_now(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    checked = run_local_checks(db)
+    checked = run_local_checks(db, include_all=True)
     switches = evaluate_failover_groups(db)
     db.commit()
     return Message(message="健康检查已完成", detail={"checked": checked, "switches": switches})

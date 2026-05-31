@@ -46,14 +46,17 @@ export type Origin = {
   group_id: number;
   target: string;
   target_type: string;
+  publish_mode: string;
   port: number;
   priority: number;
-  weight: number;
   enabled: boolean;
   status: string;
   last_checked_at: string | null;
   last_error: string | null;
   last_rtt_ms: number | null;
+  resolved_ips: string[];
+  healthy_ips: string[];
+  published_ips: string[];
   probe_states: ProbeState[];
 };
 
@@ -85,6 +88,7 @@ export type FailoverGroup = {
 export type Agent = {
   id: number;
   name: string;
+  region: string;
   enabled: boolean;
   status: string;
   last_seen_at: string | null;

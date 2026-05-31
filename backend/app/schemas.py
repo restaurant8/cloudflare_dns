@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
@@ -91,7 +91,7 @@ class OriginCreate(BaseModel):
     target: str = Field(min_length=1, max_length=255)
     port: int = Field(ge=1, le=65535)
     priority: int = Field(default=10, ge=0, le=100000)
-    weight: int = Field(default=1, ge=1, le=100000)
+    publish_mode: Literal["direct", "expanded"] = "direct"
     enabled: bool = True
 
 
@@ -103,7 +103,7 @@ class OriginUpdate(BaseModel):
     target: str | None = Field(default=None, min_length=1, max_length=255)
     port: int | None = Field(default=None, ge=1, le=65535)
     priority: int | None = Field(default=None, ge=0, le=100000)
-    weight: int | None = Field(default=None, ge=1, le=100000)
+    publish_mode: Literal["direct", "expanded"] | None = None
     enabled: bool | None = None
 
 
@@ -125,14 +125,17 @@ class OriginOut(BaseModel):
     group_id: int
     target: str
     target_type: str
+    publish_mode: str
     port: int
     priority: int
-    weight: int
     enabled: bool
     status: str
     last_checked_at: datetime | None
     last_error: str | None
     last_rtt_ms: float | None
+    resolved_ips: list[str] = []
+    healthy_ips: list[str] = []
+    published_ips: list[str] = []
     probe_states: list[ProbeStateOut] = []
 
     model_config = ConfigDict(from_attributes=True)
@@ -183,11 +186,13 @@ class FailoverGroupOut(BaseModel):
 
 class AgentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    region: Literal["china", "foreign"] = "china"
 
 
 class AgentOut(BaseModel):
     id: int
     name: str
+    region: str
     enabled: bool
     status: str
     last_seen_at: datetime | None

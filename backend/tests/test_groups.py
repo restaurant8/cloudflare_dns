@@ -100,7 +100,7 @@ def test_update_current_origin_publishes_new_dns_target(monkeypatch):
     group = FailoverGroup(zone_id=zone.id, hostname="www.example.com", ttl=60, current_record_id="record-1")
     db.add(group)
     db.flush()
-    origin = Origin(group_id=group.id, target="192.0.2.10", target_type="ipv4", port=443, status="healthy", priority=0, weight=1)
+    origin = Origin(group_id=group.id, target="192.0.2.10", target_type="ipv4", port=443, status="healthy", priority=0)
     db.add(origin)
     db.flush()
     group.current_origin_id = origin.id
