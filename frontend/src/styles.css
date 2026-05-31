@@ -978,7 +978,6 @@ form.panel {
   overflow-wrap: anywhere;
 }
 
-.notice,
 .error {
   border-radius: 6px;
   margin-bottom: 14px;
@@ -986,31 +985,42 @@ form.panel {
 }
 
 .notice {
-  background: #e7f4f7;
-  color: #176b87;
-}
-
-.clickFeedback {
-  background: #176b87;
-  border-radius: 999px;
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.18);
-  color: #ffffff;
-  font-size: 13px;
+  background: #ffffff;
+  border: 1px solid #dbe6ef;
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.22);
+  color: #18212f;
+  font-size: 14px;
   font-weight: 800;
-  opacity: 0;
-  padding: 9px 14px;
+  left: 50%;
+  max-width: min(420px, calc(100vw - 32px));
+  min-width: 220px;
+  padding: 14px 18px;
   pointer-events: none;
   position: fixed;
-  right: 22px;
-  top: 74px;
-  transform: translateY(-8px);
-  transition: opacity 0.16s ease, transform 0.16s ease;
-  z-index: 80;
+  text-align: center;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 120;
 }
 
-.clickFeedback.show {
-  opacity: 1;
-  transform: translateY(0);
+.notice.success {
+  background: #dcfce7;
+  border-color: #86efac;
+  color: #166534;
+}
+
+.notice.error {
+  background: #fee2e2;
+  border-color: #fecaca;
+  color: #b42318;
+}
+
+.notice.loading,
+.notice.click {
+  background: #e7f4f7;
+  border-color: #b9dfe8;
+  color: #176b87;
 }
 
 .error,

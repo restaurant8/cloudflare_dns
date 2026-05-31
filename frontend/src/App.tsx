@@ -28,6 +28,8 @@ type OriginAddDraft = { target: string; port: number; priority: number; publish_
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; enabled: boolean };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
 type TargetPoolDraft = { target: string; port: number; remark: string; enabled: boolean };
+type ToastTone = "info" | "success" | "error" | "loading" | "click";
+type ActionRunner = <T>(fn: () => Promise<T>, done?: string, afterSuccess?: () => void) => Promise<boolean>;
 
 const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "overview", label: "总览", icon: Activity },
@@ -214,10 +216,10 @@ export default function App() {
   const [bootError, setBootError] = useState("");
   const [section, setSection] = useState<Section>(() => initialSection());
   const [message, setMessage] = useState("");
-  const [buttonFeedback, setButtonFeedback] = useState("");
+  const [messageTone, setMessageTone] = useState<ToastTone>("info");
   const [busy, setBusy] = useState(false);
   const [liveUpdatedAt, setLiveUpdatedAt] = useState<string | null>(null);
-  const buttonFeedbackTimer = useRef<number | null>(null);
+  const messageTimer = useRef<number | null>(null);
 
   const [overview, setOverview] = useState<Overview>(emptyOverview);
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -290,17 +292,34 @@ export default function App() {
     setLiveUpdatedAt(new Date().toISOString());
   }
 
-  async function act<T>(fn: () => Promise<T>, done = "已完成") {
+  function showMessage(text: string, tone: ToastTone = "info", timeoutMs = 1800) {
+    if (messageTimer.current) {
+      window.clearTimeout(messageTimer.current);
+    }
+    setMessage(text);
+    setMessageTone(tone);
+    if (timeoutMs > 0) {
+      messageTimer.current = window.setTimeout(() => {
+        setMessage("");
+        messageTimer.current = null;
+      }, timeoutMs);
+    } else {
+      messageTimer.current = null;
+    }
+  }
+
+  async function act<T>(fn: () => Promise<T>, done = "已完成", afterSuccess?: () => void) {
     setBusy(true);
-    setMessage("正在处理，请稍候...");
+    showMessage("正在处理，请稍候...", "loading", 0);
     try {
       await fn();
-      setMessage(done);
+      afterSuccess?.();
+      showMessage(done, "success", 1800);
       await loadAll();
       if (selectedZoneId) await loadRecords();
       return true;
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "请求失败");
+      showMessage(error instanceof Error ? error.message : "请求失败", "error", 5000);
       return false;
     } finally {
       setBusy(false);
@@ -321,26 +340,22 @@ export default function App() {
       button.classList.remove("buttonClicked");
       void button.offsetWidth;
       button.classList.add("buttonClicked");
-      setButtonFeedback(`已点击：${label}`);
-      if (buttonFeedbackTimer.current) {
-        window.clearTimeout(buttonFeedbackTimer.current);
-      }
-      buttonFeedbackTimer.current = window.setTimeout(() => setButtonFeedback(""), 1300);
+      showMessage(`已点击：${label}`, "click", 900);
       window.setTimeout(() => button.classList.remove("buttonClicked"), 360);
     }
 
     document.addEventListener("pointerdown", markClickedButton, true);
     return () => {
       document.removeEventListener("pointerdown", markClickedButton, true);
-      if (buttonFeedbackTimer.current) {
-        window.clearTimeout(buttonFeedbackTimer.current);
+      if (messageTimer.current) {
+        window.clearTimeout(messageTimer.current);
       }
     };
   }, []);
 
   useEffect(() => {
     if (token) {
-      loadAll(token).catch((error) => setMessage(error.message));
+      loadAll(token).catch((error) => showMessage(error.message, "error", 5000));
     }
   }, [token]);
 
@@ -378,7 +393,7 @@ export default function App() {
 
   useEffect(() => {
     if (selectedZoneId) {
-      loadRecords(selectedZoneId).catch((error) => setMessage(error.message));
+      loadRecords(selectedZoneId).catch((error) => showMessage(error.message, "error", 5000));
     }
   }, [selectedZoneId]);
 
@@ -466,10 +481,7 @@ export default function App() {
           </div>
         </header>
 
-        {message && <div className="notice" aria-live="polite">{message}</div>}
-        <div className={`clickFeedback ${buttonFeedback ? "show" : ""}`} aria-live="polite">
-          {buttonFeedback}
-        </div>
+        {message && <div className={`notice ${messageTone}`} aria-live="polite">{message}</div>}
 
         {section === "overview" && <OverviewPanel overview={overview} />}
         {section === "cloudflare" && (
@@ -581,7 +593,7 @@ function OverviewPanel({ overview }: { overview: Overview }) {
   );
 }
 
-function CloudflarePanel({ token, credentials, busy, act }: { token: string; credentials: Credential[]; busy: boolean; act: <T>(fn: () => Promise<T>, done?: string) => Promise<boolean> }) {
+function CloudflarePanel({ token, credentials, busy, act }: { token: string; credentials: Credential[]; busy: boolean; act: ActionRunner }) {
   const [name, setName] = useState("");
   const [cfToken, setCfToken] = useState("");
 
@@ -657,7 +669,7 @@ function RecordsPanel({
   setSelectedZoneId: (value: number | "") => void;
   records: DnsRecord[];
   setSection: (section: Section) => void;
-  act: <T>(fn: () => Promise<T>, done?: string) => Promise<boolean>;
+  act: ActionRunner;
 }) {
   const [query, setQuery] = useState("");
   const [zoneQuery, setZoneQuery] = useState("");
@@ -682,7 +694,7 @@ function RecordsPanel({
 
   async function confirmManageRecord() {
     if (!manageRecord) return;
-    const ok = await act(
+    await act(
       () =>
         apiFetch("/api/groups", token, {
           method: "POST",
@@ -696,12 +708,12 @@ function RecordsPanel({
             adopt_record_id: manageRecord.cf_record_id
           })
         }),
-      "故障切换组已创建"
+      "故障切换组已创建",
+      () => {
+        setManageRecord(null);
+        setSection("groups");
+      }
     );
-    if (ok) {
-      setManageRecord(null);
-      setSection("groups");
-    }
   }
 
   return (
@@ -814,7 +826,7 @@ function GroupsPanel({
   token: string;
   groups: FailoverGroup[];
   targetPool: TargetPoolItem[];
-  act: <T>(fn: () => Promise<T>, done?: string) => Promise<boolean>;
+  act: ActionRunner;
 }) {
   const [poolDraft, setPoolDraft] = useState<TargetPoolDraft>(defaultTargetPoolDraft);
   const [editingPoolId, setEditingPoolId] = useState<number | null>(null);
@@ -832,7 +844,7 @@ function GroupsPanel({
 
   async function createPoolItem(event: FormEvent) {
     event.preventDefault();
-    const ok = await act(
+    await act(
       () =>
         apiFetch("/api/target-pool", token, {
           method: "POST",
@@ -843,11 +855,9 @@ function GroupsPanel({
             enabled: poolDraft.enabled
           })
         }),
-      "目标已加入池子"
+      "目标已加入池子",
+      () => setPoolDraft(defaultTargetPoolDraft)
     );
-    if (ok) {
-      setPoolDraft(defaultTargetPoolDraft);
-    }
   }
 
   function beginEditPoolItem(item: TargetPoolItem) {
@@ -866,7 +876,7 @@ function GroupsPanel({
   async function savePoolItem(itemId: number) {
     const draft = poolEdits[itemId];
     if (!draft) return;
-    const ok = await act(
+    await act(
       () =>
         apiFetch(`/api/target-pool/${itemId}`, token, {
           method: "PATCH",
@@ -877,11 +887,9 @@ function GroupsPanel({
             enabled: draft.enabled
           })
         }),
-      "目标池已更新"
+      "目标池已更新",
+      () => setEditingPoolId(null)
     );
-    if (ok) {
-      setEditingPoolId(null);
-    }
   }
 
   function beginAddOrigin(group: FailoverGroup) {
@@ -910,7 +918,7 @@ function GroupsPanel({
 
   async function createOrigin() {
     if (!addingGroup) return;
-    const ok = await act(
+    await act(
       () => {
         if (!originAdd.target.trim()) {
           throw new Error("请填写备用目标");
@@ -926,12 +934,12 @@ function GroupsPanel({
           })
         });
       },
-      "备用目标已添加"
+      "备用目标已添加",
+      () => {
+        setAddingGroupId(null);
+        setOriginAdd(defaultOriginAddDraft);
+      }
     );
-    if (ok) {
-      setAddingGroupId(null);
-      setOriginAdd(defaultOriginAddDraft);
-    }
   }
 
   function beginEditGroup(group: FailoverGroup) {
@@ -955,9 +963,9 @@ function GroupsPanel({
           method: "PATCH",
           body: JSON.stringify(draft)
         }),
-      "切换组已更新并应用"
+      "切换组已更新并应用",
+      () => setEditingGroupId(null)
     );
-    setEditingGroupId(null);
   }
 
   function beginEditOrigin(origin: Origin) {
@@ -985,9 +993,9 @@ function GroupsPanel({
           method: "PATCH",
           body: JSON.stringify(payload)
         }),
-      "源站已更新并应用"
+      "源站已更新并应用",
+      () => setEditingOriginId(null)
     );
-    setEditingOriginId(null);
   }
 
   return (
@@ -1329,7 +1337,7 @@ function GroupsPanel({
   );
 }
 
-function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token: string; agents: Agent[]; agentToken: string; setAgentToken: (value: string) => void; act: <T>(fn: () => Promise<T>, done?: string) => Promise<boolean> }) {
+function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token: string; agents: Agent[]; agentToken: string; setAgentToken: (value: string) => void; act: ActionRunner }) {
   const [name, setName] = useState("");
   const [region, setRegion] = useState<"china" | "foreign">("china");
   const [copied, setCopied] = useState(false);
@@ -1497,7 +1505,7 @@ function NotificationsPanel({
   token: string;
   telegramNotifications: TelegramNotification[];
   webhooks: Webhook[];
-  act: <T>(fn: () => Promise<T>, done?: string) => Promise<boolean>;
+  act: ActionRunner;
 }) {
   const [telegramName, setTelegramName] = useState("");
   const [botToken, setBotToken] = useState("");
@@ -1567,10 +1575,12 @@ function NotificationsPanel({
           method: "PATCH",
           body: JSON.stringify(payload)
         }),
-      "Telegram 通知已更新"
+      "Telegram 通知已更新",
+      () => {
+        setEditingTelegramId(null);
+        setTelegramEdit({ name: "", chat_id: "", bot_token: "", notify_level: "important", enabled: true });
+      }
     );
-    setEditingTelegramId(null);
-    setTelegramEdit({ name: "", chat_id: "", bot_token: "", notify_level: "important", enabled: true });
   }
 
   return (
