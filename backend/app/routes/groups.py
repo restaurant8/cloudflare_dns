@@ -6,7 +6,7 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import normalize_hostname, parse_target
 from ..events import add_event
-from ..failover import evaluate_failover_groups, publish_origin, validate_group_hostname_records
+from ..failover import evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records
 from ..health import run_local_checks
 from ..models import FailoverGroup, Origin, User, Zone
 from ..notifier import send_webhooks
@@ -88,14 +88,7 @@ def create_group(payload: FailoverGroupCreate, _: User = Depends(get_current_use
     db.flush()
     managed_record_id = group.current_record_id
     if managed_record_id:
-        current_record = next(
-            (
-                record
-                for record in client.list_dns_records(zone.cf_zone_id, name=hostname)
-                if record.get("id") == managed_record_id and record.get("type") in MANAGED_RECORD_TYPES
-            ),
-            None,
-        )
+        current_record = find_managed_dns_record_by_id(client, zone.cf_zone_id, managed_record_id)
         if current_record is None:
             raise HTTPException(status_code=404, detail="未找到要接管的当前解析记录")
         primary_origin = _origin_from_dns_record(group, current_record, payload.primary_port)

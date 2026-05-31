@@ -44,14 +44,54 @@ def _should_probe_group_before_switch(group: FailoverGroup) -> bool:
     return current is None or not current.enabled or current.status != ORIGIN_AVAILABLE_STATUS
 
 
+def _normalized_record_name(value: str | None) -> str:
+    return str(value or "").rstrip(".").lower()
+
+
+def _managed_dns_records(client: CloudflareClient, cf_zone_id: str, hostname: str | None = None) -> list[dict]:
+    normalized_hostname = _normalized_record_name(hostname) if hostname else None
+    records = [
+        record
+        for record in client.list_dns_records(cf_zone_id)
+        if record.get("type") in MANAGED_RECORD_TYPES
+    ]
+    if normalized_hostname is None:
+        return records
+    filtered = [record for record in records if _normalized_record_name(record.get("name")) == normalized_hostname]
+    if filtered:
+        return filtered
+    return [
+        record
+        for record in client.list_dns_records(cf_zone_id, name=hostname)
+        if record.get("type") in MANAGED_RECORD_TYPES
+    ]
+
+
+def find_managed_dns_record_by_id(client: CloudflareClient, cf_zone_id: str, record_id: str) -> dict | None:
+    return next(
+        (record for record in _managed_dns_records(client, cf_zone_id) if record.get("id") == record_id),
+        None,
+    )
+
+
 def validate_group_hostname_records(
     client: CloudflareClient,
     cf_zone_id: str,
     hostname: str,
     current_record_id: str | None = None,
 ) -> str | None:
-    records = [record for record in client.list_dns_records(cf_zone_id, name=hostname) if record.get("type") in MANAGED_RECORD_TYPES]
+    records = _managed_dns_records(client, cf_zone_id, hostname)
     if not records:
+        if current_record_id:
+            record = find_managed_dns_record_by_id(client, cf_zone_id, current_record_id)
+            if record is None:
+                raise ValueError("未找到要接管的 A/AAAA/CNAME 记录，请重新从解析记录点管理")
+            record_name = _normalized_record_name(record.get("name"))
+            if record_name != _normalized_record_name(hostname):
+                raise ValueError(f"接管记录属于 {record.get('name') or '-'}，不是 {hostname}，请重新从解析记录点管理")
+            if record.get("proxied"):
+                raise ValueError("仅支持 DNS-only 记录，请先关闭 Cloudflare 代理")
+            return record["id"]
         return None
     if len(records) > 1:
         raise ValueError("该主机名存在多个 A/AAAA/CNAME 记录，启用故障切换前必须先清理为唯一记录")
@@ -59,7 +99,10 @@ def validate_group_hostname_records(
     if record.get("proxied"):
         raise ValueError("仅支持 DNS-only 记录，请先关闭 Cloudflare 代理")
     if current_record_id and record["id"] != current_record_id:
-        raise ValueError("接管记录 ID 与当前主机名不匹配，请从解析记录点管理或清空接管记录 ID")
+        adopted = find_managed_dns_record_by_id(client, cf_zone_id, current_record_id)
+        if adopted is None:
+            raise ValueError("未找到要接管的 A/AAAA/CNAME 记录，请重新从解析记录点管理")
+        raise ValueError(f"接管记录属于 {adopted.get('name') or '-'}，不是 {hostname}，请重新从解析记录点管理")
     return record["id"]
 
 
@@ -83,10 +126,7 @@ def _record_label(record: dict) -> str:
 
 
 def _same_name_records(client: CloudflareClient, group: FailoverGroup) -> list[dict]:
-    return [
-        record for record in client.list_dns_records(group.zone.cf_zone_id, name=group.hostname)
-        if record.get("type") in MANAGED_RECORD_TYPES
-    ]
+    return _managed_dns_records(client, group.zone.cf_zone_id, group.hostname)
 
 
 def _validate_same_name_records(group: FailoverGroup, records: list[dict]) -> list[dict]:

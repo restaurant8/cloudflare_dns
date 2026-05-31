@@ -86,6 +86,42 @@ def test_create_group_adopts_current_dns_record_as_primary_origin(monkeypatch):
     assert group.current_origin_id == group.origins[0].id
 
 
+def test_create_group_adopts_record_by_id_when_name_filter_misses(monkeypatch):
+    class NameFilterMissClient(FakeCloudflareClient):
+        records = [
+            {
+                "id": "record-1",
+                "name": "www.example.com",
+                "type": "A",
+                "content": "192.0.2.10",
+                "proxied": False,
+            }
+        ]
+
+        def list_dns_records(self, zone_id: str, name: str | None = None):
+            if name is not None:
+                return []
+            return self.records
+
+    monkeypatch.setattr("app.routes.groups.CloudflareClient", NameFilterMissClient)
+    db = make_session()
+    zone, user = setup_zone(db)
+
+    group = create_group(
+        FailoverGroupCreate(
+            zone_id=zone.id,
+            hostname="www.example.com",
+            adopt_record_id="record-1",
+            primary_port=22,
+        ),
+        user,
+        db,
+    )
+
+    assert group.current_record_id == "record-1"
+    assert group.origins[0].target == "192.0.2.10"
+
+
 def test_update_current_origin_publishes_new_dns_target(monkeypatch):
     FakeCloudflareClient.records = [
         {
