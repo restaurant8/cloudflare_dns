@@ -1,4 +1,4 @@
-import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   Cloud,
@@ -190,8 +190,10 @@ export default function App() {
   const [bootError, setBootError] = useState("");
   const [section, setSection] = useState<Section>(() => initialSection());
   const [message, setMessage] = useState("");
+  const [buttonFeedback, setButtonFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const [liveUpdatedAt, setLiveUpdatedAt] = useState<string | null>(null);
+  const buttonFeedbackTimer = useRef<number | null>(null);
 
   const [overview, setOverview] = useState<Overview>(emptyOverview);
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -286,19 +288,30 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    function markClickedButton(event: MouseEvent) {
+    function markClickedButton(event: PointerEvent) {
       const target = event.target;
       if (!(target instanceof Element)) return;
       const button = target.closest("button");
       if (!button || button.disabled) return;
+      const label = button.getAttribute("aria-label") || button.getAttribute("title") || button.textContent?.replace(/\s+/g, " ").trim() || "按钮";
       button.classList.remove("buttonClicked");
       void button.offsetWidth;
       button.classList.add("buttonClicked");
+      setButtonFeedback(`已点击：${label}`);
+      if (buttonFeedbackTimer.current) {
+        window.clearTimeout(buttonFeedbackTimer.current);
+      }
+      buttonFeedbackTimer.current = window.setTimeout(() => setButtonFeedback(""), 1300);
       window.setTimeout(() => button.classList.remove("buttonClicked"), 360);
     }
 
-    document.addEventListener("click", markClickedButton, true);
-    return () => document.removeEventListener("click", markClickedButton, true);
+    document.addEventListener("pointerdown", markClickedButton, true);
+    return () => {
+      document.removeEventListener("pointerdown", markClickedButton, true);
+      if (buttonFeedbackTimer.current) {
+        window.clearTimeout(buttonFeedbackTimer.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -430,6 +443,9 @@ export default function App() {
         </header>
 
         {message && <div className="notice" aria-live="polite">{message}</div>}
+        <div className={`clickFeedback ${buttonFeedback ? "show" : ""}`} aria-live="polite">
+          {buttonFeedback}
+        </div>
 
         {section === "overview" && <OverviewPanel overview={overview} />}
         {section === "cloudflare" && (

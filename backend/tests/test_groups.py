@@ -134,3 +134,32 @@ def test_update_hostname_origin_to_expanded_resolves_ips_immediately(monkeypatch
 
     assert updated.publish_mode == EXPANDED_PUBLISH_MODE
     assert resolved_ips(updated) == ["192.0.2.10", "2001:db8::10"]
+
+
+def test_update_current_origin_to_expanded_saves_when_no_healthy_ip_yet(monkeypatch):
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com", ttl=60, current_record_id="record-1")
+    db.add(group)
+    db.flush()
+    origin = Origin(
+        group_id=group.id,
+        target="backup.example.net",
+        target_type="hostname",
+        port=443,
+        status="healthy",
+        priority=0,
+    )
+    db.add(origin)
+    db.flush()
+    group.current_origin_id = origin.id
+    db.commit()
+
+    monkeypatch.setattr("app.health.resolve_hostname_ips", lambda hostname: ["192.0.2.10"])
+    monkeypatch.setattr("app.health.tcp_check", lambda target, port, timeout: SimpleNamespace(success=True, rtt_ms=1.0, error=None))
+
+    updated = update_origin(origin.id, OriginUpdate(publish_mode=EXPANDED_PUBLISH_MODE), user, db)
+
+    assert updated.publish_mode == EXPANDED_PUBLISH_MODE
+    assert resolved_ips(updated) == ["192.0.2.10"]
+    assert "暂不发布" in group.last_error

@@ -237,23 +237,28 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
         try:
             if origin.publish_mode == EXPANDED_PUBLISH_MODE and not checked_expanded_now:
                 run_local_checks(db, origin_id=origin.id, include_all=True)
-            record = publish_origin(db, group, origin)
+            if origin.publish_mode == EXPANDED_PUBLISH_MODE and not origin.healthy_ips:
+                group.last_error = "展开 IP 池已保存，当前没有健康 IP，暂不发布 DNS"
+                record = None
+            else:
+                record = publish_origin(db, group, origin)
         except Exception as exc:
             db.rollback()
             raise HTTPException(status_code=502, detail=f"DNS 发布失败，修改未保存：{exc}") from exc
-        group.current_origin_id = origin.id
-        group.last_error = None
-        payload = {
-            "group_id": group.id,
-            "hostname": group.hostname,
-            "old_origin_id": origin.id,
-            "new_origin_id": origin.id,
-            "record_id": record["id"],
-            "record_type": record["type"],
-            "content": record["content"],
-        }
-        add_event(db, "dns.switched", "info", f"{group.hostname} 已更新到 {record['type']} {record['content']}", payload)
-        send_webhooks(db, "dns.switched", payload)
+        if record is not None:
+            group.current_origin_id = origin.id
+            group.last_error = None
+            payload = {
+                "group_id": group.id,
+                "hostname": group.hostname,
+                "old_origin_id": origin.id,
+                "new_origin_id": origin.id,
+                "record_id": record["id"],
+                "record_type": record["type"],
+                "content": record["content"],
+            }
+            add_event(db, "dns.switched", "info", f"{group.hostname} 已更新到 {record['type']} {record['content']}", payload)
+            send_webhooks(db, "dns.switched", payload)
     elif group.enabled:
         if group.current_origin_id == origin.id and not origin.enabled:
             group.current_origin_id = None

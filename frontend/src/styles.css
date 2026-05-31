@@ -999,6 +999,29 @@ form.panel {
   color: #176b87;
 }
 
+.clickFeedback {
+  background: #176b87;
+  border-radius: 999px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.18);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+  opacity: 0;
+  padding: 9px 14px;
+  pointer-events: none;
+  position: fixed;
+  right: 22px;
+  top: 74px;
+  transform: translateY(-8px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  z-index: 80;
+}
+
+.clickFeedback.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .error,
 .danger {
   color: #b42318;
