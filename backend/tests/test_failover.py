@@ -151,6 +151,71 @@ def test_publish_expanded_hostname_creates_healthy_a_and_aaaa_records(monkeypatc
     }
 
 
+def test_publish_origin_reclaims_orphaned_app_managed_records(monkeypatch):
+    class ClientWithOrphanedRecord:
+        records = [
+            {"id": "record-1", "name": "www.example.com", "type": "A", "content": "192.0.2.1", "ttl": 60, "proxied": False},
+            {
+                "id": "record-2",
+                "name": "www.example.com",
+                "type": "AAAA",
+                "content": "2001:db8::10",
+                "ttl": 60,
+                "proxied": False,
+                "comment": "managed by cloudflare-dns-failover expanded from backup.example.net",
+            },
+        ]
+
+        def __init__(self, token: str):
+            self.token = token
+
+        def list_dns_records(self, zone_id: str, name: str | None = None):
+            return [record for record in self.__class__.records if name is None or record["name"] == name]
+
+        def update_dns_record(self, zone_id: str, record_id: str, record: dict):
+            existing = next(item for item in self.__class__.records if item["id"] == record_id)
+            existing.update(record)
+            return {**existing}
+
+        def create_dns_record(self, zone_id: str, record: dict):
+            created = {"id": "new-record", **record}
+            self.__class__.records.append(created)
+            return created
+
+        def delete_dns_record(self, zone_id: str, record_id: str):
+            self.__class__.records = [record for record in self.__class__.records if record["id"] != record_id]
+
+    monkeypatch.setattr("app.failover.CloudflareClient", ClientWithOrphanedRecord)
+    db = make_session()
+    group, origin_model = setup_group(db, "192.0.2.20", current_record_id="record-1")
+
+    record = publish_origin(db, group, origin_model)
+
+    assert record["id"] == "record-1"
+    assert group.current_record_id == "record-1"
+    assert {item["id"] for item in ClientWithOrphanedRecord.records} == {"record-1"}
+
+
+def test_publish_origin_rejects_unmanaged_same_name_conflict(monkeypatch):
+    FakeCloudflareClient.records = [
+        {"id": "record-1", "name": "www.example.com", "type": "A", "content": "192.0.2.1", "ttl": 60, "proxied": False},
+        {"id": "manual-record", "name": "www.example.com", "type": "A", "content": "192.0.2.99", "ttl": 60, "proxied": False},
+    ]
+    monkeypatch.setattr("app.failover.CloudflareClient", FakeCloudflareClient)
+    db = make_session()
+    group, origin_model = setup_group(db, "192.0.2.20", current_record_id="record-1")
+
+    try:
+        publish_origin(db, group, origin_model)
+    except ValueError as exc:
+        message = str(exc)
+        assert "未托管的 A/AAAA/CNAME 冲突记录" in message
+        assert "manual-record" in message
+        assert "192.0.2.99" in message
+    else:
+        raise AssertionError("Expected unmanaged conflict")
+
+
 def test_evaluate_probes_group_before_switching_from_failed_current(monkeypatch):
     db = make_session()
     group, current = setup_group(db, "192.0.2.10")

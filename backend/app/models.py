@@ -83,7 +83,7 @@ class FailoverGroup(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     min_switch_interval_seconds: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
     current_origin_id: Mapped[int | None] = mapped_column(Integer)
-    current_record_id: Mapped[str | None] = mapped_column(String(64))
+    current_record_id: Mapped[str | None] = mapped_column(Text)
     last_switch_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
 

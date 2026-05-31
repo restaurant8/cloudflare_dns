@@ -43,6 +43,16 @@ def _migrate_existing_schema() -> None:
             if "region" not in existing:
                 connection.execute(text("ALTER TABLE agents ADD COLUMN region VARCHAR(20) NOT NULL DEFAULT 'china'"))
 
+        if "failover_groups" in table_names:
+            existing_columns = {column["name"]: column for column in inspector.get_columns("failover_groups")}
+            current_record_id = existing_columns.get("current_record_id")
+            if current_record_id is not None:
+                column_type = str(current_record_id["type"]).lower()
+                if dialect == "mysql" and "text" not in column_type:
+                    connection.execute(text("ALTER TABLE failover_groups MODIFY current_record_id TEXT NULL"))
+                elif dialect == "postgresql" and "text" not in column_type:
+                    connection.execute(text("ALTER TABLE failover_groups ALTER COLUMN current_record_id TYPE TEXT"))
+
 
 def _origin_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":

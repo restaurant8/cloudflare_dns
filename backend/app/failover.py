@@ -20,6 +20,9 @@ from .security import decrypt_secret
 from .sync import MANAGED_RECORD_TYPES, sync_zone_records
 
 
+MANAGED_RECORD_COMMENT_PREFIX = "managed by cloudflare-dns-failover"
+
+
 def choose_desired_origin(origins: list[Origin], current_origin_id: int | None = None) -> Origin | None:
     healthy = [origin for origin in origins if origin.enabled and origin.status == ORIGIN_AVAILABLE_STATUS]
     if not healthy:
@@ -70,6 +73,15 @@ def _store_record_ids(group: FailoverGroup, record_ids: list[str]) -> None:
     group.current_record_id = ",".join(record_ids) if record_ids else None
 
 
+def _record_is_owned_by_app(record: dict) -> bool:
+    return str(record.get("comment") or "").startswith(MANAGED_RECORD_COMMENT_PREFIX)
+
+
+def _record_label(record: dict) -> str:
+    proxy_state = "已代理" if record.get("proxied") else "仅 DNS"
+    return f"{record.get('type')} {record.get('content')}（{proxy_state}，ID {record.get('id')}）"
+
+
 def _same_name_records(client: CloudflareClient, group: FailoverGroup) -> list[dict]:
     return [
         record for record in client.list_dns_records(group.zone.cf_zone_id, name=group.hostname)
@@ -80,10 +92,16 @@ def _same_name_records(client: CloudflareClient, group: FailoverGroup) -> list[d
 def _validate_same_name_records(group: FailoverGroup, records: list[dict]) -> list[dict]:
     managed_ids = _record_ids(group)
     if managed_ids:
-        conflicts = [record for record in records if record["id"] not in managed_ids]
+        managed_records = [record for record in records if record["id"] in managed_ids]
+        orphaned_app_records = [record for record in records if record["id"] not in managed_ids and _record_is_owned_by_app(record)]
+        conflicts = [record for record in records if record["id"] not in managed_ids and not _record_is_owned_by_app(record)]
         if conflicts:
-            raise ValueError("该主机名存在未托管的 A/AAAA/CNAME 冲突记录")
-        return [record for record in records if record["id"] in managed_ids]
+            details = "；".join(_record_label(record) for record in conflicts)
+            raise ValueError(f"该主机名存在未托管的 A/AAAA/CNAME 冲突记录：{details}")
+        if orphaned_app_records:
+            managed_records.extend(orphaned_app_records)
+            _store_record_ids(group, [record["id"] for record in managed_records])
+        return managed_records
     if len(records) > 1:
         raise ValueError("该主机名存在多个 A/AAAA/CNAME 记录，启用故障切换前必须先清理为唯一记录")
     if records and records[0].get("proxied"):
@@ -113,7 +131,7 @@ def publish_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
         "content": origin.target,
         "ttl": group.ttl,
         "proxied": False,
-        "comment": "managed by cloudflare-dns-failover",
+        "comment": MANAGED_RECORD_COMMENT_PREFIX,
     }
 
     if target_record_id:
@@ -167,7 +185,7 @@ def publish_expanded_origin(db: Session, group: FailoverGroup, origin: Origin) -
                     "content": ip,
                     "ttl": group.ttl,
                     "proxied": False,
-                    "comment": f"managed by cloudflare-dns-failover expanded from {origin.target}",
+                    "comment": f"{MANAGED_RECORD_COMMENT_PREFIX} expanded from {origin.target}",
                 },
             )
         )
