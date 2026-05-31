@@ -384,6 +384,16 @@ def run_local_checks(
         if origin.group.enabled and origin_needs_probe(origin, include_all=include_all)
     ]
     checked = 0
+    check_cache = {}
+
+    def check_once(target: str, port: int):
+        nonlocal checked
+        key = (target.strip().rstrip(".").lower(), int(port))
+        if key not in check_cache:
+            check_cache[key] = tcp_check(target, port, settings.check_timeout_seconds)
+            checked += 1
+        return check_cache[key]
+
     for origin in origins_to_check:
         if is_expanded_origin(origin):
             try:
@@ -395,7 +405,7 @@ def run_local_checks(
                 origin.last_error = f"展开域名解析失败: {exc}"
                 continue
             for ip in ips:
-                result = tcp_check(ip, origin.port, settings.check_timeout_seconds)
+                result = check_once(ip, origin.port)
                 apply_probe_result(
                     db,
                     origin,
@@ -406,11 +416,10 @@ def run_local_checks(
                     target=ip,
                     port=origin.port,
                 )
-                checked += 1
             if not ips:
                 recalculate_origin_status(db, origin)
             continue
-        result = tcp_check(origin.target, origin.port, settings.check_timeout_seconds)
+        result = check_once(origin.target, origin.port)
         apply_probe_result(
             db,
             origin,
@@ -421,7 +430,6 @@ def run_local_checks(
             target=origin.target,
             port=origin.port,
         )
-        checked += 1
     return checked
 
 

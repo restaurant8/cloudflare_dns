@@ -227,6 +227,25 @@ def test_run_local_checks_checks_backup_when_current_is_unavailable(monkeypatch)
     assert checked_targets == [current.target, backup.target]
 
 
+def test_run_local_checks_reuses_duplicate_target_results(monkeypatch):
+    db = make_session()
+    _, current, backup = make_group_with_current_and_backup(db, "healthy")
+    backup.target = current.target
+    db.commit()
+    checked_targets = []
+
+    def fake_tcp_check(target, port, timeout):
+        checked_targets.append((target, port))
+        return SimpleNamespace(success=True, rtt_ms=1.0, error=None)
+
+    monkeypatch.setattr("app.health.tcp_check", fake_tcp_check)
+
+    checked = run_local_checks(db)
+
+    assert checked == 1
+    assert checked_targets == [(current.target, current.port)]
+
+
 def test_expanded_hostname_checks_each_resolved_ip_and_keeps_healthy_pool(monkeypatch):
     db = make_session()
     credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))

@@ -19,6 +19,31 @@ from ..security import hash_token
 router = APIRouter(tags=["agents"])
 
 
+def _normalized_probe_target(target: str) -> str:
+    return target.strip().rstrip(".").lower()
+
+
+def _probe_key(target: str, port: int) -> tuple[str, int]:
+    return _normalized_probe_target(target), int(port)
+
+
+def _matching_origins_for_probe(origins: list[Origin], target: str, port: int) -> list[Origin]:
+    matches: list[Origin] = []
+    normalized_target = _normalized_probe_target(target)
+    for origin in origins:
+        if not origin.group.enabled or not origin_needs_probe(origin):
+            continue
+        if origin.port != port:
+            continue
+        if is_expanded_origin(origin):
+            if any(_normalized_probe_target(ip) == normalized_target for ip in resolved_ips(origin)):
+                matches.append(origin)
+            continue
+        if _normalized_probe_target(origin.target) == normalized_target:
+            matches.append(origin)
+    return matches
+
+
 @router.get("/agent/install.sh", response_class=PlainTextResponse)
 def agent_install_script():
     return PlainTextResponse(build_install_script(), media_type="text/x-shellscript; charset=utf-8")
@@ -73,6 +98,15 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
         .all()
     )
     tasks = []
+    task_keys: set[tuple[str, int]] = set()
+
+    def add_task(origin_id: int, target: str, port: int) -> None:
+        key = _probe_key(target, port)
+        if key in task_keys:
+            return
+        task_keys.add(key)
+        tasks.append(AgentTask(origin_id=origin_id, target=target, port=port, timeout_seconds=settings.check_timeout_seconds))
+
     for origin in origins:
         if not origin.group.enabled or not origin_needs_probe(origin):
             continue
@@ -81,12 +115,10 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
                 ips = refresh_expanded_origin_ips(origin)
             except OSError:
                 ips = resolved_ips(origin)
-            tasks.extend(
-                AgentTask(origin_id=origin.id, target=ip, port=origin.port, timeout_seconds=settings.check_timeout_seconds)
-                for ip in ips
-            )
+            for ip in ips:
+                add_task(origin.id, ip, origin.port)
             continue
-        tasks.append(AgentTask(origin_id=origin.id, target=origin.target, port=origin.port, timeout_seconds=settings.check_timeout_seconds))
+        add_task(origin.id, origin.target, origin.port)
     db.commit()
     return AgentTasksResponse(interval_seconds=settings.check_interval_seconds, tasks=tasks)
 
@@ -94,23 +126,33 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
 @router.post("/agent/results", response_model=Message)
 def agent_results(payload: AgentResultsIn, request: Request, agent: Agent = Depends(get_agent), db: Session = Depends(get_db)):
     mark_agent_online(db, agent, client_ip_from_request(request))
+    origins = (
+        db.query(Origin)
+        .options(selectinload(Origin.group).selectinload(FailoverGroup.origins))
+        .join(Origin.group)
+        .filter(Origin.enabled.is_(True))
+        .all()
+    )
+    processed_keys: set[tuple[str, int]] = set()
     for item in payload.results:
-        origin = db.get(Origin, item.origin_id)
-        if origin is None:
+        key = _probe_key(item.target, item.port)
+        if key in processed_keys:
             continue
-        source_key = f"agent:{agent.id}"
-        if is_expanded_origin(origin):
-            source_key = expanded_source_key(source_key, item.target)
-        apply_probe_result(
-            db,
-            origin,
-            item.success,
-            item.rtt_ms,
-            item.error,
-            source_key=source_key,
-            agent=agent,
-            target=item.target,
-            port=item.port,
-        )
+        processed_keys.add(key)
+        for origin in _matching_origins_for_probe(origins, item.target, item.port):
+            source_key = f"agent:{agent.id}"
+            if is_expanded_origin(origin):
+                source_key = expanded_source_key(source_key, item.target)
+            apply_probe_result(
+                db,
+                origin,
+                item.success,
+                item.rtt_ms,
+                item.error,
+                source_key=source_key,
+                agent=agent,
+                target=item.target,
+                port=item.port,
+            )
     db.commit()
     return Message(message="探测结果已接收")
