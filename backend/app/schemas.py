@@ -110,6 +110,7 @@ class OriginUpdate(BaseModel):
 class ProbeStateOut(BaseModel):
     id: int
     source_key: str
+    agent_name: str | None = None
     status: str
     success_count: int
     fail_count: int

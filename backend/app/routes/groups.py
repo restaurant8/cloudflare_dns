@@ -8,7 +8,7 @@ from ..dns_utils import normalize_hostname, parse_target
 from ..events import add_event
 from ..failover import evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records
 from ..health import run_local_checks
-from ..models import FailoverGroup, Origin, User, Zone
+from ..models import FailoverGroup, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
 from ..origin_expansion import DIRECT_PUBLISH_MODE, EXPANDED_PUBLISH_MODE, set_healthy_ips, set_published_ips, set_resolved_ips
 from ..schemas import FailoverGroupCreate, FailoverGroupOut, FailoverGroupUpdate, Message, OriginBulkCreate, OriginCreate, OriginOut, OriginUpdate
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/groups", tags=["groups"])
 
 
 def _group_query(db: Session):
-    return db.query(FailoverGroup).options(selectinload(FailoverGroup.origins).selectinload(Origin.probe_states))
+    return db.query(FailoverGroup).options(selectinload(FailoverGroup.origins).selectinload(Origin.probe_states).selectinload(ProbeState.agent))
 
 
 def _origin_from_payload(group: FailoverGroup, payload: OriginCreate) -> Origin:

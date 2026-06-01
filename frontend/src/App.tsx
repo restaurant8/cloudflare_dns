@@ -23,7 +23,7 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate } from "./api";
-import type { Agent, Credential, DnsRecord, EventItem, FailoverGroup, Origin, Overview, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
+import type { Agent, Credential, DnsRecord, EventItem, FailoverGroup, Origin, Overview, ProbeState, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "agents" | "webhooks" | "account" | "events";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; enabled: boolean };
@@ -113,10 +113,14 @@ function recordTypeForTargetType(value: string, publishMode = "direct"): string 
   return "-";
 }
 
-function probeSourceText(value: string): string {
+function probeSourceText(probe: ProbeState): string {
+  const value = probe.source_key;
   const [source, ip] = value.split("|");
   if (source === "local") return ip ? `本地 ${ip}` : "本地";
-  if (source.startsWith("agent:")) return ip ? `探针 ${source.slice(6)} ${ip}` : `探针 ${source.slice(6)}`;
+  if (source.startsWith("agent:")) {
+    const name = probe.agent_name || `探针 ${source.slice(6)}`;
+    return ip ? `${name} ${ip}` : name;
+  }
   return value;
 }
 
@@ -1237,7 +1241,7 @@ function GroupsPanel({
                               <div className="probeChips">
                                 {visibleProbeStates.map((probe) => (
                                   <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || ""}>
-                                    {probeSourceText(probe.source_key)}：{statusText(probe.status)}
+                                    {probeSourceText(probe)}：{statusText(probe.status)}
                                   </span>
                                 ))}
                                 {hiddenProbeCount > 0 && (

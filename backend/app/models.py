@@ -172,6 +172,10 @@ class ProbeState(Base, TimestampMixin):
     origin: Mapped["Origin"] = relationship("Origin", back_populates="probe_states")
     agent: Mapped["Agent"] = relationship("Agent", back_populates="probe_states")
 
+    @property
+    def agent_name(self) -> str | None:
+        return self.agent.name if self.agent else None
+
 
 class ProbeResult(Base, TimestampMixin):
     __tablename__ = "probe_results"
