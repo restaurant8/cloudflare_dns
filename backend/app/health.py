@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, selectinload
 from .config import get_settings
 from .dns_utils import tcp_check
 from .events import add_event
-from .models import Agent, FailoverGroup, Origin, ProbeResult, ProbeState
+from .models import Agent, FailoverGroup, Origin, ProbeResult, ProbeState, TargetPoolItem, TargetPoolProbeState
 from .notifier import send_webhooks
 from .origin_expansion import (
     EXPANDED_PUBLISH_MODE,
@@ -48,6 +48,35 @@ def _probe_state(db: Session, origin: Origin, source_key: str, agent: Agent | No
         db.add(state)
         db.flush()
     return state
+
+
+def _target_pool_probe_state(db: Session, item: TargetPoolItem, source_key: str, agent: Agent | None) -> TargetPoolProbeState:
+    state = (
+        db.query(TargetPoolProbeState)
+        .filter(TargetPoolProbeState.item_id == item.id, TargetPoolProbeState.source_key == source_key)
+        .one_or_none()
+    )
+    if state is None:
+        state = TargetPoolProbeState(item_id=item.id, source_key=source_key, agent_id=agent.id if agent else None)
+        db.add(state)
+        db.flush()
+    return state
+
+
+def target_pool_stale_before(item: TargetPoolItem) -> datetime:
+    interval = max(getattr(item, "check_interval_seconds", None) or 600, 60)
+    return datetime.utcnow() - timedelta(seconds=max(interval * 3, 90))
+
+
+def target_pool_check_due(item: TargetPoolItem, now: datetime | None = None, source_key: str = LOCAL_SOURCE) -> bool:
+    if not item.enabled:
+        return False
+    state = next((probe_state for probe_state in item.probe_states if probe_state.source_key == source_key), None)
+    if state is None or state.last_checked_at is None:
+        return True
+    current_time = now or datetime.utcnow()
+    interval = max(getattr(item, "check_interval_seconds", None) or 600, 60)
+    return state.last_checked_at <= current_time - timedelta(seconds=interval)
 
 
 def active_agents(db: Session, stale_before: datetime | None = None) -> list[Agent]:
@@ -209,6 +238,35 @@ def apply_probe_result(
     recalculate_origin_status(db, origin)
 
 
+def apply_target_pool_probe_result(
+    db: Session,
+    item: TargetPoolItem,
+    success: bool,
+    rtt_ms: float | None,
+    error: str | None,
+    source_key: str = LOCAL_SOURCE,
+    agent: Agent | None = None,
+) -> None:
+    settings = get_settings()
+    now = datetime.utcnow()
+    state = _target_pool_probe_state(db, item, source_key, agent)
+    if success:
+        state.success_count += 1
+        state.fail_count = 0
+        if state.success_count >= settings.recovery_threshold:
+            state.status = "healthy"
+    else:
+        state.fail_count += 1
+        state.success_count = 0
+        if state.fail_count >= settings.fail_threshold:
+            state.status = "unhealthy"
+
+    state.last_checked_at = now
+    state.last_error = None if success else error
+    state.last_rtt_ms = rtt_ms
+    recalculate_target_pool_status(db, item)
+
+
 def recalculate_origin_status(db: Session, origin: Origin) -> None:
     if is_expanded_origin(origin):
         recalculate_expanded_origin_status(db, origin)
@@ -295,6 +353,99 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
             payload,
         )
         send_webhooks(db, "origin.status_changed", payload)
+
+
+def copy_target_pool_status_from_matching_origin(db: Session, item: TargetPoolItem) -> bool:
+    interval = max(getattr(item, "check_interval_seconds", None) or 600, 60)
+    fresh_after = datetime.utcnow() - timedelta(seconds=interval)
+    newest = (
+        db.query(Origin)
+        .join(Origin.group)
+        .filter(Origin.enabled.is_(True), FailoverGroup.enabled.is_(True), Origin.last_checked_at.is_not(None), Origin.port == item.port, Origin.target == item.target)
+        .order_by(Origin.last_checked_at.desc(), Origin.id.desc())
+        .first()
+    )
+    if newest is None or newest.last_checked_at is None:
+        return False
+    if newest.last_checked_at < fresh_after:
+        return False
+    item.status = newest.status
+    item.last_checked_at = newest.last_checked_at
+    item.last_error = newest.last_error
+    item.last_rtt_ms = newest.last_rtt_ms
+    copied_states = False
+    for origin_state in newest.probe_states:
+        if origin_state.last_checked_at is None:
+            continue
+        state = _target_pool_probe_state(db, item, origin_state.source_key, origin_state.agent)
+        state.agent_id = origin_state.agent_id
+        state.status = origin_state.status
+        state.success_count = origin_state.success_count
+        state.fail_count = origin_state.fail_count
+        state.last_checked_at = origin_state.last_checked_at
+        state.last_error = origin_state.last_error
+        state.last_rtt_ms = origin_state.last_rtt_ms
+        copied_states = True
+    if copied_states:
+        recalculate_target_pool_status(db, item)
+    return True
+
+
+def recalculate_target_pool_status(db: Session, item: TargetPoolItem) -> None:
+    if not item.enabled:
+        item.status = "disabled"
+        return
+
+    stale_before = target_pool_stale_before(item)
+    china_agents, foreign_agents = active_agents_by_region(db, stale_before)
+    probe_states = db.query(TargetPoolProbeState).filter(TargetPoolProbeState.item_id == item.id).all()
+    states = {state.source_key: state for state in probe_states}
+    china_source_keys = _selected_agent_source_keys(china_agents, states, stale_before)
+    foreign_source_keys = [LOCAL_SOURCE, *_selected_agent_source_keys(foreign_agents, states, stale_before)]
+
+    source_health: dict[str, str] = {}
+    source_errors: dict[str, str | None] = {}
+    for source_key in [*foreign_source_keys, *china_source_keys]:
+        status, error = _probe_health_for_state(states, source_key, stale_before)
+        source_health[source_key] = status
+        source_errors[source_key] = error
+
+    foreign_status = _aggregate_source_health(source_health, foreign_source_keys)
+    china_status = _aggregate_source_health(source_health, china_source_keys)
+
+    if foreign_status == "healthy":
+        if china_status in {"healthy", "not_configured"}:
+            item.status = "healthy"
+            item.last_error = None
+        elif china_status == "unknown":
+            item.status = "unknown"
+            item.last_error = "等待国内探针探测结果"
+        else:
+            item.status = "blocked"
+            item.last_error = "国外探测正常，但国内探针不可达，疑似被墙"
+    elif foreign_status == "unknown":
+        item.status = "unknown"
+        item.last_error = "等待本地或国外探针探测结果"
+    else:
+        if china_status == "healthy":
+            item.status = "regional_issue"
+            item.last_error = "国内探针正常，但本地和国外探针不可达"
+        elif china_status == "unknown":
+            item.status = "unknown"
+            item.last_error = "国外探测不可达，等待国内探针确认"
+        elif china_status == "not_configured":
+            item.status = "unhealthy"
+            item.last_error = _source_errors(source_errors, foreign_source_keys) or "本地和国外探针均不可达"
+        else:
+            item.status = "machine_down"
+            item.last_error = "国内、国外探针均不可达"
+
+    newest = max((state for state in probe_states if state.last_checked_at), key=lambda state: state.last_checked_at, default=None)
+    if newest:
+        item.last_checked_at = newest.last_checked_at
+        item.last_rtt_ms = newest.last_rtt_ms
+        if item.status == "healthy":
+            item.last_error = None
 
 
 def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
@@ -410,6 +561,7 @@ def run_local_checks(
     group_id: int | None = None,
     origin_id: int | None = None,
     include_all: bool = False,
+    check_cache: dict[tuple[str, int], object] | None = None,
 ) -> int:
     settings = get_settings()
     query = (
@@ -429,7 +581,8 @@ def run_local_checks(
         if origin.group.enabled and origin_needs_probe(origin, include_all=include_all)
     ]
     checked = 0
-    check_cache = {}
+    if check_cache is None:
+        check_cache = {}
 
     def check_once(target: str, port: int):
         nonlocal checked
@@ -475,6 +628,40 @@ def run_local_checks(
             target=origin.target,
             port=origin.port,
         )
+    return checked
+
+
+def run_target_pool_checks(
+    db: Session,
+    item_id: int | None = None,
+    include_all: bool = False,
+    check_cache: dict[tuple[str, int], object] | None = None,
+) -> int:
+    settings = get_settings()
+    query = db.query(TargetPoolItem).filter(TargetPoolItem.enabled.is_(True))
+    if item_id is not None:
+        query = query.filter(TargetPoolItem.id == item_id)
+    items = query.all()
+    checked = 0
+    now = datetime.utcnow()
+    if check_cache is None:
+        check_cache = {}
+
+    def check_once(target: str, port: int):
+        nonlocal checked
+        key = (target.strip().rstrip(".").lower(), int(port))
+        if key not in check_cache:
+            check_cache[key] = tcp_check(target, port, settings.check_timeout_seconds)
+            checked += 1
+        return check_cache[key]
+
+    for item in items:
+        if not include_all and copy_target_pool_status_from_matching_origin(db, item):
+            continue
+        if not include_all and not target_pool_check_due(item, now):
+            continue
+        result = check_once(item.target, item.port)
+        apply_target_pool_probe_result(db, item, result.success, result.rtt_ms, result.error, source_key=LOCAL_SOURCE)
     return checked
 
 

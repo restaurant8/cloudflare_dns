@@ -50,6 +50,7 @@ export type Origin = {
   publish_mode: string;
   port: number;
   priority: number;
+  remark: string | null;
   enabled: boolean;
   status: string;
   last_checked_at: string | null;
@@ -67,7 +68,13 @@ export type TargetPoolItem = {
   target_type: string;
   port: number;
   remark: string | null;
+  check_interval_seconds: number;
   enabled: boolean;
+  status: string;
+  last_checked_at: string | null;
+  last_error: string | null;
+  last_rtt_ms: number | null;
+  probe_states: ProbeState[];
   created_at: string;
   updated_at: string;
 };

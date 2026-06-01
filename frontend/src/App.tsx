@@ -28,10 +28,10 @@ import { apiFetch, fmtDate, fmtTime } from "./api";
 import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverGroup, Origin, Overview, ProbeState, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "agents" | "webhooks" | "account" | "events";
-type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; enabled: boolean };
-type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; enabled: boolean };
+type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
+type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
-type TargetPoolDraft = { target: string; port: number; remark: string; enabled: boolean };
+type TargetPoolDraft = { target: string; port: number; remark: string; check_interval_seconds: number; enabled: boolean };
 type ExternalIpSourceDraft = { name: string; base_url: string; token: string; default_port: number; sync_interval_seconds: number; enabled: boolean };
 type AgentEditDraft = { name: string };
 type ToastTone = "info" | "success" | "error" | "loading";
@@ -133,6 +133,10 @@ function probeSourceIp(value: string): string | null {
   return ip || null;
 }
 
+function displayTargetWithRemark(target: string, port: number, remark?: string | null): string {
+  return remark?.trim() || `${target}:${port}`;
+}
+
 function currentProbeStates(origin: Origin) {
   if (origin.publish_mode !== "expanded") return origin.probe_states;
   const currentIps = new Set(origin.resolved_ips);
@@ -216,8 +220,8 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", enabled: true };
-const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", enabled: true };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", remark: "", enabled: true };
+const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
 const liveRefreshIntervalMs = 3000;
 
@@ -895,6 +899,7 @@ function GroupsPanel({
             target: poolDraft.target.trim(),
             port: poolDraft.port,
             remark: poolDraft.remark.trim() || null,
+            check_interval_seconds: poolDraft.check_interval_seconds,
             enabled: poolDraft.enabled
           })
         }),
@@ -931,6 +936,7 @@ function GroupsPanel({
         target: item.target,
         port: item.port,
         remark: item.remark || "",
+        check_interval_seconds: item.check_interval_seconds,
         enabled: item.enabled
       }
     }));
@@ -947,6 +953,7 @@ function GroupsPanel({
             target: draft.target.trim(),
             port: draft.port,
             remark: draft.remark.trim() || null,
+            check_interval_seconds: draft.check_interval_seconds,
             enabled: draft.enabled
           })
         }),
@@ -964,6 +971,7 @@ function GroupsPanel({
       port: 22,
       priority: maxPriority + 10,
       publish_mode: "direct",
+      remark: "",
       enabled: true
     });
   }
@@ -976,6 +984,7 @@ function GroupsPanel({
       target: item.target,
       port: item.port || 22,
       publish_mode: "direct",
+      remark: item.remark || "",
       enabled: true
     }));
   }
@@ -994,6 +1003,7 @@ function GroupsPanel({
             port: originAdd.port,
             priority: originAdd.priority,
             publish_mode: addTargetType === "hostname" ? originAdd.publish_mode : "direct",
+            remark: originAdd.remark.trim() || null,
             enabled: originAdd.enabled
           })
         });
@@ -1042,6 +1052,7 @@ function GroupsPanel({
         port: origin.port,
         priority: origin.priority,
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
+        remark: origin.remark || "",
         enabled: origin.enabled
       }
     }));
@@ -1071,6 +1082,7 @@ function GroupsPanel({
       target: item.target,
       port: item.port || 22,
       publish_mode: "direct",
+      remark: item.name || "",
       enabled: true
     }));
   }
@@ -1117,6 +1129,10 @@ function GroupsPanel({
               检查端口
               <input type="number" min={1} max={65535} value={poolDraft.port} onChange={(event) => setPoolDraft((current) => ({ ...current, port: Number(event.target.value) }))} />
             </label>
+            <label>
+              健康检查周期（秒）
+              <input type="number" min={60} max={86400} value={poolDraft.check_interval_seconds} onChange={(event) => setPoolDraft((current) => ({ ...current, check_interval_seconds: Number(event.target.value) }))} />
+            </label>
           </div>
           <label>
             备注
@@ -1138,6 +1154,7 @@ function GroupsPanel({
                 target: item.target,
                 port: item.port,
                 remark: item.remark || "",
+                check_interval_seconds: item.check_interval_seconds,
                 enabled: item.enabled
               };
               return (
@@ -1147,6 +1164,7 @@ function GroupsPanel({
                       <div className="poolEditGrid">
                         <input value={edit.target} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, target: event.target.value } }))} />
                         <input type="number" min={1} max={65535} value={edit.port} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, port: Number(event.target.value) } }))} />
+                        <input type="number" min={60} max={86400} value={edit.check_interval_seconds} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, check_interval_seconds: Number(event.target.value) } }))} title="健康检查周期（秒）" />
                         <input value={edit.remark} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, remark: event.target.value } }))} placeholder="备注" />
                         <label className="inlineCheck">
                           <input type="checkbox" checked={edit.enabled} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, enabled: event.target.checked } }))} />
@@ -1165,11 +1183,24 @@ function GroupsPanel({
                   ) : (
                     <>
                       <div className="poolItemMain">
-                        <strong>{item.target}:{item.port}</strong>
-                        <span>{targetTypeText(item.target_type)} · 发布为 {recordTypeForTargetType(item.target_type)}{item.remark ? ` · ${item.remark}` : ""}</span>
+                        <strong title={`${item.target}:${item.port}`}>{displayTargetWithRemark(item.target, item.port, item.remark)}</strong>
+                        <span>{targetTypeText(item.target_type)} · 发布为 {recordTypeForTargetType(item.target_type)} · 检测周期 {item.check_interval_seconds}s · 最后检测 {fmtDate(item.last_checked_at)}</span>
+                        {item.last_error && <small className="danger">{item.last_error}</small>}
+                        {item.probe_states.length > 0 && (
+                          <div className="probeChips">
+                            {item.probe_states.map((probe) => (
+                              <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || `最后检测 ${fmtDate(probe.last_checked_at)}`}>
+                                {probeSourceText(probe)}：{statusText(probe.status)} · {fmtTime(probe.last_checked_at)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       <div className="rowActions">
-                        <Status value={item.enabled ? "enabled" : "disabled"} />
+                        <Status value={item.enabled ? item.status : "disabled"} />
+                        <button className="icon secondaryIcon" title="手动检测目标池" onClick={() => act(() => apiFetch(`/api/target-pool/${item.id}/run`, token, { method: "POST" }), "目标池检测已完成")}>
+                          <Play size={15} />
+                        </button>
                         <button className="icon secondaryIcon" title="修改" onClick={() => beginEditPoolItem(item)}>
                           <Pencil size={15} />
                         </button>
@@ -1247,8 +1278,8 @@ function GroupsPanel({
           </div>
           <div className="externalIpList">
             {healthyExternalItems.slice(0, 20).map((item) => (
-              <span className="externalIpChip" key={item.id} title={`${item.name} · ${fmtDate(item.last_seen_at)}`}>
-                {item.target}:{item.port}
+              <span className="externalIpChip" key={item.id} title={`${item.target}:${item.port} · ${fmtDate(item.last_seen_at)}`}>
+                {item.name || `${item.target}:${item.port}`}
               </span>
             ))}
             {healthyExternalItems.length === 0 && <span className="emptyInline">暂无外部健康 IP</span>}
@@ -1265,7 +1296,12 @@ function GroupsPanel({
           const sortedOrigins = [...group.origins].sort((left, right) => left.priority - right.priority || left.id - right.id);
           const primaryPriority = sortedOrigins[0]?.priority;
           const currentOrigin = sortedOrigins.find((origin) => origin.id === group.current_origin_id);
-          const currentTarget = currentOrigin ? `${currentOrigin.target}:${currentOrigin.port}` : "未发布";
+          const currentTarget = currentOrigin ? displayTargetWithRemark(currentOrigin.target, currentOrigin.port, currentOrigin.remark) : "未发布";
+          const groupLastCheckedAt = sortedOrigins.reduce<string | null>((latest, origin) => {
+            if (!origin.last_checked_at) return latest;
+            if (!latest) return origin.last_checked_at;
+            return new Date(origin.last_checked_at).getTime() > new Date(latest).getTime() ? origin.last_checked_at : latest;
+          }, null);
           const isCollapsed = collapsedGroupIds.has(group.id);
           return (
             <article className="groupCard" key={group.id}>
@@ -1275,7 +1311,7 @@ function GroupsPanel({
                     <h2 className="groupHostname">{group.hostname}</h2>
                     <span className="groupRoleBadge">主域名</span>
                   </div>
-                  <span className="groupMetaLine">TTL {group.ttl} · 源站 {sortedOrigins.length} 个 · 当前 {currentTarget}</span>
+                  <span className="groupMetaLine">TTL {group.ttl} · 源站 {sortedOrigins.length} 个 · 当前 {currentTarget} · 最后检测 {fmtDate(groupLastCheckedAt)}</span>
                 </div>
                 <div className="rowActions">
                   <Status value={group.last_error ? "error" : group.enabled ? "enabled" : "disabled"} />
@@ -1338,6 +1374,7 @@ function GroupsPanel({
                         port: origin.port,
                         priority: origin.priority,
                         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
+                        remark: origin.remark || "",
                         enabled: origin.enabled
                       };
                       const editType = inferDraftTargetType(originEdit.target);
@@ -1365,6 +1402,10 @@ function GroupsPanel({
                                 <label>
                                   优先级
                                   <input type="number" min={0} value={originEdit.priority} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, priority: Number(event.target.value) } }))} />
+                                </label>
+                                <label>
+                                  备注
+                                  <input placeholder="有备注时卡片优先显示备注" value={originEdit.remark} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, remark: event.target.value } }))} />
                                 </label>
                                 <label className="inlineCheck">
                                   <input
@@ -1399,14 +1440,14 @@ function GroupsPanel({
                             <>
                               <div>
                                 <div className="originTitleLine">
-                                  <strong>{origin.target}:{origin.port}</strong>
+                                  <strong title={`${origin.target}:${origin.port}`}>{displayTargetWithRemark(origin.target, origin.port, origin.remark)}</strong>
                                   <div className="originBadges">
                                     {isCurrentOrigin && <span className="originBadge current">当前使用</span>}
                                     <span className={`originBadge ${isPrimaryOrigin ? "primary" : "backup"}`}>{isPrimaryOrigin ? "主用" : "备用"}</span>
                                     <span className="originBadge record">{recordTypeForTargetType(origin.target_type, origin.publish_mode)}</span>
                                   </div>
                                 </div>
-                                <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · {origin.enabled ? "已启用" : "已停用"} · {fmtDate(origin.last_checked_at)}</span>
+                                <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · {origin.enabled ? "已启用" : "已停用"} · 最后检测 {fmtDate(origin.last_checked_at)}</span>
                                 {origin.publish_mode === "expanded" && (
                                   <div className="expandedIpList">
                                     <IpList label="解析 IP" values={origin.resolved_ips} empty="尚未解析，点击手动检测或等待下个周期" />
@@ -1418,8 +1459,8 @@ function GroupsPanel({
                                 {(visibleProbeStates.length > 0 || hiddenProbeCount > 0) && (
                                   <div className="probeChips">
                                     {visibleProbeStates.map((probe) => (
-                                      <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || ""}>
-                                        {probeSourceText(probe)}：{statusText(probe.status)}
+                                      <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || `最后检测 ${fmtDate(probe.last_checked_at)}`}>
+                                        {probeSourceText(probe)}：{statusText(probe.status)} · {fmtTime(probe.last_checked_at)}
                                       </span>
                                     ))}
                                     {hiddenProbeCount > 0 && (
@@ -1471,7 +1512,7 @@ function GroupsPanel({
                 <option value="">{enabledPoolItems.length > 0 ? "选择一个池子目标，或在下方手动输入" : "目标池暂无可用目标"}</option>
                 {enabledPoolItems.map((item) => (
                   <option value={item.id} key={item.id}>
-                    {item.target}:{item.port}{item.remark ? ` · ${item.remark}` : ""} · {targetTypeText(item.target_type)}
+                    {displayTargetWithRemark(item.target, item.port, item.remark)} · {targetTypeText(item.target_type)}
                   </option>
                 ))}
               </select>
@@ -1482,7 +1523,7 @@ function GroupsPanel({
                 <option value="">{healthyExternalItems.length > 0 ? "选择一个已同步的健康 IP" : "暂无外部健康 IP"}</option>
                 {healthyExternalItems.map((item) => (
                   <option value={item.id} key={item.id}>
-                    {item.target}:{item.port} · {item.name}
+                    {item.name || `${item.target}:${item.port}`} · {item.target}:{item.port}
                   </option>
                 ))}
               </select>
@@ -1490,6 +1531,10 @@ function GroupsPanel({
             <label>
               备用 IP / IPv6 / 域名
               <input placeholder="例如 192.0.2.10 或 backup.example.com" value={originAdd.target} onChange={(event) => setOriginAdd((current) => ({ ...current, target: event.target.value }))} />
+            </label>
+            <label>
+              备注
+              <input placeholder="例如 香港备用、线路 1" value={originAdd.remark} onChange={(event) => setOriginAdd((current) => ({ ...current, remark: event.target.value }))} />
             </label>
             <div className="modalFormGrid">
               <label>
