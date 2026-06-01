@@ -77,3 +77,43 @@ def test_agent_results_apply_duplicate_target_to_all_matching_origins():
 
     assert {state.origin_id for state in states} == {current.id, backup.id}
     assert {result.origin_id for result in results} == {current.id, backup.id}
+
+
+def test_agent_tasks_only_use_first_same_region_probe_until_it_fails():
+    db = make_session()
+    current, _, primary_agent = make_group_with_duplicate_origins(db)
+    secondary_agent = Agent(name="china-2", region="china", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow())
+    db.add(secondary_agent)
+    db.commit()
+    db.refresh(secondary_agent)
+
+    primary_response = agent_tasks(request(), agent=primary_agent, db=db)
+    secondary_response = agent_tasks(request(), agent=secondary_agent, db=db)
+
+    assert len(primary_response.tasks) == 1
+    assert primary_response.tasks[0].target == current.target
+    assert secondary_response.tasks == []
+
+
+def test_agent_tasks_use_second_same_region_probe_after_first_fails():
+    db = make_session()
+    current, _, primary_agent = make_group_with_duplicate_origins(db)
+    secondary_agent = Agent(name="china-2", region="china", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow())
+    db.add(secondary_agent)
+    db.commit()
+    db.refresh(secondary_agent)
+    db.add(
+        ProbeState(
+            origin_id=current.id,
+            source_key=f"agent:{primary_agent.id}",
+            status="unhealthy",
+            last_checked_at=datetime.utcnow(),
+            last_error="connect failed",
+        )
+    )
+    db.commit()
+
+    response = agent_tasks(request(), agent=secondary_agent, db=db)
+
+    assert len(response.tasks) == 1
+    assert response.tasks[0].target == current.target

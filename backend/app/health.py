@@ -57,6 +57,7 @@ def active_agents(db: Session, stale_before: datetime | None = None) -> list[Age
         db.query(Agent)
         .filter(Agent.enabled.is_(True), Agent.status == "online")
         .filter(Agent.last_seen_at.is_not(None), Agent.last_seen_at >= cutoff)
+        .order_by(Agent.created_at.asc(), Agent.id.asc())
         .all()
     )
 
@@ -97,6 +98,60 @@ def _source_errors(source_errors: dict[str, str | None], source_keys: list[str])
         if error:
             return error
     return None
+
+
+def _probe_health_for_state(
+    states: dict[str, ProbeState],
+    source_key: str,
+    stale_before: datetime,
+) -> tuple[str, str | None]:
+    state = states.get(source_key)
+    if state is None or state.last_checked_at is None:
+        return "unknown", None
+    if state.last_checked_at < stale_before:
+        return "unhealthy", f"{source_key} 探测结果过期"
+    if state.status in {"healthy", "unhealthy"}:
+        return state.status, state.last_error
+    return "unknown", None
+
+
+def _selected_agent_source_keys(
+    agents: list[Agent],
+    states: dict[str, ProbeState],
+    stale_before: datetime,
+    target: str | None = None,
+) -> list[str]:
+    selected: list[str] = []
+    for agent in agents:
+        source_key = _agent_source_key(agent)
+        selected.append(source_key)
+        state_key = expanded_source_key(source_key, target) if target else source_key
+        status, _ = _probe_health_for_state(states, state_key, stale_before)
+        if status != "unhealthy":
+            break
+    return selected
+
+
+def _aggregate_probe_state_keys(
+    states: dict[str, ProbeState],
+    source_keys: list[str],
+    stale_before: datetime,
+) -> tuple[str, str | None]:
+    if not source_keys:
+        return "not_configured", None
+    has_unknown = False
+    first_error: str | None = None
+    for source_key in source_keys:
+        status, error = _probe_health_for_state(states, source_key, stale_before)
+        if status == "healthy":
+            return "healthy", None
+        if status == "unknown":
+            has_unknown = True
+        if error and first_error is None:
+            first_error = error
+    if has_unknown:
+        return "unknown", first_error
+    return "unhealthy", first_error
 
 
 def apply_probe_result(
@@ -167,11 +222,11 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
 
     stale_before = datetime.utcnow() - timedelta(seconds=max(settings.check_interval_seconds * 3, 90))
     china_agents, foreign_agents = active_agents_by_region(db, stale_before)
-    china_source_keys = [_agent_source_key(agent) for agent in china_agents]
-    foreign_source_keys = [LOCAL_SOURCE, *[_agent_source_key(agent) for agent in foreign_agents]]
-    required_sources = [*foreign_source_keys, *china_source_keys]
     probe_states = db.query(ProbeState).filter(ProbeState.origin_id == origin.id).all()
     states = {state.source_key: state for state in probe_states}
+    china_source_keys = _selected_agent_source_keys(china_agents, states, stale_before)
+    foreign_source_keys = [LOCAL_SOURCE, *_selected_agent_source_keys(foreign_agents, states, stale_before)]
+    required_sources = [*foreign_source_keys, *china_source_keys]
 
     source_health: dict[str, str] = {}
     source_errors: dict[str, str | None] = {}
@@ -242,21 +297,6 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
         send_webhooks(db, "origin.status_changed", payload)
 
 
-def _probe_health_for_state(
-    states: dict[str, ProbeState],
-    source_key: str,
-    stale_before: datetime,
-) -> tuple[str, str | None]:
-    state = states.get(source_key)
-    if state is None or state.last_checked_at is None:
-        return "unknown", None
-    if state.last_checked_at < stale_before:
-        return "unhealthy", f"{source_key} 探测结果过期"
-    if state.status in {"healthy", "unhealthy"}:
-        return state.status, state.last_error
-    return "unknown", None
-
-
 def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
     settings = get_settings()
     old_status = origin.status
@@ -274,39 +314,44 @@ def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
 
     stale_before = datetime.utcnow() - timedelta(seconds=max(settings.check_interval_seconds * 3, 90))
     china_agents, foreign_agents = active_agents_by_region(db, stale_before)
-    china_source_keys = [_agent_source_key(agent) for agent in china_agents]
-    foreign_source_keys = [LOCAL_SOURCE, *[_agent_source_key(agent) for agent in foreign_agents]]
-    required_sources = [*foreign_source_keys, *china_source_keys]
     probe_states = db.query(ProbeState).filter(ProbeState.origin_id == origin.id).all()
     states = {state.source_key: state for state in probe_states}
 
-    source_healthy_ips: dict[str, set[str]] = {}
-    source_unknown: dict[str, bool] = {}
     source_errors: dict[str, str | None] = {}
-    for source_key in required_sources:
-        healthy_for_source: set[str] = set()
-        unknown_for_source = False
-        for ip in ips:
-            status, error = _probe_health_for_state(states, expanded_source_key(source_key, ip), stale_before)
-            if status == "healthy":
-                healthy_for_source.add(ip)
-            elif status == "unknown":
-                unknown_for_source = True
-            if error and source_key not in source_errors:
-                source_errors[source_key] = error
-        source_healthy_ips[source_key] = healthy_for_source
-        source_unknown[source_key] = unknown_for_source
+    foreign_healthy: set[str] = set()
+    china_healthy: set[str] = set(ips) if not china_agents else set()
+    foreign_unknown = False
+    china_unknown = False
+    for ip in ips:
+        foreign_source_keys = [LOCAL_SOURCE, *_selected_agent_source_keys(foreign_agents, states, stale_before, ip)]
+        foreign_state_keys = [expanded_source_key(source_key, ip) for source_key in foreign_source_keys]
+        foreign_ip_status, foreign_error = _aggregate_probe_state_keys(states, foreign_state_keys, stale_before)
+        if foreign_ip_status == "healthy":
+            foreign_healthy.add(ip)
+        elif foreign_ip_status == "unknown":
+            foreign_unknown = True
+        if foreign_error and "foreign" not in source_errors:
+            source_errors["foreign"] = foreign_error
 
-    foreign_healthy = set().union(*(source_healthy_ips.get(source_key, set()) for source_key in foreign_source_keys))
-    china_healthy = set().union(*(source_healthy_ips.get(source_key, set()) for source_key in china_source_keys)) if china_source_keys else set(ips)
+        if china_agents:
+            china_source_keys = _selected_agent_source_keys(china_agents, states, stale_before, ip)
+            china_state_keys = [expanded_source_key(source_key, ip) for source_key in china_source_keys]
+            china_ip_status, china_error = _aggregate_probe_state_keys(states, china_state_keys, stale_before)
+            if china_ip_status == "healthy":
+                china_healthy.add(ip)
+            elif china_ip_status == "unknown":
+                china_unknown = True
+            if china_error and "china" not in source_errors:
+                source_errors["china"] = china_error
+
     final_healthy = foreign_healthy & china_healthy
     set_healthy_ips(origin, sorted(final_healthy))
 
-    foreign_status = "healthy" if foreign_healthy else ("unknown" if any(source_unknown.get(source_key) for source_key in foreign_source_keys) else "unhealthy")
-    if not china_source_keys:
+    foreign_status = "healthy" if foreign_healthy else ("unknown" if foreign_unknown else "unhealthy")
+    if not china_agents:
         china_status = "not_configured"
     else:
-        china_status = "healthy" if china_healthy else ("unknown" if any(source_unknown.get(source_key) for source_key in china_source_keys) else "unhealthy")
+        china_status = "healthy" if china_healthy else ("unknown" if china_unknown else "unhealthy")
 
     if final_healthy:
         origin.status = "healthy"
@@ -316,7 +361,7 @@ def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
         origin.last_error = "等待展开 IP 池的本地和探针探测结果"
     elif china_status == "not_configured":
         origin.status = "unhealthy"
-        origin.last_error = _source_errors(source_errors, foreign_source_keys) or "展开 IP 池本地和国外探针均不可达"
+        origin.last_error = source_errors.get("foreign") or "展开 IP 池本地和国外探针均不可达"
     elif foreign_healthy and not china_healthy:
         origin.status = "blocked"
         origin.last_error = "展开 IP 池国外有可用 IP，但国内探针均不可达，疑似被墙"

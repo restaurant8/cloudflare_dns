@@ -104,6 +104,22 @@ def test_one_healthy_online_agent_prevents_blocked_false_positive():
     assert origin.last_error is None
 
 
+def test_second_same_region_agent_is_ignored_until_first_fails():
+    db = make_session()
+    origin, primary_agent = make_origin_with_agent(db)
+    secondary_agent = Agent(name="china-2", token_hash="hash", status="online", last_seen_at=datetime.utcnow())
+    db.add(secondary_agent)
+    db.commit()
+    db.refresh(secondary_agent)
+    set_probe(db, origin, LOCAL_SOURCE, "healthy")
+    set_probe(db, origin, f"agent:{secondary_agent.id}", "healthy")
+
+    recalculate_origin_status(db, origin)
+
+    assert origin.status == "unknown"
+    assert "等待国内探针" in origin.last_error
+
+
 def test_foreign_agent_can_keep_origin_healthy_when_local_fails():
     db = make_session()
     origin, foreign_agent = make_origin_with_agent(db)

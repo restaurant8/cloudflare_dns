@@ -12,6 +12,8 @@ import {
   Pencil,
   Play,
   Plus,
+  Power,
+  PowerOff,
   RadioTower,
   RefreshCw,
   Save,
@@ -1408,21 +1410,36 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
       <div className="panel">
         <div className="panelTitle">
           <h2>探针服务器状态</h2>
-          <p>探针会主动拉取任务；超过约 3 个检查周期未上报会自动标记为离线并发送通知。</p>
+          <p>同区域探针按列表顺序接力使用；主探针不可达时，下一个同区域探针才会复检。</p>
         </div>
         <div className="agentStatusGrid">
           {agents.map((agent) => (
             <div className="agentStatusCard" key={agent.id}>
               <div className="agentStatusHead">
                 <strong>{agent.name}</strong>
-                <Status value={agent.status} />
+                <Status value={agent.enabled ? agent.status : "disabled"} />
               </div>
               <span>区域：{agentRegionText(agent.region)}</span>
+              <span>启用状态：{agent.enabled ? "已启用" : "已停用"}</span>
               <span>最后 IP：{agent.last_ip || "-"}</span>
               <span>最后上报：{fmtDate(agent.last_seen_at)}</span>
-              <button className="icon dangerBtn" title="删除探针" onClick={() => act(() => apiFetch(`/api/agents/${agent.id}`, token, { method: "DELETE" }), "探针已删除")}>
-                <Trash2 size={15} />
-              </button>
+              <div className="rowActions">
+                <button
+                  className="icon secondaryIcon"
+                  title={agent.enabled ? "停用探针" : "启用探针"}
+                  onClick={() =>
+                    act(
+                      () => apiFetch(`/api/agents/${agent.id}/${agent.enabled ? "disable" : "enable"}`, token, { method: "PATCH" }),
+                      agent.enabled ? "探针已停用" : "探针已启用"
+                    )
+                  }
+                >
+                  {agent.enabled ? <PowerOff size={15} /> : <Power size={15} />}
+                </button>
+                <button className="icon dangerBtn" title="删除探针" onClick={() => act(() => apiFetch(`/api/agents/${agent.id}`, token, { method: "DELETE" }), "探针已删除")}>
+                  <Trash2 size={15} />
+                </button>
+              </div>
             </div>
           ))}
           {agents.length === 0 && <div className="emptyCell">还没有探针服务器</div>}
