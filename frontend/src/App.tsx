@@ -33,7 +33,7 @@ type OriginEditDraft = { target: string; port: number; priority: number; publish
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
 type TargetPoolDraft = { target: string; port: number; remark: string; enabled: boolean };
 type AgentEditDraft = { name: string };
-type ToastTone = "info" | "success" | "error" | "loading" | "click";
+type ToastTone = "info" | "success" | "error" | "loading";
 type ActionRunner = <T>(fn: () => Promise<T>, done?: string, afterSuccess?: () => void) => Promise<boolean>;
 
 const nav: { id: Section; label: string; icon: typeof Activity }[] = [
@@ -229,6 +229,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [liveUpdatedAt, setLiveUpdatedAt] = useState<string | null>(null);
   const messageTimer = useRef<number | null>(null);
+  const pendingActionButton = useRef<{ element: HTMLButtonElement; startedAt: number } | null>(null);
 
   const [overview, setOverview] = useState<Overview>(emptyOverview);
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -318,8 +319,20 @@ export default function App() {
   }
 
   async function act<T>(fn: () => Promise<T>, done = "已完成", afterSuccess?: () => void) {
+    const pending = pendingActionButton.current;
+    pendingActionButton.current = null;
+    const actionButton =
+      pending && Date.now() - pending.startedAt < 1500 && document.contains(pending.element)
+        ? pending.element
+        : null;
     setBusy(true);
-    showMessage("正在处理，请稍候...", "loading", 0);
+    if (messageTimer.current) {
+      window.clearTimeout(messageTimer.current);
+      messageTimer.current = null;
+    }
+    setMessage("");
+    actionButton?.classList.add("buttonLoading");
+    actionButton?.setAttribute("aria-busy", "true");
     try {
       await fn();
       afterSuccess?.();
@@ -331,6 +344,8 @@ export default function App() {
       showMessage(error instanceof Error ? error.message : "请求失败", "error", 5000);
       return false;
     } finally {
+      actionButton?.classList.remove("buttonLoading");
+      actionButton?.removeAttribute("aria-busy");
       setBusy(false);
     }
   }
@@ -344,12 +359,11 @@ export default function App() {
       const target = event.target;
       if (!(target instanceof Element)) return;
       const button = target.closest("button");
-      if (!button || button.disabled) return;
-      const label = button.getAttribute("aria-label") || button.getAttribute("title") || button.textContent?.replace(/\s+/g, " ").trim() || "按钮";
+      if (!(button instanceof HTMLButtonElement) || button.disabled) return;
+      pendingActionButton.current = { element: button, startedAt: Date.now() };
       button.classList.remove("buttonClicked");
       void button.offsetWidth;
       button.classList.add("buttonClicked");
-      showMessage(`已点击：${label}`, "click", 900);
       window.setTimeout(() => button.classList.remove("buttonClicked"), 360);
     }
 

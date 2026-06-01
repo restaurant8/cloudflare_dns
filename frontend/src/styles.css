@@ -67,6 +67,30 @@ button.buttonClicked:not(:disabled)::after {
   position: absolute;
 }
 
+button.buttonLoading {
+  pointer-events: none;
+}
+
+button.buttonLoading > svg,
+button.buttonLoading > span {
+  opacity: 0;
+}
+
+button.buttonLoading::before {
+  animation: buttonLoadingSpin 760ms linear infinite;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 999px;
+  content: "";
+  height: 15px;
+  left: 50%;
+  margin-left: -7.5px;
+  margin-top: -7.5px;
+  position: absolute;
+  top: 50%;
+  width: 15px;
+}
+
 button:focus-visible {
   outline: 3px solid rgba(23, 107, 135, 0.24);
   outline-offset: 2px;
@@ -80,6 +104,12 @@ button:focus-visible {
   100% {
     opacity: 0;
     transform: scale(1.08);
+  }
+}
+
+@keyframes buttonLoadingSpin {
+  to {
+    transform: rotate(360deg);
   }
 }
 
@@ -1087,8 +1117,7 @@ form.panel {
   color: #b42318;
 }
 
-.notice.loading,
-.notice.click {
+.notice.loading {
   background: #e7f4f7;
   border-color: #b9dfe8;
   color: #176b87;
