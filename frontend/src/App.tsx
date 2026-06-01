@@ -32,6 +32,7 @@ type OriginAddDraft = { target: string; port: number; priority: number; publish_
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; enabled: boolean };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
 type TargetPoolDraft = { target: string; port: number; remark: string; enabled: boolean };
+type AgentEditDraft = { name: string };
 type ToastTone = "info" | "success" | "error" | "loading" | "click";
 type ActionRunner = <T>(fn: () => Promise<T>, done?: string, afterSuccess?: () => void) => Promise<boolean>;
 
@@ -1392,6 +1393,8 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
   const [name, setName] = useState("");
   const [region, setRegion] = useState<"china" | "foreign">("china");
   const [copied, setCopied] = useState(false);
+  const [editingAgentId, setEditingAgentId] = useState<number | null>(null);
+  const [agentEdits, setAgentEdits] = useState<Record<number, AgentEditDraft>>({});
   const panelUrl = window.location.origin;
   const installScriptUrl = `${panelUrl}/api/agent/install.sh`;
   const runInstallCommand = `CONTROL_URL=${shellQuote(panelUrl)} AGENT_TOKEN=${shellQuote(agentToken)} bash /tmp/cloudflare-dns-agent-install.sh`;
@@ -1417,6 +1420,33 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
     }, "探针已创建");
     setName("");
     setRegion("china");
+  }
+
+  function beginEditAgent(agent: Agent) {
+    setEditingAgentId(agent.id);
+    setAgentEdits((current) => ({
+      ...current,
+      [agent.id]: { name: agent.name }
+    }));
+  }
+
+  async function saveAgentEdit(agentId: number) {
+    const draft = agentEdits[agentId];
+    if (!draft) return;
+    await act(
+      () => {
+        const nextName = draft.name.trim();
+        if (!nextName) {
+          throw new Error("探针名称不能为空");
+        }
+        return apiFetch(`/api/agents/${agentId}`, token, {
+          method: "PATCH",
+          body: JSON.stringify({ name: nextName })
+        });
+      },
+      "探针名称已更新",
+      () => setEditingAgentId(null)
+    );
   }
 
   return (
@@ -1462,35 +1492,62 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
           <p>同区域探针按列表顺序接力使用；主探针不可达时，下一个同区域探针才会复检。</p>
         </div>
         <div className="agentStatusGrid">
-          {agents.map((agent) => (
-            <div className="agentStatusCard" key={agent.id}>
-              <div className="agentStatusHead">
-                <strong>{agent.name}</strong>
-                <Status value={agent.enabled ? agent.status : "disabled"} />
+          {agents.map((agent) => {
+            const edit = agentEdits[agent.id] || { name: agent.name };
+            const isEditing = editingAgentId === agent.id;
+            return (
+              <div className="agentStatusCard" key={agent.id}>
+                <div className="agentStatusHead">
+                  {isEditing ? (
+                    <label className="agentNameEdit">
+                      探针名称
+                      <input value={edit.name} onChange={(event) => setAgentEdits((current) => ({ ...current, [agent.id]: { name: event.target.value } }))} autoFocus />
+                    </label>
+                  ) : (
+                    <strong>{agent.name}</strong>
+                  )}
+                  <Status value={agent.enabled ? agent.status : "disabled"} />
+                </div>
+                <span>区域：{agentRegionText(agent.region)}</span>
+                <span>启用状态：{agent.enabled ? "已启用" : "已停用"}</span>
+                <span>最后 IP：{agent.last_ip || "-"}</span>
+                <span>最后上报：{fmtDate(agent.last_seen_at)}</span>
+                <div className="rowActions">
+                  {isEditing ? (
+                    <>
+                      <button className="icon" title="保存探针名称" onClick={() => saveAgentEdit(agent.id)}>
+                        <Save size={15} />
+                      </button>
+                      <button className="icon secondaryIcon" title="取消改名" onClick={() => setEditingAgentId(null)}>
+                        ×
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="icon secondaryIcon" title="修改探针名称" onClick={() => beginEditAgent(agent)}>
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        className="icon secondaryIcon"
+                        title={agent.enabled ? "停用探针" : "启用探针"}
+                        onClick={() =>
+                          act(
+                            () => apiFetch(`/api/agents/${agent.id}/${agent.enabled ? "disable" : "enable"}`, token, { method: "PATCH" }),
+                            agent.enabled ? "探针已停用" : "探针已启用"
+                          )
+                        }
+                      >
+                        {agent.enabled ? <PowerOff size={15} /> : <Power size={15} />}
+                      </button>
+                      <button className="icon dangerBtn" title="删除探针" onClick={() => act(() => apiFetch(`/api/agents/${agent.id}`, token, { method: "DELETE" }), "探针已删除")}>
+                        <Trash2 size={15} />
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
-              <span>区域：{agentRegionText(agent.region)}</span>
-              <span>启用状态：{agent.enabled ? "已启用" : "已停用"}</span>
-              <span>最后 IP：{agent.last_ip || "-"}</span>
-              <span>最后上报：{fmtDate(agent.last_seen_at)}</span>
-              <div className="rowActions">
-                <button
-                  className="icon secondaryIcon"
-                  title={agent.enabled ? "停用探针" : "启用探针"}
-                  onClick={() =>
-                    act(
-                      () => apiFetch(`/api/agents/${agent.id}/${agent.enabled ? "disable" : "enable"}`, token, { method: "PATCH" }),
-                      agent.enabled ? "探针已停用" : "探针已启用"
-                    )
-                  }
-                >
-                  {agent.enabled ? <PowerOff size={15} /> : <Power size={15} />}
-                </button>
-                <button className="icon dangerBtn" title="删除探针" onClick={() => act(() => apiFetch(`/api/agents/${agent.id}`, token, { method: "DELETE" }), "探针已删除")}>
-                  <Trash2 size={15} />
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
           {agents.length === 0 && <div className="emptyCell">还没有探针服务器</div>}
         </div>
       </div>

@@ -190,6 +190,10 @@ class AgentCreate(BaseModel):
     region: Literal["china", "foreign"] = "china"
 
 
+class AgentUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
 class AgentOut(BaseModel):
     id: int
     name: str

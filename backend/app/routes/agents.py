@@ -13,7 +13,7 @@ from ..health import active_agents, agent_region, apply_probe_result, mark_agent
 from ..models import Agent, FailoverGroup, Origin, User
 from ..origin_expansion import expanded_source_key, is_expanded_origin, resolved_ips
 from ..request_utils import client_ip_from_request
-from ..schemas import AgentCreate, AgentCreated, AgentOut, AgentResultsIn, AgentTasksResponse, AgentTask, Message
+from ..schemas import AgentCreate, AgentCreated, AgentOut, AgentResultsIn, AgentTasksResponse, AgentTask, AgentUpdate, Message
 from ..security import hash_token
 
 
@@ -97,6 +97,20 @@ def create_agent(payload: AgentCreate, _: User = Depends(get_current_user), db: 
     db.commit()
     db.refresh(agent)
     return AgentCreated(agent=agent, token=token)
+
+
+@router.patch("/agents/{agent_id}", response_model=AgentOut)
+def update_agent(agent_id: int, payload: AgentUpdate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    agent = db.get(Agent, agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="探针不存在")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="探针名称不能为空")
+    agent.name = name
+    db.commit()
+    db.refresh(agent)
+    return agent
 
 
 @router.patch("/agents/{agent_id}/disable", response_model=AgentOut)

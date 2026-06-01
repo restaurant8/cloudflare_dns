@@ -963,6 +963,17 @@ form.panel {
   gap: 8px;
 }
 
+.agentNameEdit {
+  display: grid;
+  flex: 1 1 220px;
+  gap: 5px;
+  min-width: 180px;
+}
+
+.agentNameEdit input {
+  min-height: 36px;
+}
+
 .commandHeader {
   align-items: center;
   color: #516070;

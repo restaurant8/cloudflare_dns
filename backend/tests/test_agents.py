@@ -6,8 +6,8 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import Agent, CloudflareCredential, FailoverGroup, Origin, ProbeResult, ProbeState, Zone
-from app.routes.agents import agent_results, agent_tasks
-from app.schemas import AgentResultIn, AgentResultsIn
+from app.routes.agents import agent_results, agent_tasks, update_agent
+from app.schemas import AgentResultIn, AgentResultsIn, AgentUpdate
 from app.security import encrypt_secret
 
 
@@ -52,6 +52,16 @@ def test_agent_tasks_reuses_duplicate_targets():
     assert response.tasks[0].origin_id == current.id
     assert response.tasks[0].target == current.target
     assert response.tasks[0].port == current.port == backup.port
+
+
+def test_update_agent_renames_probe():
+    db = make_session()
+    _, _, agent = make_group_with_duplicate_origins(db)
+
+    response = update_agent(agent.id, AgentUpdate(name="  mainland probe  "), _=SimpleNamespace(), db=db)
+
+    assert response.name == "mainland probe"
+    assert db.get(Agent, agent.id).name == "mainland probe"
 
 
 def test_agent_results_apply_duplicate_target_to_all_matching_origins():
