@@ -6,7 +6,7 @@ from .cloudflare import CloudflareClient, CloudflareError
 from .config import get_settings
 from .dns_utils import record_type_for_target_type
 from .events import add_event
-from .health import ORIGIN_AVAILABLE_STATUS, run_local_checks
+from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, run_local_checks
 from .models import DnsRecord, FailoverGroup, Origin
 from .notifier import send_webhooks
 from .origin_expansion import (
@@ -23,6 +23,8 @@ from .sync import MANAGED_RECORD_TYPES, sync_zone_records
 
 MANAGED_RECORD_COMMENT_PREFIX = "managed by cloudflare-dns-failover"
 NO_HEALTHY_ORIGIN_MESSAGE = "没有可用的健康源站"
+WAITING_FOR_PROBES_MESSAGE = "等待源站探测结果"
+RECOVERABLE_GROUP_ERRORS = {NO_HEALTHY_ORIGIN_MESSAGE, WAITING_FOR_PROBES_MESSAGE}
 
 
 def choose_desired_origin(origins: list[Origin], current_origin_id: int | None = None) -> Origin | None:
@@ -58,6 +60,10 @@ def _origin_status_summaries(group: FailoverGroup) -> list[dict]:
         }
         for origin in sorted(group.origins, key=lambda item: (item.priority, item.id))
     ]
+
+
+def _has_pending_origin_checks(group: FailoverGroup) -> bool:
+    return any(origin.enabled and origin.status not in FINAL_ORIGIN_STATUSES for origin in group.origins)
 
 
 def _should_notify_no_healthy(group: FailoverGroup, now: datetime) -> bool:
@@ -282,6 +288,9 @@ def evaluate_failover_groups(db: Session) -> int:
 
         desired = choose_desired_origin(group.origins, group.current_origin_id)
         if desired is None:
+            if _has_pending_origin_checks(group):
+                group.last_error = WAITING_FOR_PROBES_MESSAGE
+                continue
             group.last_error = NO_HEALTHY_ORIGIN_MESSAGE
             if _should_notify_no_healthy(group, now):
                 group.no_healthy_notified_at = now
@@ -289,6 +298,9 @@ def evaluate_failover_groups(db: Session) -> int:
                 add_event(db, "failover.no_healthy_origin", "error", f"{group.hostname} 没有可用的健康源站", payload)
                 send_webhooks(db, "failover.no_healthy_origin", payload)
             continue
+        group.no_healthy_notified_at = None
+        if group.last_error in RECOVERABLE_GROUP_ERRORS:
+            group.last_error = None
         if desired.id == group.current_origin_id and not group.last_error:
             if is_expanded_origin(desired) and sorted(healthy_ips(desired)) != sorted(published_ips(desired)):
                 try:

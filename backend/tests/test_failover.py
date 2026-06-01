@@ -276,6 +276,24 @@ def test_no_healthy_origin_notification_is_throttled(monkeypatch):
     assert [item[0] for item in sent] == ["failover.no_healthy_origin", "failover.no_healthy_origin"]
 
 
+def test_pending_origin_checks_do_not_send_no_healthy_notification(monkeypatch):
+    db = make_session()
+    group, origin_model = setup_group(db, "192.0.2.10")
+    origin_model.status = "unknown"
+    group.current_origin_id = origin_model.id
+    db.commit()
+    sent = []
+
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda db, event_type, payload: sent.append((event_type, payload)))
+
+    switches = evaluate_failover_groups(db)
+
+    assert switches == 0
+    assert sent == []
+    assert group.last_error == "等待源站探测结果"
+
+
 def test_validate_group_hostname_records_rejects_cname_conflict():
     class Client:
         def list_dns_records(self, zone_id: str, name: str | None = None):
