@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -247,6 +249,31 @@ def test_evaluate_probes_group_before_switching_from_failed_current(monkeypatch)
     assert switches == 1
     assert calls == [(group.id, True)]
     assert group.current_origin_id == backup.id
+
+
+def test_no_healthy_origin_notification_is_throttled(monkeypatch):
+    db = make_session()
+    group, origin_model = setup_group(db, "192.0.2.10")
+    origin_model.status = "machine_down"
+    group.current_origin_id = origin_model.id
+    db.commit()
+    sent = []
+
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda db, event_type, payload: sent.append((event_type, payload)))
+
+    evaluate_failover_groups(db)
+    group.last_error = None
+    evaluate_failover_groups(db)
+
+    assert [item[0] for item in sent] == ["failover.no_healthy_origin"]
+    assert sent[0][1]["origins"][0]["status"] == "machine_down"
+
+    group.no_healthy_notified_at = datetime.utcnow() - timedelta(minutes=31)
+    group.last_error = None
+    evaluate_failover_groups(db)
+
+    assert [item[0] for item in sent] == ["failover.no_healthy_origin", "failover.no_healthy_origin"]
 
 
 def test_validate_group_hostname_records_rejects_cname_conflict():

@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session, selectinload
 
 from .cloudflare import CloudflareClient, CloudflareError
+from .config import get_settings
 from .dns_utils import record_type_for_target_type
 from .events import add_event
 from .health import ORIGIN_AVAILABLE_STATUS, run_local_checks
@@ -21,6 +22,7 @@ from .sync import MANAGED_RECORD_TYPES, sync_zone_records
 
 
 MANAGED_RECORD_COMMENT_PREFIX = "managed by cloudflare-dns-failover"
+NO_HEALTHY_ORIGIN_MESSAGE = "没有可用的健康源站"
 
 
 def choose_desired_origin(origins: list[Origin], current_origin_id: int | None = None) -> Origin | None:
@@ -42,6 +44,28 @@ def _current_origin(group: FailoverGroup) -> Origin | None:
 def _should_probe_group_before_switch(group: FailoverGroup) -> bool:
     current = _current_origin(group)
     return current is None or not current.enabled or current.status != ORIGIN_AVAILABLE_STATUS
+
+
+def _origin_status_summaries(group: FailoverGroup) -> list[dict]:
+    return [
+        {
+            "origin_id": origin.id,
+            "target": origin.target,
+            "port": origin.port,
+            "status": origin.status,
+            "last_checked_at": origin.last_checked_at.isoformat() if origin.last_checked_at else None,
+            "last_error": origin.last_error,
+        }
+        for origin in sorted(group.origins, key=lambda item: (item.priority, item.id))
+    ]
+
+
+def _should_notify_no_healthy(group: FailoverGroup, now: datetime) -> bool:
+    settings = get_settings()
+    interval = max(settings.no_healthy_notification_interval_seconds, 60)
+    if group.no_healthy_notified_at is None:
+        return True
+    return (now - group.no_healthy_notified_at).total_seconds() >= interval
 
 
 def _normalized_record_name(value: str | None) -> str:
@@ -258,9 +282,10 @@ def evaluate_failover_groups(db: Session) -> int:
 
         desired = choose_desired_origin(group.origins, group.current_origin_id)
         if desired is None:
-            if group.last_error != "没有可用的健康源站":
-                group.last_error = "没有可用的健康源站"
-                payload = {"group_id": group.id, "hostname": group.hostname}
+            group.last_error = NO_HEALTHY_ORIGIN_MESSAGE
+            if _should_notify_no_healthy(group, now):
+                group.no_healthy_notified_at = now
+                payload = {"group_id": group.id, "hostname": group.hostname, "origins": _origin_status_summaries(group)}
                 add_event(db, "failover.no_healthy_origin", "error", f"{group.hostname} 没有可用的健康源站", payload)
                 send_webhooks(db, "failover.no_healthy_origin", payload)
             continue

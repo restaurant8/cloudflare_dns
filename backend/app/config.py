@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     check_interval_seconds: int = 30
     check_timeout_seconds: float = 5.0
     external_ip_sync_interval_seconds: int = 600
+    no_healthy_notification_interval_seconds: int = 30 * 60
     fail_threshold: int = 5
     recovery_threshold: int = 2
     access_token_ttl_seconds: int = 7 * 24 * 60 * 60

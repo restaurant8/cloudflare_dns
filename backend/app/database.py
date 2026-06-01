@@ -57,6 +57,8 @@ def _migrate_existing_schema() -> None:
 
         if "failover_groups" in table_names:
             existing_columns = {column["name"]: column for column in inspector.get_columns("failover_groups")}
+            if "no_healthy_notified_at" not in existing_columns:
+                connection.execute(text(_failover_group_no_healthy_migration_statement(dialect)))
             current_record_id = existing_columns.get("current_record_id")
             if current_record_id is not None:
                 column_type = str(current_record_id["type"]).lower()
@@ -125,6 +127,12 @@ def _external_ip_item_migration_statements(dialect: str) -> dict[str, str]:
         "machine_key": "ALTER TABLE external_ip_items ADD COLUMN machine_key VARCHAR(255)",
         "country": "ALTER TABLE external_ip_items ADD COLUMN country VARCHAR(120)",
     }
+
+
+def _failover_group_no_healthy_migration_statement(dialect: str) -> str:
+    if dialect == "postgresql":
+        return "ALTER TABLE failover_groups ADD COLUMN no_healthy_notified_at TIMESTAMP NULL"
+    return "ALTER TABLE failover_groups ADD COLUMN no_healthy_notified_at DATETIME NULL"
 
 
 def get_db():

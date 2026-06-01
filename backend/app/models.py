@@ -86,6 +86,7 @@ class FailoverGroup(Base, TimestampMixin):
     current_record_id: Mapped[str | None] = mapped_column(Text)
     last_switch_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
+    no_healthy_notified_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     zone: Mapped["Zone"] = relationship("Zone", back_populates="groups")
     origins: Mapped[list["Origin"]] = relationship("Origin", back_populates="group", cascade="all, delete-orphan")

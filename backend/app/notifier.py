@@ -121,7 +121,16 @@ def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
             ]
         )
     elif event_type == "failover.no_healthy_origin":
-        lines.extend([_line("主机名", payload.get("hostname")), "请检查源站池和探针连通性。"])
+        lines.extend([_line("主机名", payload.get("hostname")), "当前没有健康源站，不代表探针离线；请查看下面的源站健康状态。"])
+        origins = payload.get("origins")
+        if isinstance(origins, list):
+            for origin in origins[:8]:
+                if not isinstance(origin, dict):
+                    continue
+                target = f"{origin.get('target', '-')}:{origin.get('port', '-')}"
+                status = STATUS_NAMES.get(str(origin.get("status")), origin.get("status"))
+                checked_at = _format_shanghai_time(origin.get("last_checked_at")) or "-"
+                lines.append(_line("源站", f"{target} · {status} · {checked_at}"))
     elif event_type == "dns.publish_failed":
         lines.extend([_line("主机名", payload.get("hostname")), _line("错误", payload.get("error"))])
     elif event_type.startswith("cloudflare."):
