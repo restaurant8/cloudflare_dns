@@ -560,14 +560,74 @@ form.panel {
   padding: 14px 16px 12px;
 }
 
+.groupHead > div:first-child {
+  min-width: 0;
+}
+
 .groupHead h2 {
   font-size: 17px;
   margin: 0;
 }
 
+.groupTitleLine {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.groupHostname {
+  color: #0f766e;
+  overflow-wrap: anywhere;
+}
+
+.groupHead .groupRoleBadge {
+  background: #dcfce7;
+  border: 1px solid #86efac;
+  border-radius: 999px;
+  color: #166534;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 800;
+  margin-top: 0;
+  padding: 3px 7px;
+}
+
+.groupHead .groupMetaLine {
+  color: #64748b;
+  font-size: 12px;
+  margin-top: 5px;
+}
+
 .rowActions {
   flex-shrink: 0;
   gap: 8px;
+}
+
+.groupCollapsedSummary {
+  align-items: center;
+  background: #ffffff;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px 14px;
+}
+
+.groupCollapsedSummary span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.groupCollapsedSummary strong {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  color: #1d4ed8;
+  font-size: 13px;
+  padding: 4px 9px;
+  overflow-wrap: anywhere;
 }
 
 .groupSettingsEdit {
@@ -578,7 +638,7 @@ form.panel {
   display: grid;
   gap: 10px;
   grid-template-columns: minmax(120px, 1fr) minmax(150px, 1fr) minmax(150px, auto) auto;
-  margin-bottom: 12px;
+  margin: 12px 16px;
   padding: 12px;
 }
 

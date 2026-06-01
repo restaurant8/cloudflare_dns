@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  ChevronDown,
+  ChevronRight,
   Cloud,
   Copy,
   DatabaseZap,
@@ -843,6 +845,7 @@ function GroupsPanel({
   const [groupEdits, setGroupEdits] = useState<Record<number, GroupEditDraft>>({});
   const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
   const [originEdits, setOriginEdits] = useState<Record<number, OriginEditDraft>>({});
+  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<number>>(new Set());
   const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
   const enabledPoolItems = targetPool.filter((item) => item.enabled);
   const addTargetType = inferDraftTargetType(originAdd.target);
@@ -900,6 +903,7 @@ function GroupsPanel({
 
   function beginAddOrigin(group: FailoverGroup) {
     const maxPriority = group.origins.reduce((value, origin) => Math.max(value, origin.priority), 0);
+    expandGroup(group.id);
     setAddingGroupId(group.id);
     setOriginAdd({
       target: "",
@@ -949,6 +953,7 @@ function GroupsPanel({
   }
 
   function beginEditGroup(group: FailoverGroup) {
+    expandGroup(group.id);
     setEditingGroupId(group.id);
     setGroupEdits((current) => ({
       ...current,
@@ -1002,6 +1007,27 @@ function GroupsPanel({
       "源站已更新并应用",
       () => setEditingOriginId(null)
     );
+  }
+
+  function expandGroup(groupId: number) {
+    setCollapsedGroupIds((current) => {
+      if (!current.has(groupId)) return current;
+      const next = new Set(current);
+      next.delete(groupId);
+      return next;
+    });
+  }
+
+  function toggleGroupCollapsed(groupId: number) {
+    setCollapsedGroupIds((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
   }
 
   return (
@@ -1103,15 +1129,24 @@ function GroupsPanel({
           };
           const sortedOrigins = [...group.origins].sort((left, right) => left.priority - right.priority || left.id - right.id);
           const primaryPriority = sortedOrigins[0]?.priority;
+          const currentOrigin = sortedOrigins.find((origin) => origin.id === group.current_origin_id);
+          const currentTarget = currentOrigin ? `${currentOrigin.target}:${currentOrigin.port}` : "未发布";
+          const isCollapsed = collapsedGroupIds.has(group.id);
           return (
             <article className="groupCard" key={group.id}>
               <div className="groupHead">
                 <div>
-                  <h2>{group.hostname}</h2>
-                  <span>TTL {group.ttl} · 记录 {group.current_record_id || "-"}</span>
+                  <div className="groupTitleLine">
+                    <h2 className="groupHostname">{group.hostname}</h2>
+                    <span className="groupRoleBadge">主域名</span>
+                  </div>
+                  <span className="groupMetaLine">TTL {group.ttl} · 源站 {sortedOrigins.length} 个 · 当前 {currentTarget}</span>
                 </div>
                 <div className="rowActions">
                   <Status value={group.last_error ? "error" : group.enabled ? "enabled" : "disabled"} />
+                  <button className="icon secondaryIcon" title={isCollapsed ? "展开切换组" : "折叠切换组"} onClick={() => toggleGroupCollapsed(group.id)}>
+                    {isCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                  </button>
                   <button className="secondary compactBtn" title="手动检测该组全部目标" onClick={() => act(() => apiFetch(`/api/groups/${group.id}/run`, token, { method: "POST" }), "切换组检测已完成")}>
                     <Play size={15} />
                     <span>检测全部</span>
@@ -1128,146 +1163,156 @@ function GroupsPanel({
                   </button>
                 </div>
               </div>
-              {editingGroupId === group.id && (
-                <div className="groupSettingsEdit">
-                  <label>
-                    TTL（秒）
-                    <input type="number" min={30} max={86400} value={groupEdit.ttl} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, ttl: Number(event.target.value) } }))} />
-                  </label>
-                  <label>
-                    最小切换间隔（秒）
-                    <input type="number" min={0} max={86400} value={groupEdit.min_switch_interval_seconds} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, min_switch_interval_seconds: Number(event.target.value) } }))} />
-                  </label>
-                  <label className="inlineCheck">
-                    <input type="checkbox" checked={groupEdit.enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, enabled: event.target.checked } }))} />
-                    启用这个切换组
-                  </label>
-                  <div className="rowActions">
-                    <button className="icon" title="保存并应用" onClick={() => saveGroupEdit(group.id)}>
-                      <Save size={15} />
-                    </button>
-                    <button className="icon secondaryIcon" title="取消" onClick={() => setEditingGroupId(null)}>
-                      ×
-                    </button>
-                  </div>
+              {isCollapsed ? (
+                <div className="groupCollapsedSummary">
+                  <span>已折叠</span>
+                  <strong>{currentTarget}</strong>
+                  <span>当前使用 · {sortedOrigins.length} 个源站</span>
                 </div>
-              )}
-              {group.last_error && <div className="error">{group.last_error}</div>}
-              <div className="originList">
-                {sortedOrigins.map((origin) => {
-                  const originEdit = originEdits[origin.id] || {
-                    target: origin.target,
-                    port: origin.port,
-                    priority: origin.priority,
-                    publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
-                    enabled: origin.enabled
-                  };
-                  const editType = inferDraftTargetType(originEdit.target);
-                  const isCurrentOrigin = group.current_origin_id === origin.id;
-                  const isPrimaryOrigin = origin.priority === primaryPriority;
-                  const visibleProbeStates = currentProbeStates(origin);
-                  const hiddenProbeCount = origin.probe_states.length - visibleProbeStates.length;
-                  return (
-                    <div
-                      className={`origin ${editingOriginId === origin.id ? "originEditing" : ""} ${isCurrentOrigin ? "originCurrent" : ""} ${isPrimaryOrigin ? "originPrimary" : "originBackup"}`}
-                      key={origin.id}
-                    >
-                      <Server size={18} />
-                      {editingOriginId === origin.id ? (
-                        <>
-                          <div className="originEditGrid">
-                            <label>
-                              目标 IP / IPv6 / 域名
-                              <input value={originEdit.target} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, target: event.target.value } }))} />
-                            </label>
-                            <label>
-                              检查端口
-                              <input type="number" min={1} max={65535} value={originEdit.port} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, port: Number(event.target.value) } }))} />
-                            </label>
-                            <label>
-                              优先级
-                              <input type="number" min={0} value={originEdit.priority} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, priority: Number(event.target.value) } }))} />
-                            </label>
-                            <label className="inlineCheck">
-                              <input
-                                type="checkbox"
-                                disabled={editType !== "hostname"}
-                                checked={editType === "hostname" && originEdit.publish_mode === "expanded"}
-                                onChange={(event) =>
-                                  setOriginEdits((current) => {
-                                    const draft = current[origin.id] || originEdit;
-                                    return { ...current, [origin.id]: { ...draft, publish_mode: event.target.checked ? "expanded" : "direct" } };
-                                  })
-                                }
-                              />
-                              展开 IP 池
-                            </label>
-                            <label className="inlineCheck">
-                              <input type="checkbox" checked={originEdit.enabled} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, enabled: event.target.checked } }))} />
-                              启用
-                            </label>
-                            <span className="originEditHint">当前会识别为 {targetTypeText(editType)}，发布为 {recordTypeForTargetType(editType, originEdit.publish_mode)}。</span>
-                          </div>
-                          <div className="rowActions">
-                            <button className="icon" title="保存并应用" onClick={() => saveOriginEdit(origin.id)}>
-                              <Save size={15} />
-                            </button>
-                            <button className="icon secondaryIcon" title="取消" onClick={() => setEditingOriginId(null)}>
-                              ×
-                            </button>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <div>
-                            <div className="originTitleLine">
-                              <strong>{origin.target}:{origin.port}</strong>
-                              <div className="originBadges">
-                                {isCurrentOrigin && <span className="originBadge current">当前使用</span>}
-                                <span className={`originBadge ${isPrimaryOrigin ? "primary" : "backup"}`}>{isPrimaryOrigin ? "主用" : "备用"}</span>
-                                <span className="originBadge record">{recordTypeForTargetType(origin.target_type, origin.publish_mode)}</span>
+              ) : (
+                <>
+                  {editingGroupId === group.id && (
+                    <div className="groupSettingsEdit">
+                      <label>
+                        TTL（秒）
+                        <input type="number" min={30} max={86400} value={groupEdit.ttl} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, ttl: Number(event.target.value) } }))} />
+                      </label>
+                      <label>
+                        最小切换间隔（秒）
+                        <input type="number" min={0} max={86400} value={groupEdit.min_switch_interval_seconds} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, min_switch_interval_seconds: Number(event.target.value) } }))} />
+                      </label>
+                      <label className="inlineCheck">
+                        <input type="checkbox" checked={groupEdit.enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, enabled: event.target.checked } }))} />
+                        启用这个切换组
+                      </label>
+                      <div className="rowActions">
+                        <button className="icon" title="保存并应用" onClick={() => saveGroupEdit(group.id)}>
+                          <Save size={15} />
+                        </button>
+                        <button className="icon secondaryIcon" title="取消" onClick={() => setEditingGroupId(null)}>
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {group.last_error && <div className="error">{group.last_error}</div>}
+                  <div className="originList">
+                    {sortedOrigins.map((origin) => {
+                      const originEdit = originEdits[origin.id] || {
+                        target: origin.target,
+                        port: origin.port,
+                        priority: origin.priority,
+                        publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
+                        enabled: origin.enabled
+                      };
+                      const editType = inferDraftTargetType(originEdit.target);
+                      const isCurrentOrigin = group.current_origin_id === origin.id;
+                      const isPrimaryOrigin = origin.priority === primaryPriority;
+                      const visibleProbeStates = currentProbeStates(origin);
+                      const hiddenProbeCount = origin.probe_states.length - visibleProbeStates.length;
+                      return (
+                        <div
+                          className={`origin ${editingOriginId === origin.id ? "originEditing" : ""} ${isCurrentOrigin ? "originCurrent" : ""} ${isPrimaryOrigin ? "originPrimary" : "originBackup"}`}
+                          key={origin.id}
+                        >
+                          <Server size={18} />
+                          {editingOriginId === origin.id ? (
+                            <>
+                              <div className="originEditGrid">
+                                <label>
+                                  目标 IP / IPv6 / 域名
+                                  <input value={originEdit.target} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, target: event.target.value } }))} />
+                                </label>
+                                <label>
+                                  检查端口
+                                  <input type="number" min={1} max={65535} value={originEdit.port} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, port: Number(event.target.value) } }))} />
+                                </label>
+                                <label>
+                                  优先级
+                                  <input type="number" min={0} value={originEdit.priority} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, priority: Number(event.target.value) } }))} />
+                                </label>
+                                <label className="inlineCheck">
+                                  <input
+                                    type="checkbox"
+                                    disabled={editType !== "hostname"}
+                                    checked={editType === "hostname" && originEdit.publish_mode === "expanded"}
+                                    onChange={(event) =>
+                                      setOriginEdits((current) => {
+                                        const draft = current[origin.id] || originEdit;
+                                        return { ...current, [origin.id]: { ...draft, publish_mode: event.target.checked ? "expanded" : "direct" } };
+                                      })
+                                    }
+                                  />
+                                  展开 IP 池
+                                </label>
+                                <label className="inlineCheck">
+                                  <input type="checkbox" checked={originEdit.enabled} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, enabled: event.target.checked } }))} />
+                                  启用
+                                </label>
+                                <span className="originEditHint">当前会识别为 {targetTypeText(editType)}，发布为 {recordTypeForTargetType(editType, originEdit.publish_mode)}。</span>
                               </div>
-                            </div>
-                            <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · {origin.enabled ? "已启用" : "已停用"} · {fmtDate(origin.last_checked_at)}</span>
-                            {origin.publish_mode === "expanded" && (
-                              <div className="expandedIpList">
-                                <IpList label="解析 IP" values={origin.resolved_ips} empty="尚未解析，点击手动检测或等待下个周期" />
-                                <IpList label="健康 IP" values={origin.healthy_ips} />
-                                <IpList label="已发布" values={origin.published_ips} empty="当前未发布该目标" />
+                              <div className="rowActions">
+                                <button className="icon" title="保存并应用" onClick={() => saveOriginEdit(origin.id)}>
+                                  <Save size={15} />
+                                </button>
+                                <button className="icon secondaryIcon" title="取消" onClick={() => setEditingOriginId(null)}>
+                                  ×
+                                </button>
                               </div>
-                            )}
-                            {origin.last_error && <small className="danger">{origin.last_error}</small>}
-                            {(visibleProbeStates.length > 0 || hiddenProbeCount > 0) && (
-                              <div className="probeChips">
-                                {visibleProbeStates.map((probe) => (
-                                  <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || ""}>
-                                    {probeSourceText(probe)}：{statusText(probe.status)}
-                                  </span>
-                                ))}
-                                {hiddenProbeCount > 0 && (
-                                  <span className="probeChip muted" title="这些是已经不在当前解析 IP 列表里的历史探测状态">
-                                    已隐藏历史 IP {hiddenProbeCount} 条
-                                  </span>
+                            </>
+                          ) : (
+                            <>
+                              <div>
+                                <div className="originTitleLine">
+                                  <strong>{origin.target}:{origin.port}</strong>
+                                  <div className="originBadges">
+                                    {isCurrentOrigin && <span className="originBadge current">当前使用</span>}
+                                    <span className={`originBadge ${isPrimaryOrigin ? "primary" : "backup"}`}>{isPrimaryOrigin ? "主用" : "备用"}</span>
+                                    <span className="originBadge record">{recordTypeForTargetType(origin.target_type, origin.publish_mode)}</span>
+                                  </div>
+                                </div>
+                                <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · {origin.enabled ? "已启用" : "已停用"} · {fmtDate(origin.last_checked_at)}</span>
+                                {origin.publish_mode === "expanded" && (
+                                  <div className="expandedIpList">
+                                    <IpList label="解析 IP" values={origin.resolved_ips} empty="尚未解析，点击手动检测或等待下个周期" />
+                                    <IpList label="健康 IP" values={origin.healthy_ips} />
+                                    <IpList label="已发布" values={origin.published_ips} empty="当前未发布该目标" />
+                                  </div>
+                                )}
+                                {origin.last_error && <small className="danger">{origin.last_error}</small>}
+                                {(visibleProbeStates.length > 0 || hiddenProbeCount > 0) && (
+                                  <div className="probeChips">
+                                    {visibleProbeStates.map((probe) => (
+                                      <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || ""}>
+                                        {probeSourceText(probe)}：{statusText(probe.status)}
+                                      </span>
+                                    ))}
+                                    {hiddenProbeCount > 0 && (
+                                      <span className="probeChip muted" title="这些是已经不在当前解析 IP 列表里的历史探测状态">
+                                        已隐藏历史 IP {hiddenProbeCount} 条
+                                      </span>
+                                    )}
+                                  </div>
                                 )}
                               </div>
-                            )}
-                          </div>
-                          <Status value={origin.status} />
-                          <button className="icon secondaryIcon" title="手动检测这个目标" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}/run`, token, { method: "POST" }), "目标检测已完成")}>
-                            <Play size={15} />
-                          </button>
-                          <button className="icon secondaryIcon" title="修改源站" onClick={() => beginEditOrigin(origin)}>
-                            <Pencil size={15} />
-                          </button>
-                          <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}`, token, { method: "DELETE" }), "源站已删除")}>
-                            <Trash2 size={15} />
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+                              <Status value={origin.status} />
+                              <button className="icon secondaryIcon" title="手动检测这个目标" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}/run`, token, { method: "POST" }), "目标检测已完成")}>
+                                <Play size={15} />
+                              </button>
+                              <button className="icon secondaryIcon" title="修改源站" onClick={() => beginEditOrigin(origin)}>
+                                <Pencil size={15} />
+                              </button>
+                              <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}`, token, { method: "DELETE" }), "源站已删除")}>
+                                <Trash2 size={15} />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
             </article>
           );
         })}
