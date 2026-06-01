@@ -38,6 +38,12 @@ def _migrate_existing_schema() -> None:
                 if column_name not in existing:
                     connection.execute(text(statement))
 
+        if "target_pool_items" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("target_pool_items")}
+            for column_name, statement in _target_pool_migration_statements(dialect).items():
+                if column_name not in existing:
+                    connection.execute(text(statement))
+
         if "agents" in table_names:
             existing = {column["name"] for column in inspector.get_columns("agents")}
             if "region" not in existing:
@@ -63,15 +69,43 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":
         return {
             "publish_mode": "ALTER TABLE origins ADD COLUMN publish_mode VARCHAR(20) NOT NULL DEFAULT 'direct'",
+            "remark": "ALTER TABLE origins ADD COLUMN remark TEXT NULL",
             "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NULL",
             "healthy_ips_json": "ALTER TABLE origins ADD COLUMN healthy_ips_json TEXT NULL",
             "published_ips_json": "ALTER TABLE origins ADD COLUMN published_ips_json TEXT NULL",
         }
     return {
         "publish_mode": "ALTER TABLE origins ADD COLUMN publish_mode VARCHAR(20) NOT NULL DEFAULT 'direct'",
+        "remark": "ALTER TABLE origins ADD COLUMN remark TEXT",
         "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NOT NULL DEFAULT '[]'",
         "healthy_ips_json": "ALTER TABLE origins ADD COLUMN healthy_ips_json TEXT NOT NULL DEFAULT '[]'",
         "published_ips_json": "ALTER TABLE origins ADD COLUMN published_ips_json TEXT NOT NULL DEFAULT '[]'",
+    }
+
+
+def _target_pool_migration_statements(dialect: str) -> dict[str, str]:
+    if dialect == "mysql":
+        return {
+            "check_interval_seconds": "ALTER TABLE target_pool_items ADD COLUMN check_interval_seconds INT NOT NULL DEFAULT 600",
+            "status": "ALTER TABLE target_pool_items ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+            "last_checked_at": "ALTER TABLE target_pool_items ADD COLUMN last_checked_at DATETIME NULL",
+            "last_error": "ALTER TABLE target_pool_items ADD COLUMN last_error TEXT NULL",
+            "last_rtt_ms": "ALTER TABLE target_pool_items ADD COLUMN last_rtt_ms FLOAT NULL",
+        }
+    if dialect == "postgresql":
+        return {
+            "check_interval_seconds": "ALTER TABLE target_pool_items ADD COLUMN check_interval_seconds INTEGER NOT NULL DEFAULT 600",
+            "status": "ALTER TABLE target_pool_items ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+            "last_checked_at": "ALTER TABLE target_pool_items ADD COLUMN last_checked_at TIMESTAMP NULL",
+            "last_error": "ALTER TABLE target_pool_items ADD COLUMN last_error TEXT NULL",
+            "last_rtt_ms": "ALTER TABLE target_pool_items ADD COLUMN last_rtt_ms FLOAT NULL",
+        }
+    return {
+        "check_interval_seconds": "ALTER TABLE target_pool_items ADD COLUMN check_interval_seconds INTEGER NOT NULL DEFAULT 600",
+        "status": "ALTER TABLE target_pool_items ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+        "last_checked_at": "ALTER TABLE target_pool_items ADD COLUMN last_checked_at DATETIME",
+        "last_error": "ALTER TABLE target_pool_items ADD COLUMN last_error TEXT",
+        "last_rtt_ms": "ALTER TABLE target_pool_items ADD COLUMN last_rtt_ms FLOAT",
     }
 
 

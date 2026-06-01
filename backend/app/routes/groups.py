@@ -19,6 +19,13 @@ from ..sync import MANAGED_RECORD_TYPES
 router = APIRouter(prefix="/groups", tags=["groups"])
 
 
+def _normalize_remark(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 def _group_query(db: Session):
     return db.query(FailoverGroup).options(selectinload(FailoverGroup.origins).selectinload(Origin.probe_states).selectinload(ProbeState.agent))
 
@@ -36,6 +43,7 @@ def _origin_from_payload(group: FailoverGroup, payload: OriginCreate) -> Origin:
         publish_mode=payload.publish_mode if target_info.target_type == "hostname" else DIRECT_PUBLISH_MODE,
         port=payload.port,
         priority=payload.priority,
+        remark=_normalize_remark(payload.remark),
         enabled=payload.enabled,
     )
 
@@ -207,6 +215,8 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     origin.target = new_target
     origin.target_type = new_target_type
     origin.publish_mode = new_publish_mode if new_target_type == "hostname" else DIRECT_PUBLISH_MODE
+    if "remark" in updates:
+        origin.remark = _normalize_remark(updates.pop("remark"))
     for key, value in updates.items():
         setattr(origin, key, value)
 

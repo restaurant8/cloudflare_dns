@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import parse_target
-from ..models import TargetPoolItem, User
+from ..health import run_target_pool_checks
+from ..models import TargetPoolItem, TargetPoolProbeState, User
 from ..schemas import Message, TargetPoolCreate, TargetPoolOut, TargetPoolUpdate
 
 
@@ -28,7 +29,12 @@ def _ensure_unique(db: Session, target: str, port: int, item_id: int | None = No
 
 @router.get("", response_model=list[TargetPoolOut])
 def list_target_pool(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(TargetPoolItem).order_by(TargetPoolItem.created_at.desc()).all()
+    return (
+        db.query(TargetPoolItem)
+        .options(selectinload(TargetPoolItem.probe_states).selectinload(TargetPoolProbeState.agent))
+        .order_by(TargetPoolItem.created_at.desc())
+        .all()
+    )
 
 
 @router.post("", response_model=TargetPoolOut)
@@ -40,6 +46,7 @@ def create_target_pool_item(payload: TargetPoolCreate, _: User = Depends(get_cur
         target_type=target_info.target_type,
         port=payload.port,
         remark=_normalize_remark(payload.remark),
+        check_interval_seconds=payload.check_interval_seconds,
         enabled=payload.enabled,
     )
     db.add(item)
@@ -64,6 +71,7 @@ def update_target_pool_item(item_id: int, payload: TargetPoolUpdate, _: User = D
     if "port" in updates and updates["port"] is not None:
         port = updates.pop("port")
     _ensure_unique(db, target, port, item.id)
+    endpoint_changed = target != item.target or port != item.port
     item.target = target
     item.target_type = target_type
     item.port = port
@@ -71,9 +79,25 @@ def update_target_pool_item(item_id: int, payload: TargetPoolUpdate, _: User = D
         item.remark = _normalize_remark(updates.pop("remark"))
     for key, value in updates.items():
         setattr(item, key, value)
+    if endpoint_changed:
+        item.status = "unknown"
+        item.last_checked_at = None
+        item.last_error = "等待下次池子健康检查"
+        item.last_rtt_ms = None
+        item.probe_states.clear()
     db.commit()
     db.refresh(item)
     return item
+
+
+@router.post("/{item_id}/run", response_model=Message)
+def run_target_pool_item_now(item_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    item = db.get(TargetPoolItem, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="目标不存在")
+    checked = run_target_pool_checks(db, item_id=item_id, include_all=True)
+    db.commit()
+    return Message(message="目标池检测已完成", detail={"checked": checked})
 
 
 @router.delete("/{item_id}", response_model=Message)

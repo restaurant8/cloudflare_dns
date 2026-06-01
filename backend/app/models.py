@@ -102,6 +102,7 @@ class Origin(Base, TimestampMixin):
     port: Mapped[int] = mapped_column(Integer, nullable=False)
     priority: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
     weight: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    remark: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -136,7 +137,37 @@ class TargetPoolItem(Base, TimestampMixin):
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)
     port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
     remark: Mapped[str | None] = mapped_column(Text)
+    check_interval_seconds: Mapped[int] = mapped_column(Integer, default=600, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    last_rtt_ms: Mapped[float | None] = mapped_column(Float)
+
+    probe_states: Mapped[list["TargetPoolProbeState"]] = relationship("TargetPoolProbeState", back_populates="pool_item", cascade="all, delete-orphan")
+
+
+class TargetPoolProbeState(Base, TimestampMixin):
+    __tablename__ = "target_pool_probe_states"
+    __table_args__ = (UniqueConstraint("item_id", "source_key", name="uq_target_pool_probe_state_item_source"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("target_pool_items.id", ondelete="CASCADE"), nullable=False)
+    agent_id: Mapped[int | None] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"))
+    source_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)
+    success_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    fail_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    last_rtt_ms: Mapped[float | None] = mapped_column(Float)
+
+    pool_item: Mapped["TargetPoolItem"] = relationship("TargetPoolItem", back_populates="probe_states")
+    agent: Mapped["Agent"] = relationship("Agent")
+
+    @property
+    def agent_name(self) -> str | None:
+        return self.agent.name if self.agent else None
 
 
 class ExternalIpSource(Base, TimestampMixin):

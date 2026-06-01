@@ -92,6 +92,7 @@ class OriginCreate(BaseModel):
     port: int = Field(ge=1, le=65535)
     priority: int = Field(default=10, ge=0, le=100000)
     publish_mode: Literal["direct", "expanded"] = "direct"
+    remark: str | None = Field(default=None, max_length=500)
     enabled: bool = True
 
 
@@ -104,6 +105,7 @@ class OriginUpdate(BaseModel):
     port: int | None = Field(default=None, ge=1, le=65535)
     priority: int | None = Field(default=None, ge=0, le=100000)
     publish_mode: Literal["direct", "expanded"] | None = None
+    remark: str | None = Field(default=None, max_length=500)
     enabled: bool | None = None
 
 
@@ -129,6 +131,7 @@ class OriginOut(BaseModel):
     publish_mode: str
     port: int
     priority: int
+    remark: str | None
     enabled: bool
     status: str
     last_checked_at: datetime | None
@@ -146,6 +149,7 @@ class TargetPoolCreate(BaseModel):
     target: str = Field(min_length=1, max_length=255)
     port: int = Field(default=22, ge=1, le=65535)
     remark: str | None = Field(default=None, max_length=500)
+    check_interval_seconds: int = Field(default=600, ge=60, le=86400)
     enabled: bool = True
 
 
@@ -153,6 +157,7 @@ class TargetPoolUpdate(BaseModel):
     target: str | None = Field(default=None, min_length=1, max_length=255)
     port: int | None = Field(default=None, ge=1, le=65535)
     remark: str | None = Field(default=None, max_length=500)
+    check_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
     enabled: bool | None = None
 
 
@@ -162,7 +167,13 @@ class TargetPoolOut(BaseModel):
     target_type: str
     port: int
     remark: str | None
+    check_interval_seconds: int
     enabled: bool
+    status: str
+    last_checked_at: datetime | None
+    last_error: str | None
+    last_rtt_ms: float | None
+    probe_states: list[ProbeStateOut] = []
     created_at: datetime
     updated_at: datetime
 
