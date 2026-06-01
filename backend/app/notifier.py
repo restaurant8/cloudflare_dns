@@ -1,6 +1,6 @@
 import json
 from html import escape
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -41,6 +41,8 @@ REGION_NAMES = {
     "foreign": "国外",
 }
 
+SHANGHAI_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
+
 TELEGRAM_LEVEL_PRIORITIES = {
     "all": 10,
     "important": 20,
@@ -71,6 +73,23 @@ def _line(label: str, value: Any) -> str:
     return f"{escape(label)}: <code>{escape(str(value))}</code>"
 
 
+def _format_shanghai_time(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+    else:
+        return str(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S Asia/Shanghai")
+
+
 def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
     title = EVENT_NAMES.get(event_type, "系统事件")
     lines = [f"<b>{escape(title)}</b>"]
@@ -98,7 +117,7 @@ def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
                 _line("区域", REGION_NAMES.get(str(payload.get("region")), payload.get("region"))),
                 _line("状态", STATUS_NAMES.get(str(payload.get("status")), payload.get("status"))),
                 _line("最后 IP", payload.get("last_ip")),
-                _line("最后上报", payload.get("last_seen_at")),
+                _line("最后上报", _format_shanghai_time(payload.get("last_seen_at"))),
             ]
         )
     elif event_type == "failover.no_healthy_origin":
@@ -112,7 +131,7 @@ def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
             if isinstance(value, (str, int, float, bool)) or value is None:
                 lines.append(_line(key, value))
 
-    lines.append(_line("时间", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")))
+    lines.append(_line("时间", _format_shanghai_time(datetime.now(timezone.utc))))
     return "\n".join(lines)
 
 

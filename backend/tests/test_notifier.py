@@ -27,6 +27,21 @@ def test_render_telegram_escapes_html():
     assert "<bad token>" not in message
 
 
+def test_render_telegram_uses_shanghai_time():
+    message = render_telegram_message(
+        "agent.status_changed",
+        {
+            "name": "mainland",
+            "region": "china",
+            "status": "offline",
+            "last_seen_at": "2026-06-01T05:22:51",
+        },
+    )
+
+    assert "2026-06-01 13:22:51 Asia/Shanghai" in message
+    assert "UTC" not in message
+
+
 def test_important_telegram_level_skips_noisy_origin_status_changes():
     channel = SimpleNamespace(notify_level="important")
 

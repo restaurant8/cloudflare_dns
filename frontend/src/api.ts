@@ -32,8 +32,40 @@ export async function apiFetch<T>(path: string, token?: string | null, options: 
   return (await response.json()) as T;
 }
 
-export function fmtDate(value: string | null): string {
-  if (!value) return "-";
-  return new Date(value).toLocaleString();
+const appTimeZone = "Asia/Shanghai";
+const dateTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: appTimeZone,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false
+});
+const timeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: appTimeZone,
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false
+});
+
+function parseApiDate(value: string): Date | null {
+  const trimmed = value.trim();
+  const normalized = /([zZ]|[+-]\d{2}:?\d{2})$/.test(trimmed) ? trimmed : `${trimmed.replace(" ", "T")}Z`;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
+export function fmtDate(value: string | null): string {
+  if (!value) return "-";
+  const date = parseApiDate(value);
+  return date ? dateTimeFormatter.format(date) : value;
+}
+
+export function fmtTime(value: string | null): string {
+  if (!value) return "-";
+  const date = parseApiDate(value);
+  return date ? timeFormatter.format(date) : value;
+}

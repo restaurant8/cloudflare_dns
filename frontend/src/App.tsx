@@ -24,7 +24,7 @@ import {
   Trash2,
   Webhook as WebhookIcon
 } from "lucide-react";
-import { apiFetch, fmtDate } from "./api";
+import { apiFetch, fmtDate, fmtTime } from "./api";
 import type { Agent, Credential, DnsRecord, EventItem, FailoverGroup, Origin, Overview, ProbeState, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "agents" | "webhooks" | "account" | "events";
@@ -488,7 +488,7 @@ export default function App() {
             <p>
               {selectedZone ? selectedZone.name : "尚未选择域名区域"}
               <span className="liveRefreshText">
-                实时更新{liveUpdatedAt ? ` · ${new Date(liveUpdatedAt).toLocaleTimeString()}` : ""}
+                实时更新{liveUpdatedAt ? ` · ${fmtTime(liveUpdatedAt)}` : ""}
               </span>
             </p>
           </div>
