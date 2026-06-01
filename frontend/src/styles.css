@@ -528,8 +528,16 @@ form.panel {
   grid-template-columns: minmax(280px, 390px) minmax(0, 1fr);
 }
 
+.externalIpPanel {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(320px, 460px) minmax(0, 1fr);
+}
+
 .targetPoolForm,
-.poolListPanel {
+.poolListPanel,
+.externalSourceForm,
+.externalIpListPanel {
   align-content: start;
 }
 
@@ -539,13 +547,24 @@ form.panel {
   grid-template-columns: minmax(0, 1fr) 110px;
 }
 
+.externalSourceGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.externalSourceGrid label:nth-child(3) {
+  grid-column: 1 / -1;
+}
+
 .poolList {
   display: grid;
   gap: 8px;
   margin-top: 12px;
 }
 
-.poolItem {
+.poolItem,
+.externalSourceItem {
   align-items: center;
   background: #f6f9fc;
   border: 1px solid #dbe6ef;
@@ -554,6 +573,35 @@ form.panel {
   gap: 10px;
   grid-template-columns: minmax(0, 1fr) auto;
   padding: 10px 12px;
+}
+
+.externalSourceList {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.externalIpList {
+  border-top: 1px solid #edf1f5;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.externalIpChip {
+  background: #dcfce7;
+  border-radius: 999px;
+  color: #166534;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 4px 8px;
+}
+
+.emptyInline {
+  color: #667789;
+  font-size: 12px;
 }
 
 .poolItemMain {
@@ -1182,6 +1230,7 @@ form.panel {
 
   .gridTwo,
   .targetPoolPanel,
+  .externalIpPanel,
   .metrics {
     grid-template-columns: 1fr;
   }
@@ -1204,6 +1253,7 @@ form.panel {
   .originEditGrid,
   .poolEditGrid,
   .poolFormGrid,
+  .externalSourceGrid,
   .modalFormGrid {
     grid-template-columns: 1fr;
   }

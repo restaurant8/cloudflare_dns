@@ -72,6 +72,34 @@ export type TargetPoolItem = {
   updated_at: string;
 };
 
+export type ExternalIpSource = {
+  id: number;
+  name: string;
+  source_type: string;
+  base_url: string;
+  default_port: number;
+  sync_interval_seconds: number;
+  enabled: boolean;
+  status: string;
+  last_synced_at: string | null;
+  last_error: string | null;
+  created_at: string;
+};
+
+export type ExternalIpItem = {
+  id: number;
+  source_id: number;
+  name: string;
+  group_name: string | null;
+  target: string;
+  target_type: string;
+  port: number;
+  status: string;
+  last_seen_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type FailoverGroup = {
   id: number;
   zone_id: number;

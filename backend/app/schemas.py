@@ -169,6 +169,56 @@ class TargetPoolOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ExternalIpSourceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    base_url: HttpUrl
+    token: str = Field(min_length=1, max_length=500)
+    default_port: int = Field(default=22, ge=1, le=65535)
+    sync_interval_seconds: int = Field(default=600, ge=60, le=86400)
+    enabled: bool = True
+
+
+class ExternalIpSourceUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    base_url: HttpUrl | None = None
+    token: str | None = Field(default=None, min_length=1, max_length=500)
+    default_port: int | None = Field(default=None, ge=1, le=65535)
+    sync_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
+    enabled: bool | None = None
+
+
+class ExternalIpItemOut(BaseModel):
+    id: int
+    source_id: int
+    name: str
+    group_name: str | None
+    target: str
+    target_type: str
+    port: int
+    status: str
+    last_seen_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ExternalIpSourceOut(BaseModel):
+    id: int
+    name: str
+    source_type: str
+    base_url: str
+    default_port: int
+    sync_interval_seconds: int
+    enabled: bool
+    status: str
+    last_synced_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class FailoverGroupOut(BaseModel):
     id: int
     zone_id: int

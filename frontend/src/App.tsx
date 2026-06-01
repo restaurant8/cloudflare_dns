@@ -25,13 +25,14 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, Credential, DnsRecord, EventItem, FailoverGroup, Origin, Overview, ProbeState, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
+import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverGroup, Origin, Overview, ProbeState, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "agents" | "webhooks" | "account" | "events";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; enabled: boolean };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; enabled: boolean };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
 type TargetPoolDraft = { target: string; port: number; remark: string; enabled: boolean };
+type ExternalIpSourceDraft = { name: string; base_url: string; token: string; default_port: number; sync_interval_seconds: number; enabled: boolean };
 type AgentEditDraft = { name: string };
 type ToastTone = "info" | "success" | "error" | "loading";
 type ActionRunner = <T>(fn: () => Promise<T>, done?: string, afterSuccess?: () => void) => Promise<boolean>;
@@ -217,6 +218,7 @@ const emptyOverview: Overview = {
 
 const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", enabled: true };
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", enabled: true };
+const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
 const liveRefreshIntervalMs = 3000;
 
 export default function App() {
@@ -238,6 +240,8 @@ export default function App() {
   const [records, setRecords] = useState<DnsRecord[]>([]);
   const [groups, setGroups] = useState<FailoverGroup[]>([]);
   const [targetPool, setTargetPool] = useState<TargetPoolItem[]>([]);
+  const [externalIpSources, setExternalIpSources] = useState<ExternalIpSource[]>([]);
+  const [externalIpItems, setExternalIpItems] = useState<ExternalIpItem[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [telegramNotifications, setTelegramNotifications] = useState<TelegramNotification[]>([]);
   const [webhooks, setWebhooks] = useState<Webhook[]>([]);
@@ -254,12 +258,14 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextGroups, nextTargetPool, nextAgents, nextTelegram, nextWebhooks, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAgents, nextTelegram, nextWebhooks, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
       apiFetch<FailoverGroup[]>("/api/groups", activeToken),
       apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
+      apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
+      apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken),
       apiFetch<Agent[]>("/api/agents", activeToken),
       apiFetch<TelegramNotification[]>("/api/telegram", activeToken),
       apiFetch<Webhook[]>("/api/webhooks", activeToken),
@@ -270,6 +276,8 @@ export default function App() {
     setZones(nextZones);
     setGroups(nextGroups);
     setTargetPool(nextTargetPool);
+    setExternalIpSources(nextExternalIpSources);
+    setExternalIpItems(nextExternalIpItems);
     setAgents(nextAgents);
     setTelegramNotifications(nextTelegram);
     setWebhooks(nextWebhooks);
@@ -287,16 +295,20 @@ export default function App() {
 
   async function loadLiveStatus(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextGroups, nextTargetPool, nextAgents, nextEvents] = await Promise.all([
+    const [nextOverview, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAgents, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<FailoverGroup[]>("/api/groups", activeToken),
       apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
+      apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
+      apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken),
       apiFetch<Agent[]>("/api/agents", activeToken),
       apiFetch<EventItem[]>("/api/events?limit=100", activeToken)
     ]);
     setOverview(nextOverview);
     setGroups(nextGroups);
     setTargetPool(nextTargetPool);
+    setExternalIpSources(nextExternalIpSources);
+    setExternalIpItems(nextExternalIpItems);
     setAgents(nextAgents);
     setEvents(nextEvents);
     setLiveUpdatedAt(new Date().toISOString());
@@ -527,7 +539,7 @@ export default function App() {
           />
         )}
         {section === "groups" && (
-          <GroupsPanel token={token} groups={groups} targetPool={targetPool} act={act} />
+          <GroupsPanel token={token} groups={groups} targetPool={targetPool} externalIpSources={externalIpSources} externalIpItems={externalIpItems} act={act} />
         )}
         {section === "agents" && (
           <AgentsPanel token={token} agents={agents} agentToken={agentToken} setAgentToken={setAgentToken} act={act} />
@@ -844,14 +856,19 @@ function GroupsPanel({
   token,
   groups,
   targetPool,
+  externalIpSources,
+  externalIpItems,
   act
 }: {
   token: string;
   groups: FailoverGroup[];
   targetPool: TargetPoolItem[];
+  externalIpSources: ExternalIpSource[];
+  externalIpItems: ExternalIpItem[];
   act: ActionRunner;
 }) {
   const [poolDraft, setPoolDraft] = useState<TargetPoolDraft>(defaultTargetPoolDraft);
+  const [externalDraft, setExternalDraft] = useState<ExternalIpSourceDraft>(defaultExternalIpSourceDraft);
   const [editingPoolId, setEditingPoolId] = useState<number | null>(null);
   const [poolEdits, setPoolEdits] = useState<Record<number, TargetPoolDraft>>({});
   const [addingGroupId, setAddingGroupId] = useState<number | null>(null);
@@ -863,8 +880,10 @@ function GroupsPanel({
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<number>>(new Set());
   const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
   const enabledPoolItems = targetPool.filter((item) => item.enabled);
+  const healthyExternalItems = externalIpItems.filter((item) => item.status === "healthy");
   const addTargetType = inferDraftTargetType(originAdd.target);
   const selectedPoolItemId = enabledPoolItems.find((item) => item.target === originAdd.target && item.port === originAdd.port)?.id || "";
+  const selectedExternalItemId = healthyExternalItems.find((item) => item.target === originAdd.target && item.port === originAdd.port)?.id || "";
 
   async function createPoolItem(event: FormEvent) {
     event.preventDefault();
@@ -881,6 +900,26 @@ function GroupsPanel({
         }),
       "目标已加入池子",
       () => setPoolDraft(defaultTargetPoolDraft)
+    );
+  }
+
+  async function createExternalIpSource(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () =>
+        apiFetch("/api/external-ips/sources", token, {
+          method: "POST",
+          body: JSON.stringify({
+            name: externalDraft.name.trim(),
+            base_url: externalDraft.base_url.trim(),
+            token: externalDraft.token.trim(),
+            default_port: externalDraft.default_port,
+            sync_interval_seconds: externalDraft.sync_interval_seconds,
+            enabled: externalDraft.enabled
+          })
+        }),
+      "外部 IP 来源已添加",
+      () => setExternalDraft(defaultExternalIpSourceDraft)
     );
   }
 
@@ -1024,6 +1063,18 @@ function GroupsPanel({
     );
   }
 
+  function selectExternalIpItem(itemId: number) {
+    const item = externalIpItems.find((externalItem) => externalItem.id === itemId);
+    if (!item) return;
+    setOriginAdd((current) => ({
+      ...current,
+      target: item.target,
+      port: item.port || 22,
+      publish_mode: "direct",
+      enabled: true
+    }));
+  }
+
   function expandGroup(groupId: number) {
     setCollapsedGroupIds((current) => {
       if (!current.has(groupId)) return current;
@@ -1132,6 +1183,75 @@ function GroupsPanel({
               );
             })}
             {targetPool.length === 0 && <div className="emptyCell">还没有池子目标</div>}
+          </div>
+        </div>
+      </div>
+      <div className="externalIpPanel">
+        <form className="panel externalSourceForm" onSubmit={createExternalIpSource}>
+          <div className="panelTitle">
+            <h2>外部健康 IP</h2>
+            <p>从 Nyanpass 服务器状态页同步在线节点 IP，添加备用时可直接选择。</p>
+          </div>
+          <div className="externalSourceGrid">
+            <label>
+              来源名称
+              <input placeholder="例如 Nyanpass" value={externalDraft.name} onChange={(event) => setExternalDraft((current) => ({ ...current, name: event.target.value }))} required />
+            </label>
+            <label>
+              面板地址
+              <input placeholder="https://ny.example.com" value={externalDraft.base_url} onChange={(event) => setExternalDraft((current) => ({ ...current, base_url: event.target.value }))} required />
+            </label>
+            <label>
+              Authorization / Token
+              <input type="password" value={externalDraft.token} onChange={(event) => setExternalDraft((current) => ({ ...current, token: event.target.value }))} required />
+            </label>
+            <label>
+              默认端口
+              <input type="number" min={1} max={65535} value={externalDraft.default_port} onChange={(event) => setExternalDraft((current) => ({ ...current, default_port: Number(event.target.value) }))} />
+            </label>
+            <label>
+              同步周期（秒）
+              <input type="number" min={60} max={86400} value={externalDraft.sync_interval_seconds} onChange={(event) => setExternalDraft((current) => ({ ...current, sync_interval_seconds: Number(event.target.value) }))} />
+            </label>
+          </div>
+          <button>
+            <Plus size={16} />
+            <span>添加来源</span>
+          </button>
+        </form>
+        <div className="panel externalIpListPanel">
+          <div className="panelTitle">
+            <h2>外部列表</h2>
+            <p>只显示在线且公网可用的 IPv4 / IPv6。来源同步后会自动刷新。</p>
+          </div>
+          <div className="externalSourceList">
+            {externalIpSources.map((source) => (
+              <div className="externalSourceItem" key={source.id}>
+                <div className="poolItemMain">
+                  <strong>{source.name}</strong>
+                  <span>{source.base_url} · 周期 {source.sync_interval_seconds}s · {fmtDate(source.last_synced_at)}</span>
+                  {source.last_error && <small className="danger">{source.last_error}</small>}
+                </div>
+                <div className="rowActions">
+                  <Status value={source.enabled ? source.status : "disabled"} />
+                  <button className="icon secondaryIcon" title="立即同步" onClick={() => act(() => apiFetch(`/api/external-ips/sources/${source.id}/sync`, token, { method: "POST" }), "外部健康 IP 已同步")}>
+                    <RefreshCw size={15} />
+                  </button>
+                  <button className="icon dangerBtn" title="删除来源" onClick={() => act(() => apiFetch(`/api/external-ips/sources/${source.id}`, token, { method: "DELETE" }), "外部 IP 来源已删除")}>
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </div>
+            ))}
+            {externalIpSources.length === 0 && <div className="emptyCell">还没有外部 IP 来源</div>}
+          </div>
+          <div className="externalIpList">
+            {healthyExternalItems.slice(0, 20).map((item) => (
+              <span className="externalIpChip" key={item.id} title={`${item.name} · ${fmtDate(item.last_seen_at)}`}>
+                {item.target}:{item.port}
+              </span>
+            ))}
+            {healthyExternalItems.length === 0 && <span className="emptyInline">暂无外部健康 IP</span>}
           </div>
         </div>
       </div>
@@ -1352,6 +1472,17 @@ function GroupsPanel({
                 {enabledPoolItems.map((item) => (
                   <option value={item.id} key={item.id}>
                     {item.target}:{item.port}{item.remark ? ` · ${item.remark}` : ""} · {targetTypeText(item.target_type)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              从外部健康 IP 选择
+              <select value={selectedExternalItemId} onChange={(event) => selectExternalIpItem(Number(event.target.value))} disabled={healthyExternalItems.length === 0}>
+                <option value="">{healthyExternalItems.length > 0 ? "选择一个已同步的健康 IP" : "暂无外部健康 IP"}</option>
+                {healthyExternalItems.map((item) => (
+                  <option value={item.id} key={item.id}>
+                    {item.target}:{item.port} · {item.name}
                   </option>
                 ))}
               </select>

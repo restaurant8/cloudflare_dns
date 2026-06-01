@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .database import SessionLocal, init_db
+from .external_ips import sync_due_external_ip_sources
 from .failover import evaluate_failover_groups
 from .health import mark_stale_agents, run_local_checks
 from .routes import routers
@@ -18,6 +19,7 @@ async def scheduler_loop(stop_event: asyncio.Event) -> None:
             with SessionLocal() as db:
                 mark_stale_agents(db)
                 run_local_checks(db)
+                sync_due_external_ip_sources(db)
                 evaluate_failover_groups(db)
                 db.commit()
         except Exception:

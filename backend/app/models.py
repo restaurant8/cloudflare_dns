@@ -139,6 +139,41 @@ class TargetPoolItem(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
+class ExternalIpSource(Base, TimestampMixin):
+    __tablename__ = "external_ip_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(40), default="nyanpass", nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    default_port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
+    sync_interval_seconds: Mapped[int] = mapped_column(Integer, default=600, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="unknown", nullable=False)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    items: Mapped[list["ExternalIpItem"]] = relationship("ExternalIpItem", back_populates="source", cascade="all, delete-orphan")
+
+
+class ExternalIpItem(Base, TimestampMixin):
+    __tablename__ = "external_ip_items"
+    __table_args__ = (UniqueConstraint("source_id", "target", "port", name="uq_external_ip_item_source_target_port"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("external_ip_sources.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    group_name: Mapped[str | None] = mapped_column(String(255))
+    target: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="healthy", nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    source: Mapped["ExternalIpSource"] = relationship("ExternalIpSource", back_populates="items")
+
+
 class Agent(Base, TimestampMixin):
     __tablename__ = "agents"
 
