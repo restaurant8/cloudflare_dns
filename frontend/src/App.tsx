@@ -28,7 +28,7 @@ import {
 import { apiFetch, fmtDate, fmtTime } from "./api";
 import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverGroup, Origin, Overview, ProbeState, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
 
-type Section = "overview" | "cloudflare" | "records" | "groups" | "externalIps" | "agents" | "webhooks" | "account" | "events";
+type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "agents" | "webhooks" | "account" | "events";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
@@ -43,6 +43,7 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "cloudflare", label: "Cloudflare", icon: KeyRound },
   { id: "records", label: "解析记录", icon: Cloud },
   { id: "groups", label: "故障切换", icon: ListRestart },
+  { id: "targetPool", label: "IP 池子", icon: Server },
   { id: "externalIps", label: "外部 IP", icon: Globe2 },
   { id: "agents", label: "探针", icon: RadioTower },
   { id: "webhooks", label: "通知", icon: WebhookIcon },
@@ -558,6 +559,9 @@ export default function App() {
         {section === "groups" && (
           <GroupsPanel token={token} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} act={act} />
         )}
+        {section === "targetPool" && (
+          <TargetPoolPanel token={token} targetPool={targetPool} act={act} />
+        )}
         {section === "externalIps" && (
           <ExternalIpsPanel token={token} externalIpSources={externalIpSources} externalIpItems={externalIpItems} act={act} />
         )}
@@ -872,35 +876,14 @@ function RecordsPanel({
   );
 }
 
-function GroupsPanel({
-  token,
-  groups,
-  targetPool,
-  externalIpItems,
-  act
-}: {
-  token: string;
-  groups: FailoverGroup[];
-  targetPool: TargetPoolItem[];
-  externalIpItems: ExternalIpItem[];
-  act: ActionRunner;
-}) {
+function TargetPoolPanel({ token, targetPool, act }: { token: string; targetPool: TargetPoolItem[]; act: ActionRunner }) {
   const [poolDraft, setPoolDraft] = useState<TargetPoolDraft>(defaultTargetPoolDraft);
+  const [batchText, setBatchText] = useState("");
+  const [batchPort, setBatchPort] = useState(22);
+  const [batchInterval, setBatchInterval] = useState(600);
+  const [batchRemark, setBatchRemark] = useState("");
   const [editingPoolId, setEditingPoolId] = useState<number | null>(null);
   const [poolEdits, setPoolEdits] = useState<Record<number, TargetPoolDraft>>({});
-  const [addingGroupId, setAddingGroupId] = useState<number | null>(null);
-  const [originAdd, setOriginAdd] = useState<OriginAddDraft>(defaultOriginAddDraft);
-  const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
-  const [groupEdits, setGroupEdits] = useState<Record<number, GroupEditDraft>>({});
-  const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
-  const [originEdits, setOriginEdits] = useState<Record<number, OriginEditDraft>>({});
-  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<number>>(new Set());
-  const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
-  const enabledPoolItems = targetPool.filter((item) => item.enabled);
-  const healthyExternalItems = externalIpItems.filter((item) => item.status === "healthy");
-  const addTargetType = inferDraftTargetType(originAdd.target);
-  const selectedPoolItemId = enabledPoolItems.find((item) => item.target === originAdd.target && item.port === originAdd.port)?.id || "";
-  const selectedExternalItemId = healthyExternalItems.find((item) => item.target === originAdd.target && item.port === originAdd.port)?.id || "";
 
   async function createPoolItem(event: FormEvent) {
     event.preventDefault();
@@ -918,6 +901,53 @@ function GroupsPanel({
         }),
       "目标已加入池子",
       () => setPoolDraft(defaultTargetPoolDraft)
+    );
+  }
+
+  function parseBatchTargets() {
+    return batchText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+      .map((line) => {
+        const parts = line.includes(",") ? line.split(",").map((part) => part.trim()) : line.split(/\s+/);
+        const target = parts[0] || "";
+        const port = parts[1] ? Number(parts[1]) : batchPort;
+        const remark = parts.slice(2).join(" ").trim() || batchRemark.trim() || null;
+        return {
+          target,
+          port,
+          remark,
+          check_interval_seconds: batchInterval,
+          enabled: true
+        };
+      });
+  }
+
+  async function createBatchPoolItems(event: FormEvent) {
+    event.preventDefault();
+    const items = parseBatchTargets();
+    if (items.length === 0) {
+      await act(async () => {
+        throw new Error("请先输入要批量添加的 IP 或域名");
+      });
+      return;
+    }
+    const invalid = items.find((item) => !item.target || !Number.isInteger(item.port) || item.port < 1 || item.port > 65535);
+    if (invalid) {
+      await act(async () => {
+        throw new Error(`批量内容格式有误：${invalid.target || "空目标"}`);
+      });
+      return;
+    }
+    await act(
+      () =>
+        apiFetch("/api/target-pool/bulk", token, {
+          method: "POST",
+          body: JSON.stringify({ items })
+        }),
+      "批量添加已完成",
+      () => setBatchText("")
     );
   }
 
@@ -954,6 +984,181 @@ function GroupsPanel({
       () => setEditingPoolId(null)
     );
   }
+
+  return (
+    <section className="stack">
+      <div className="panelTitle groupsIntro">
+        <h2>IP 池子</h2>
+        <p>把常用 IP、IPv6 或域名放进池子，故障切换组添加备用时可直接选择。</p>
+      </div>
+      <div className="targetPoolPanel">
+        <div className="targetPoolTools">
+          <form className="panel targetPoolForm" onSubmit={createPoolItem}>
+            <div className="panelTitle">
+              <h2>单个添加</h2>
+              <p>支持 IPv4、IPv6 和域名，系统会自动识别发布类型。</p>
+            </div>
+            <div className="poolFormGrid">
+              <label>
+                IP / IPv6 / 域名
+                <input placeholder="例如 192.0.2.10" value={poolDraft.target} onChange={(event) => setPoolDraft((current) => ({ ...current, target: event.target.value }))} required />
+              </label>
+              <label>
+                检查端口
+                <input type="number" min={1} max={65535} value={poolDraft.port} onChange={(event) => setPoolDraft((current) => ({ ...current, port: Number(event.target.value) }))} />
+              </label>
+              <label>
+                健康检查周期（秒）
+                <input type="number" min={60} max={86400} value={poolDraft.check_interval_seconds} onChange={(event) => setPoolDraft((current) => ({ ...current, check_interval_seconds: Number(event.target.value) }))} />
+              </label>
+            </div>
+            <label>
+              备注
+              <input placeholder="例如 香港备用、洛杉矶 1 号" value={poolDraft.remark} onChange={(event) => setPoolDraft((current) => ({ ...current, remark: event.target.value }))} />
+            </label>
+            <button>
+              <Plus size={16} />
+              <span>加入池子</span>
+            </button>
+          </form>
+          <form className="panel targetPoolForm" onSubmit={createBatchPoolItems}>
+            <div className="panelTitle">
+              <h2>批量添加</h2>
+              <p>每行一个目标；也可以写成：目标,端口,备注。</p>
+            </div>
+            <label>
+              批量目标
+              <textarea
+                rows={8}
+                placeholder={"8.8.8.8\n1.1.1.1,443,Cloudflare\n2001:4860:4860::8888"}
+                value={batchText}
+                onChange={(event) => setBatchText(event.target.value)}
+              />
+            </label>
+            <div className="batchPoolGrid">
+              <label>
+                默认端口
+                <input type="number" min={1} max={65535} value={batchPort} onChange={(event) => setBatchPort(Number(event.target.value))} />
+              </label>
+              <label>
+                检查周期（秒）
+                <input type="number" min={60} max={86400} value={batchInterval} onChange={(event) => setBatchInterval(Number(event.target.value))} />
+              </label>
+            </div>
+            <label>
+              默认备注
+              <input placeholder="每行没有备注时使用" value={batchRemark} onChange={(event) => setBatchRemark(event.target.value)} />
+            </label>
+            <button>
+              <Plus size={16} />
+              <span>批量加入</span>
+            </button>
+          </form>
+        </div>
+        <div className="panel poolListPanel">
+          <div className="panelTitle">
+            <h2>池子列表</h2>
+            <p>故障切换组里点击添加备用，即可从这里选择目标。</p>
+          </div>
+          <div className="poolList">
+            {targetPool.map((item) => {
+              const edit = poolEdits[item.id] || {
+                target: item.target,
+                port: item.port,
+                remark: item.remark || "",
+                check_interval_seconds: item.check_interval_seconds,
+                enabled: item.enabled
+              };
+              return (
+                <div className="poolItem" key={item.id}>
+                  {editingPoolId === item.id ? (
+                    <>
+                      <div className="poolEditGrid">
+                        <input value={edit.target} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, target: event.target.value } }))} />
+                        <input type="number" min={1} max={65535} value={edit.port} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, port: Number(event.target.value) } }))} />
+                        <input type="number" min={60} max={86400} value={edit.check_interval_seconds} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, check_interval_seconds: Number(event.target.value) } }))} title="健康检查周期（秒）" />
+                        <input value={edit.remark} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, remark: event.target.value } }))} placeholder="备注" />
+                        <label className="inlineCheck">
+                          <input type="checkbox" checked={edit.enabled} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, enabled: event.target.checked } }))} />
+                          启用
+                        </label>
+                      </div>
+                      <div className="rowActions">
+                        <button className="icon" title="保存" onClick={() => savePoolItem(item.id)}>
+                          <Save size={15} />
+                        </button>
+                        <button className="icon secondaryIcon" title="取消" onClick={() => setEditingPoolId(null)}>
+                          ×
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="poolItemMain">
+                        <strong title={`${item.target}:${item.port}`}>{displayTargetWithRemark(item.target, item.port, item.remark)}</strong>
+                        <span>{targetTypeText(item.target_type)} · 发布为 {recordTypeForTargetType(item.target_type)} · 检测周期 {item.check_interval_seconds}s · 最后检测 {fmtDate(item.last_checked_at)}</span>
+                        {item.last_error && <small className="danger">{item.last_error}</small>}
+                        {item.probe_states.length > 0 && (
+                          <div className="probeChips">
+                            {item.probe_states.map((probe) => (
+                              <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || `最后检测 ${fmtDate(probe.last_checked_at)}`}>
+                                {probeSourceText(probe)}：{statusText(probe.status)} · {fmtTime(probe.last_checked_at)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div className="rowActions">
+                        <Status value={item.enabled ? item.status : "disabled"} />
+                        <button className="icon secondaryIcon" title="手动检测目标池" onClick={() => act(() => apiFetch(`/api/target-pool/${item.id}/run`, token, { method: "POST" }), "目标池检测已完成")}>
+                          <Play size={15} />
+                        </button>
+                        <button className="icon secondaryIcon" title="修改" onClick={() => beginEditPoolItem(item)}>
+                          <Pencil size={15} />
+                        </button>
+                        <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/target-pool/${item.id}`, token, { method: "DELETE" }), "目标已删除")}>
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+            {targetPool.length === 0 && <div className="emptyCell">还没有池子目标</div>}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function GroupsPanel({
+  token,
+  groups,
+  targetPool,
+  externalIpItems,
+  act
+}: {
+  token: string;
+  groups: FailoverGroup[];
+  targetPool: TargetPoolItem[];
+  externalIpItems: ExternalIpItem[];
+  act: ActionRunner;
+}) {
+  const [addingGroupId, setAddingGroupId] = useState<number | null>(null);
+  const [originAdd, setOriginAdd] = useState<OriginAddDraft>(defaultOriginAddDraft);
+  const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
+  const [groupEdits, setGroupEdits] = useState<Record<number, GroupEditDraft>>({});
+  const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
+  const [originEdits, setOriginEdits] = useState<Record<number, OriginEditDraft>>({});
+  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<number>>(new Set());
+  const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
+  const enabledPoolItems = targetPool.filter((item) => item.enabled);
+  const healthyExternalItems = externalIpItems.filter((item) => item.status === "healthy");
+  const addTargetType = inferDraftTargetType(originAdd.target);
+  const selectedPoolItemId = enabledPoolItems.find((item) => item.target === originAdd.target && item.port === originAdd.port)?.id || "";
+  const selectedExternalItemId = healthyExternalItems.find((item) => item.target === originAdd.target && item.port === originAdd.port)?.id || "";
 
   function beginAddOrigin(group: FailoverGroup) {
     const maxPriority = group.origins.reduce((value, origin) => Math.max(value, origin.priority), 0);
@@ -1106,109 +1311,6 @@ function GroupsPanel({
       <div className="panelTitle groupsIntro">
         <h2>故障切换组</h2>
         <p>从解析记录页点击管理即可接管主用解析；这里负责查看状态、修改源站和添加备用目标。</p>
-      </div>
-      <div className="targetPoolPanel">
-        <form className="panel targetPoolForm" onSubmit={createPoolItem}>
-          <div className="panelTitle">
-            <h2>目标池</h2>
-            <p>把常用 IP、IPv6 或域名先放进池子，添加备用时可直接选择。</p>
-          </div>
-          <div className="poolFormGrid">
-            <label>
-              IP / IPv6 / 域名
-              <input placeholder="例如 192.0.2.10" value={poolDraft.target} onChange={(event) => setPoolDraft((current) => ({ ...current, target: event.target.value }))} required />
-            </label>
-            <label>
-              检查端口
-              <input type="number" min={1} max={65535} value={poolDraft.port} onChange={(event) => setPoolDraft((current) => ({ ...current, port: Number(event.target.value) }))} />
-            </label>
-            <label>
-              健康检查周期（秒）
-              <input type="number" min={60} max={86400} value={poolDraft.check_interval_seconds} onChange={(event) => setPoolDraft((current) => ({ ...current, check_interval_seconds: Number(event.target.value) }))} />
-            </label>
-          </div>
-          <label>
-            备注
-            <input placeholder="例如 香港备用、洛杉矶 1 号" value={poolDraft.remark} onChange={(event) => setPoolDraft((current) => ({ ...current, remark: event.target.value }))} />
-          </label>
-          <button>
-            <Plus size={16} />
-            <span>加入池子</span>
-          </button>
-        </form>
-        <div className="panel poolListPanel">
-          <div className="panelTitle">
-            <h2>池子列表</h2>
-            <p>点击故障组里的添加备用按钮，即可从这里选择目标。</p>
-          </div>
-          <div className="poolList">
-            {targetPool.map((item) => {
-              const edit = poolEdits[item.id] || {
-                target: item.target,
-                port: item.port,
-                remark: item.remark || "",
-                check_interval_seconds: item.check_interval_seconds,
-                enabled: item.enabled
-              };
-              return (
-                <div className="poolItem" key={item.id}>
-                  {editingPoolId === item.id ? (
-                    <>
-                      <div className="poolEditGrid">
-                        <input value={edit.target} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, target: event.target.value } }))} />
-                        <input type="number" min={1} max={65535} value={edit.port} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, port: Number(event.target.value) } }))} />
-                        <input type="number" min={60} max={86400} value={edit.check_interval_seconds} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, check_interval_seconds: Number(event.target.value) } }))} title="健康检查周期（秒）" />
-                        <input value={edit.remark} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, remark: event.target.value } }))} placeholder="备注" />
-                        <label className="inlineCheck">
-                          <input type="checkbox" checked={edit.enabled} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, enabled: event.target.checked } }))} />
-                          启用
-                        </label>
-                      </div>
-                      <div className="rowActions">
-                        <button className="icon" title="保存" onClick={() => savePoolItem(item.id)}>
-                          <Save size={15} />
-                        </button>
-                        <button className="icon secondaryIcon" title="取消" onClick={() => setEditingPoolId(null)}>
-                          ×
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="poolItemMain">
-                        <strong title={`${item.target}:${item.port}`}>{displayTargetWithRemark(item.target, item.port, item.remark)}</strong>
-                        <span>{targetTypeText(item.target_type)} · 发布为 {recordTypeForTargetType(item.target_type)} · 检测周期 {item.check_interval_seconds}s · 最后检测 {fmtDate(item.last_checked_at)}</span>
-                        {item.last_error && <small className="danger">{item.last_error}</small>}
-                        {item.probe_states.length > 0 && (
-                          <div className="probeChips">
-                            {item.probe_states.map((probe) => (
-                              <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || `最后检测 ${fmtDate(probe.last_checked_at)}`}>
-                                {probeSourceText(probe)}：{statusText(probe.status)} · {fmtTime(probe.last_checked_at)}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                      <div className="rowActions">
-                        <Status value={item.enabled ? item.status : "disabled"} />
-                        <button className="icon secondaryIcon" title="手动检测目标池" onClick={() => act(() => apiFetch(`/api/target-pool/${item.id}/run`, token, { method: "POST" }), "目标池检测已完成")}>
-                          <Play size={15} />
-                        </button>
-                        <button className="icon secondaryIcon" title="修改" onClick={() => beginEditPoolItem(item)}>
-                          <Pencil size={15} />
-                        </button>
-                        <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/target-pool/${item.id}`, token, { method: "DELETE" }), "目标已删除")}>
-                          <Trash2 size={15} />
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </div>
-              );
-            })}
-            {targetPool.length === 0 && <div className="emptyCell">还没有池子目标</div>}
-          </div>
-        </div>
       </div>
       <div className="groupGrid">
         {groups.map((group) => {

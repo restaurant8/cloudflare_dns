@@ -528,6 +528,11 @@ form.panel {
   grid-template-columns: minmax(280px, 390px) minmax(0, 1fr);
 }
 
+.targetPoolTools {
+  display: grid;
+  gap: 16px;
+}
+
 .externalIpPanel {
   display: grid;
   gap: 16px;
@@ -545,6 +550,12 @@ form.panel {
   display: grid;
   gap: 10px;
   grid-template-columns: minmax(0, 1fr) 110px 150px;
+}
+
+.batchPoolGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
 .externalSourceGrid {
@@ -1291,6 +1302,7 @@ form.panel {
   .originEditGrid,
   .poolEditGrid,
   .poolFormGrid,
+  .batchPoolGrid,
   .externalSourceEditGrid,
   .externalSourceGrid,
   .modalFormGrid {

@@ -6,7 +6,7 @@ from ..deps import get_current_user
 from ..dns_utils import parse_target
 from ..health import run_target_pool_checks
 from ..models import TargetPoolItem, TargetPoolProbeState, User
-from ..schemas import Message, TargetPoolCreate, TargetPoolOut, TargetPoolUpdate
+from ..schemas import Message, TargetPoolBulkCreate, TargetPoolBulkItemResult, TargetPoolBulkOut, TargetPoolCreate, TargetPoolOut, TargetPoolUpdate
 
 
 router = APIRouter(prefix="/target-pool", tags=["target-pool"])
@@ -53,6 +53,54 @@ def create_target_pool_item(payload: TargetPoolCreate, _: User = Depends(get_cur
     db.commit()
     db.refresh(item)
     return item
+
+
+@router.post("/bulk", response_model=TargetPoolBulkOut)
+def bulk_create_target_pool_items(payload: TargetPoolBulkCreate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    results: list[TargetPoolBulkItemResult] = []
+    created = skipped = failed = 0
+    for item_payload in payload.items:
+        raw_target = item_payload.target.strip()
+        try:
+            target_info = parse_target(raw_target)
+        except ValueError as exc:
+            failed += 1
+            results.append(TargetPoolBulkItemResult(target=raw_target, port=item_payload.port, status="failed", message=str(exc)))
+            continue
+
+        existing = (
+            db.query(TargetPoolItem)
+            .filter(TargetPoolItem.target == target_info.value, TargetPoolItem.port == item_payload.port)
+            .one_or_none()
+        )
+        if existing is not None:
+            skipped += 1
+            results.append(
+                TargetPoolBulkItemResult(
+                    target=target_info.value,
+                    port=item_payload.port,
+                    status="skipped",
+                    message="已存在",
+                    id=existing.id,
+                )
+            )
+            continue
+
+        item = TargetPoolItem(
+            target=target_info.value,
+            target_type=target_info.target_type,
+            port=item_payload.port,
+            remark=_normalize_remark(item_payload.remark),
+            check_interval_seconds=item_payload.check_interval_seconds,
+            enabled=item_payload.enabled,
+        )
+        db.add(item)
+        db.flush()
+        created += 1
+        results.append(TargetPoolBulkItemResult(target=item.target, port=item.port, status="created", id=item.id))
+
+    db.commit()
+    return TargetPoolBulkOut(created=created, skipped=skipped, failed=failed, results=results)
 
 
 @router.patch("/{item_id}", response_model=TargetPoolOut)

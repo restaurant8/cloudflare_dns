@@ -7,8 +7,8 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.health import LOCAL_SOURCE, run_target_pool_checks
 from app.models import CloudflareCredential, FailoverGroup, Origin, ProbeState, TargetPoolItem, User, Zone
-from app.routes.target_pool import create_target_pool_item
-from app.schemas import TargetPoolCreate
+from app.routes.target_pool import bulk_create_target_pool_items, create_target_pool_item
+from app.schemas import TargetPoolBulkCreate, TargetPoolCreate
 from app.security import encrypt_secret
 
 
@@ -99,3 +99,28 @@ def test_target_pool_reuses_fresh_matching_origin_status():
     assert pool_item.last_checked_at == checked_at
     assert pool_item.probe_states[0].source_key == LOCAL_SOURCE
     assert pool_item.probe_states[0].last_rtt_ms == 9.1
+
+
+def test_bulk_create_target_pool_items_skips_duplicates_and_reports_invalid():
+    db = make_session()
+    user = User(username="admin", password_hash="hash")
+    db.add(user)
+    db.add(TargetPoolItem(target="8.8.8.8", target_type="ipv4", port=22))
+    db.commit()
+
+    result = bulk_create_target_pool_items(
+        TargetPoolBulkCreate(
+            items=[
+                TargetPoolCreate(target="8.8.8.8", port=22),
+                TargetPoolCreate(target="1.1.1.1", port=443, remark="cf"),
+                TargetPoolCreate(target="bad host", port=22),
+            ]
+        ),
+        user,
+        db,
+    )
+
+    assert result.created == 1
+    assert result.skipped == 1
+    assert result.failed == 1
+    assert db.query(TargetPoolItem).filter(TargetPoolItem.target == "1.1.1.1").one().remark == "cf"

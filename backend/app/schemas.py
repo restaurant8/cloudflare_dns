@@ -161,6 +161,25 @@ class TargetPoolUpdate(BaseModel):
     enabled: bool | None = None
 
 
+class TargetPoolBulkCreate(BaseModel):
+    items: list[TargetPoolCreate] = Field(min_length=1, max_length=500)
+
+
+class TargetPoolBulkItemResult(BaseModel):
+    target: str
+    port: int
+    status: str
+    message: str | None = None
+    id: int | None = None
+
+
+class TargetPoolBulkOut(BaseModel):
+    created: int
+    skipped: int
+    failed: int
+    results: list[TargetPoolBulkItemResult]
+
+
 class TargetPoolOut(BaseModel):
     id: int
     target: str
