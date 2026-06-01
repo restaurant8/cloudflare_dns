@@ -44,6 +44,12 @@ def _migrate_existing_schema() -> None:
                 if column_name not in existing:
                     connection.execute(text(statement))
 
+        if "external_ip_items" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("external_ip_items")}
+            for column_name, statement in _external_ip_item_migration_statements(dialect).items():
+                if column_name not in existing:
+                    connection.execute(text(statement))
+
         if "agents" in table_names:
             existing = {column["name"] for column in inspector.get_columns("agents")}
             if "region" not in existing:
@@ -106,6 +112,18 @@ def _target_pool_migration_statements(dialect: str) -> dict[str, str]:
         "last_checked_at": "ALTER TABLE target_pool_items ADD COLUMN last_checked_at DATETIME",
         "last_error": "ALTER TABLE target_pool_items ADD COLUMN last_error TEXT",
         "last_rtt_ms": "ALTER TABLE target_pool_items ADD COLUMN last_rtt_ms FLOAT",
+    }
+
+
+def _external_ip_item_migration_statements(dialect: str) -> dict[str, str]:
+    if dialect == "mysql":
+        return {
+            "machine_key": "ALTER TABLE external_ip_items ADD COLUMN machine_key VARCHAR(255) NULL",
+            "country": "ALTER TABLE external_ip_items ADD COLUMN country VARCHAR(120) NULL",
+        }
+    return {
+        "machine_key": "ALTER TABLE external_ip_items ADD COLUMN machine_key VARCHAR(255)",
+        "country": "ALTER TABLE external_ip_items ADD COLUMN country VARCHAR(120)",
     }
 
 

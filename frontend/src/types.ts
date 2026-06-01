@@ -98,6 +98,8 @@ export type ExternalIpItem = {
   source_id: number;
   name: string;
   group_name: string | null;
+  machine_key: string | null;
+  country: string | null;
   target: string;
   target_type: string;
   port: number;

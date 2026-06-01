@@ -557,6 +557,13 @@ form.panel {
   grid-column: 1 / -1;
 }
 
+.externalSourceEditGrid {
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(140px, 0.8fr) minmax(220px, 1.4fr) minmax(150px, 1fr) 100px 130px auto;
+}
+
 .poolList {
   display: grid;
   gap: 8px;
@@ -581,13 +588,44 @@ form.panel {
   margin-top: 12px;
 }
 
-.externalIpList {
+.externalMachineList {
   border-top: 1px solid #edf1f5;
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.externalMachineCard {
+  background: #ffffff;
+  border: 1px solid #dbe6ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.externalMachineHead {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.externalMachineHead strong {
+  overflow-wrap: anywhere;
+}
+
+.externalMachineHead span {
+  color: #667789;
+  font-size: 12px;
+}
+
+.externalMachineIps {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 12px;
-  padding-top: 12px;
 }
 
 .externalIpChip {
@@ -1253,6 +1291,7 @@ form.panel {
   .originEditGrid,
   .poolEditGrid,
   .poolFormGrid,
+  .externalSourceEditGrid,
   .externalSourceGrid,
   .modalFormGrid {
     grid-template-columns: 1fr;

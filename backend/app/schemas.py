@@ -203,6 +203,8 @@ class ExternalIpItemOut(BaseModel):
     source_id: int
     name: str
     group_name: str | None
+    machine_key: str | None
+    country: str | None
     target: str
     target_type: str
     port: int

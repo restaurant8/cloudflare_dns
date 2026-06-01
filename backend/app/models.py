@@ -196,6 +196,8 @@ class ExternalIpItem(Base, TimestampMixin):
     source_id: Mapped[int] = mapped_column(ForeignKey("external_ip_sources.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     group_name: Mapped[str | None] = mapped_column(String(255))
+    machine_key: Mapped[str | None] = mapped_column(String(255))
+    country: Mapped[str | None] = mapped_column(String(120))
     target: Mapped[str] = mapped_column(String(255), nullable=False)
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)
     port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)

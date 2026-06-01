@@ -6,6 +6,7 @@ import {
   Cloud,
   Copy,
   DatabaseZap,
+  Globe2,
   KeyRound,
   Link2,
   ListRestart,
@@ -27,7 +28,7 @@ import {
 import { apiFetch, fmtDate, fmtTime } from "./api";
 import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverGroup, Origin, Overview, ProbeState, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
 
-type Section = "overview" | "cloudflare" | "records" | "groups" | "agents" | "webhooks" | "account" | "events";
+type Section = "overview" | "cloudflare" | "records" | "groups" | "externalIps" | "agents" | "webhooks" | "account" | "events";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
@@ -42,6 +43,7 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "cloudflare", label: "Cloudflare", icon: KeyRound },
   { id: "records", label: "解析记录", icon: Cloud },
   { id: "groups", label: "故障切换", icon: ListRestart },
+  { id: "externalIps", label: "外部 IP", icon: Globe2 },
   { id: "agents", label: "探针", icon: RadioTower },
   { id: "webhooks", label: "通知", icon: WebhookIcon },
   { id: "account", label: "账户", icon: LockKeyhole },
@@ -135,6 +137,17 @@ function probeSourceIp(value: string): string | null {
 
 function displayTargetWithRemark(target: string, port: number, remark?: string | null): string {
   return remark?.trim() || `${target}:${port}`;
+}
+
+function externalIpFamilyText(item: ExternalIpItem): string {
+  if (item.target_type === "ipv4") return "IPv4";
+  if (item.target_type === "ipv6") return "IPv6";
+  return targetTypeText(item.target_type);
+}
+
+function externalIpLabel(item: ExternalIpItem): string {
+  const country = item.country ? ` · ${item.country}` : "";
+  return `${item.name}${country} · ${externalIpFamilyText(item)} ${item.target}:${item.port}`;
 }
 
 function currentProbeStates(origin: Origin) {
@@ -543,7 +556,10 @@ export default function App() {
           />
         )}
         {section === "groups" && (
-          <GroupsPanel token={token} groups={groups} targetPool={targetPool} externalIpSources={externalIpSources} externalIpItems={externalIpItems} act={act} />
+          <GroupsPanel token={token} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} act={act} />
+        )}
+        {section === "externalIps" && (
+          <ExternalIpsPanel token={token} externalIpSources={externalIpSources} externalIpItems={externalIpItems} act={act} />
         )}
         {section === "agents" && (
           <AgentsPanel token={token} agents={agents} agentToken={agentToken} setAgentToken={setAgentToken} act={act} />
@@ -860,19 +876,16 @@ function GroupsPanel({
   token,
   groups,
   targetPool,
-  externalIpSources,
   externalIpItems,
   act
 }: {
   token: string;
   groups: FailoverGroup[];
   targetPool: TargetPoolItem[];
-  externalIpSources: ExternalIpSource[];
   externalIpItems: ExternalIpItem[];
   act: ActionRunner;
 }) {
   const [poolDraft, setPoolDraft] = useState<TargetPoolDraft>(defaultTargetPoolDraft);
-  const [externalDraft, setExternalDraft] = useState<ExternalIpSourceDraft>(defaultExternalIpSourceDraft);
   const [editingPoolId, setEditingPoolId] = useState<number | null>(null);
   const [poolEdits, setPoolEdits] = useState<Record<number, TargetPoolDraft>>({});
   const [addingGroupId, setAddingGroupId] = useState<number | null>(null);
@@ -905,26 +918,6 @@ function GroupsPanel({
         }),
       "目标已加入池子",
       () => setPoolDraft(defaultTargetPoolDraft)
-    );
-  }
-
-  async function createExternalIpSource(event: FormEvent) {
-    event.preventDefault();
-    await act(
-      () =>
-        apiFetch("/api/external-ips/sources", token, {
-          method: "POST",
-          body: JSON.stringify({
-            name: externalDraft.name.trim(),
-            base_url: externalDraft.base_url.trim(),
-            token: externalDraft.token.trim(),
-            default_port: externalDraft.default_port,
-            sync_interval_seconds: externalDraft.sync_interval_seconds,
-            enabled: externalDraft.enabled
-          })
-        }),
-      "外部 IP 来源已添加",
-      () => setExternalDraft(defaultExternalIpSourceDraft)
     );
   }
 
@@ -1217,75 +1210,6 @@ function GroupsPanel({
           </div>
         </div>
       </div>
-      <div className="externalIpPanel">
-        <form className="panel externalSourceForm" onSubmit={createExternalIpSource}>
-          <div className="panelTitle">
-            <h2>外部健康 IP</h2>
-            <p>从 Nyanpass 服务器状态页同步在线节点 IP，添加备用时可直接选择。</p>
-          </div>
-          <div className="externalSourceGrid">
-            <label>
-              来源名称
-              <input placeholder="例如 Nyanpass" value={externalDraft.name} onChange={(event) => setExternalDraft((current) => ({ ...current, name: event.target.value }))} required />
-            </label>
-            <label>
-              面板地址
-              <input placeholder="https://ny.example.com" value={externalDraft.base_url} onChange={(event) => setExternalDraft((current) => ({ ...current, base_url: event.target.value }))} required />
-            </label>
-            <label>
-              Authorization / Token
-              <input type="password" value={externalDraft.token} onChange={(event) => setExternalDraft((current) => ({ ...current, token: event.target.value }))} required />
-            </label>
-            <label>
-              默认端口
-              <input type="number" min={1} max={65535} value={externalDraft.default_port} onChange={(event) => setExternalDraft((current) => ({ ...current, default_port: Number(event.target.value) }))} />
-            </label>
-            <label>
-              同步周期（秒）
-              <input type="number" min={60} max={86400} value={externalDraft.sync_interval_seconds} onChange={(event) => setExternalDraft((current) => ({ ...current, sync_interval_seconds: Number(event.target.value) }))} />
-            </label>
-          </div>
-          <button>
-            <Plus size={16} />
-            <span>添加来源</span>
-          </button>
-        </form>
-        <div className="panel externalIpListPanel">
-          <div className="panelTitle">
-            <h2>外部列表</h2>
-            <p>只显示在线且公网可用的 IPv4 / IPv6。来源同步后会自动刷新。</p>
-          </div>
-          <div className="externalSourceList">
-            {externalIpSources.map((source) => (
-              <div className="externalSourceItem" key={source.id}>
-                <div className="poolItemMain">
-                  <strong>{source.name}</strong>
-                  <span>{source.base_url} · 周期 {source.sync_interval_seconds}s · {fmtDate(source.last_synced_at)}</span>
-                  {source.last_error && <small className="danger">{source.last_error}</small>}
-                </div>
-                <div className="rowActions">
-                  <Status value={source.enabled ? source.status : "disabled"} />
-                  <button className="icon secondaryIcon" title="立即同步" onClick={() => act(() => apiFetch(`/api/external-ips/sources/${source.id}/sync`, token, { method: "POST" }), "外部健康 IP 已同步")}>
-                    <RefreshCw size={15} />
-                  </button>
-                  <button className="icon dangerBtn" title="删除来源" onClick={() => act(() => apiFetch(`/api/external-ips/sources/${source.id}`, token, { method: "DELETE" }), "外部 IP 来源已删除")}>
-                    <Trash2 size={15} />
-                  </button>
-                </div>
-              </div>
-            ))}
-            {externalIpSources.length === 0 && <div className="emptyCell">还没有外部 IP 来源</div>}
-          </div>
-          <div className="externalIpList">
-            {healthyExternalItems.slice(0, 20).map((item) => (
-              <span className="externalIpChip" key={item.id} title={`${item.target}:${item.port} · ${fmtDate(item.last_seen_at)}`}>
-                {item.name || `${item.target}:${item.port}`}
-              </span>
-            ))}
-            {healthyExternalItems.length === 0 && <span className="emptyInline">暂无外部健康 IP</span>}
-          </div>
-        </div>
-      </div>
       <div className="groupGrid">
         {groups.map((group) => {
           const groupEdit = groupEdits[group.id] || {
@@ -1523,7 +1447,7 @@ function GroupsPanel({
                 <option value="">{healthyExternalItems.length > 0 ? "选择一个已同步的健康 IP" : "暂无外部健康 IP"}</option>
                 {healthyExternalItems.map((item) => (
                   <option value={item.id} key={item.id}>
-                    {item.name || `${item.target}:${item.port}`} · {item.target}:{item.port}
+                    {externalIpLabel(item)}
                   </option>
                 ))}
               </select>
@@ -1575,6 +1499,254 @@ function GroupsPanel({
           </div>
         </div>
       )}
+    </section>
+  );
+}
+
+function ExternalIpsPanel({
+  token,
+  externalIpSources,
+  externalIpItems,
+  act
+}: {
+  token: string;
+  externalIpSources: ExternalIpSource[];
+  externalIpItems: ExternalIpItem[];
+  act: ActionRunner;
+}) {
+  const [externalDraft, setExternalDraft] = useState<ExternalIpSourceDraft>(defaultExternalIpSourceDraft);
+  const [editingSourceId, setEditingSourceId] = useState<number | null>(null);
+  const [sourceEdits, setSourceEdits] = useState<Record<number, ExternalIpSourceDraft>>({});
+  const healthyExternalItems = externalIpItems.filter((item) => item.status === "healthy");
+  const externalMachines = useMemo(() => {
+    const groups = new Map<
+      string,
+      { key: string; name: string; country: string | null; groupName: string | null; lastSeenAt: string | null; items: ExternalIpItem[] }
+    >();
+    for (const item of healthyExternalItems) {
+      const key = item.machine_key || `${item.source_id}:${item.group_name || ""}:${item.name}:${item.port}`;
+      const current = groups.get(key) || {
+        key,
+        name: item.name,
+        country: item.country,
+        groupName: item.group_name,
+        lastSeenAt: item.last_seen_at,
+        items: []
+      };
+      current.country = current.country || item.country;
+      current.groupName = current.groupName || item.group_name;
+      if (!current.lastSeenAt || (item.last_seen_at && new Date(item.last_seen_at).getTime() > new Date(current.lastSeenAt).getTime())) {
+        current.lastSeenAt = item.last_seen_at;
+      }
+      current.items.push(item);
+      groups.set(key, current);
+    }
+    return [...groups.values()]
+      .map((group) => ({
+        ...group,
+        items: group.items.sort((left, right) => left.target_type.localeCompare(right.target_type) || left.target.localeCompare(right.target))
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }, [healthyExternalItems]);
+
+  async function createExternalIpSource(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () =>
+        apiFetch("/api/external-ips/sources", token, {
+          method: "POST",
+          body: JSON.stringify({
+            name: externalDraft.name.trim(),
+            base_url: externalDraft.base_url.trim(),
+            token: externalDraft.token.trim(),
+            default_port: externalDraft.default_port,
+            sync_interval_seconds: externalDraft.sync_interval_seconds,
+            enabled: externalDraft.enabled
+          })
+        }),
+      "外部 IP 来源已添加",
+      () => setExternalDraft(defaultExternalIpSourceDraft)
+    );
+  }
+
+  function beginEditExternalIpSource(source: ExternalIpSource) {
+    setEditingSourceId(source.id);
+    setSourceEdits((current) => ({
+      ...current,
+      [source.id]: {
+        name: source.name,
+        base_url: source.base_url,
+        token: "",
+        default_port: source.default_port,
+        sync_interval_seconds: source.sync_interval_seconds,
+        enabled: source.enabled
+      }
+    }));
+  }
+
+  async function saveExternalIpSource(sourceId: number) {
+    const draft = sourceEdits[sourceId];
+    if (!draft) return;
+    const payload: Record<string, string | number | boolean> = {
+      name: draft.name.trim(),
+      base_url: draft.base_url.trim(),
+      default_port: draft.default_port,
+      sync_interval_seconds: draft.sync_interval_seconds,
+      enabled: draft.enabled
+    };
+    if (draft.token.trim()) {
+      payload.token = draft.token.trim();
+    }
+    await act(
+      () =>
+        apiFetch(`/api/external-ips/sources/${sourceId}`, token, {
+          method: "PATCH",
+          body: JSON.stringify(payload)
+        }),
+      "外部 IP 来源已更新",
+      () => setEditingSourceId(null)
+    );
+  }
+
+  return (
+    <section className="stack">
+      <div className="panelTitle groupsIntro">
+        <h2>外部健康 IP</h2>
+        <p>从 Nyanpass 服务器状态页同步在线节点 IP，添加备用时可直接选择。</p>
+      </div>
+      <div className="externalIpPanel">
+        <form className="panel externalSourceForm" onSubmit={createExternalIpSource}>
+          <div className="panelTitle">
+            <h2>添加来源</h2>
+            <p>面板地址填 Nyanpass 根域名，Token 使用状态页 WebSocket 的 token。</p>
+          </div>
+          <div className="externalSourceGrid">
+            <label>
+              来源名称
+              <input placeholder="例如 Nyanpass" value={externalDraft.name} onChange={(event) => setExternalDraft((current) => ({ ...current, name: event.target.value }))} required />
+            </label>
+            <label>
+              面板地址
+              <input placeholder="https://ny.example.com" value={externalDraft.base_url} onChange={(event) => setExternalDraft((current) => ({ ...current, base_url: event.target.value }))} required />
+            </label>
+            <label>
+              Authorization / Token
+              <input type="password" value={externalDraft.token} onChange={(event) => setExternalDraft((current) => ({ ...current, token: event.target.value }))} required />
+            </label>
+            <label>
+              默认端口
+              <input type="number" min={1} max={65535} value={externalDraft.default_port} onChange={(event) => setExternalDraft((current) => ({ ...current, default_port: Number(event.target.value) }))} />
+            </label>
+            <label>
+              同步周期（秒）
+              <input type="number" min={60} max={86400} value={externalDraft.sync_interval_seconds} onChange={(event) => setExternalDraft((current) => ({ ...current, sync_interval_seconds: Number(event.target.value) }))} />
+            </label>
+          </div>
+          <button>
+            <Plus size={16} />
+            <span>添加来源</span>
+          </button>
+        </form>
+        <div className="panel externalIpListPanel">
+          <div className="panelTitle">
+            <h2>来源与健康列表</h2>
+            <p>只显示在线且公网可用的 IPv4 / IPv6。来源同步后会自动刷新。</p>
+          </div>
+          <div className="externalSourceList">
+            {externalIpSources.map((source) => {
+              const edit = sourceEdits[source.id] || {
+                name: source.name,
+                base_url: source.base_url,
+                token: "",
+                default_port: source.default_port,
+                sync_interval_seconds: source.sync_interval_seconds,
+                enabled: source.enabled
+              };
+              return (
+                <div className="externalSourceItem" key={source.id}>
+                  {editingSourceId === source.id ? (
+                    <>
+                      <div className="externalSourceEditGrid">
+                        <label>
+                          来源名称
+                          <input value={edit.name} onChange={(event) => setSourceEdits((current) => ({ ...current, [source.id]: { ...edit, name: event.target.value } }))} />
+                        </label>
+                        <label>
+                          面板地址
+                          <input value={edit.base_url} onChange={(event) => setSourceEdits((current) => ({ ...current, [source.id]: { ...edit, base_url: event.target.value } }))} />
+                        </label>
+                        <label>
+                          新 Token
+                          <input type="password" placeholder="留空不修改" value={edit.token} onChange={(event) => setSourceEdits((current) => ({ ...current, [source.id]: { ...edit, token: event.target.value } }))} />
+                        </label>
+                        <label>
+                          默认端口
+                          <input type="number" min={1} max={65535} value={edit.default_port} onChange={(event) => setSourceEdits((current) => ({ ...current, [source.id]: { ...edit, default_port: Number(event.target.value) } }))} />
+                        </label>
+                        <label>
+                          拉取周期（秒）
+                          <input type="number" min={60} max={86400} value={edit.sync_interval_seconds} onChange={(event) => setSourceEdits((current) => ({ ...current, [source.id]: { ...edit, sync_interval_seconds: Number(event.target.value) } }))} />
+                        </label>
+                        <label className="inlineCheck">
+                          <input type="checkbox" checked={edit.enabled} onChange={(event) => setSourceEdits((current) => ({ ...current, [source.id]: { ...edit, enabled: event.target.checked } }))} />
+                          启用
+                        </label>
+                      </div>
+                      <div className="rowActions">
+                        <button className="icon" title="保存来源" onClick={() => saveExternalIpSource(source.id)}>
+                          <Save size={15} />
+                        </button>
+                        <button className="icon secondaryIcon" title="取消" onClick={() => setEditingSourceId(null)}>
+                          ×
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="poolItemMain">
+                        <strong>{source.name}</strong>
+                        <span>{source.base_url} · 周期 {source.sync_interval_seconds}s · 默认端口 {source.default_port} · {fmtDate(source.last_synced_at)}</span>
+                        {source.last_error && <small className="danger">{source.last_error}</small>}
+                      </div>
+                      <div className="rowActions">
+                        <Status value={source.enabled ? source.status : "disabled"} />
+                        <button className="icon secondaryIcon" title="立即同步" onClick={() => act(() => apiFetch(`/api/external-ips/sources/${source.id}/sync`, token, { method: "POST" }), "外部健康 IP 已同步")}>
+                          <RefreshCw size={15} />
+                        </button>
+                        <button className="icon secondaryIcon" title="修改来源" onClick={() => beginEditExternalIpSource(source)}>
+                          <Pencil size={15} />
+                        </button>
+                        <button className="icon dangerBtn" title="删除来源" onClick={() => act(() => apiFetch(`/api/external-ips/sources/${source.id}`, token, { method: "DELETE" }), "外部 IP 来源已删除")}>
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+            {externalIpSources.length === 0 && <div className="emptyCell">还没有外部 IP 来源</div>}
+          </div>
+          <div className="externalMachineList">
+            {externalMachines.map((machine) => (
+              <div className="externalMachineCard" key={machine.key}>
+                <div className="externalMachineHead">
+                  <strong>{machine.name}</strong>
+                  <span>{machine.country || machine.groupName || "未知国家"} · {fmtDate(machine.lastSeenAt)}</span>
+                </div>
+                <div className="externalMachineIps">
+                  {machine.items.map((item) => (
+                    <span className="externalIpChip" key={item.id} title={`${item.name} · ${fmtDate(item.last_seen_at)}`}>
+                      {externalIpFamilyText(item)} {item.target}:{item.port}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+            {externalMachines.length === 0 && <span className="emptyInline">暂无外部健康 IP</span>}
+          </div>
+        </div>
+      </div>
     </section>
   );
 }
