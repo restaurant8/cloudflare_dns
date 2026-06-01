@@ -151,6 +151,10 @@ function externalIpLabel(item: ExternalIpItem): string {
   return `${item.name}${country} · ${externalIpFamilyText(item)} ${item.target}:${item.port}`;
 }
 
+function externalIpPoolRemark(item: ExternalIpItem): string {
+  return [item.name, item.country].filter(Boolean).join(" · ");
+}
+
 function currentProbeStates(origin: Origin) {
   if (origin.publish_mode !== "expanded") return origin.probe_states;
   const currentIps = new Set(origin.resolved_ips);
@@ -1710,6 +1714,38 @@ function ExternalIpsPanel({
     );
   }
 
+  function externalItemToPoolPayload(item: ExternalIpItem) {
+    return {
+      target: item.target,
+      port: item.port,
+      remark: externalIpPoolRemark(item) || null,
+      check_interval_seconds: 600,
+      enabled: true
+    };
+  }
+
+  async function addExternalIpToPool(item: ExternalIpItem) {
+    await act(
+      () =>
+        apiFetch("/api/target-pool/bulk", token, {
+          method: "POST",
+          body: JSON.stringify({ items: [externalItemToPoolPayload(item)] })
+        }),
+      "已添加到 IP 池子"
+    );
+  }
+
+  async function addMachineToPool(items: ExternalIpItem[]) {
+    await act(
+      () =>
+        apiFetch("/api/target-pool/bulk", token, {
+          method: "POST",
+          body: JSON.stringify({ items: items.map(externalItemToPoolPayload) })
+        }),
+      "整台机器的 IP 已添加到池子"
+    );
+  }
+
   return (
     <section className="stack">
       <div className="panelTitle groupsIntro">
@@ -1833,14 +1869,26 @@ function ExternalIpsPanel({
             {externalMachines.map((machine) => (
               <div className="externalMachineCard" key={machine.key}>
                 <div className="externalMachineHead">
-                  <strong>{machine.name}</strong>
-                  <span>{machine.country || machine.groupName || "未知国家"} · {fmtDate(machine.lastSeenAt)}</span>
+                  <div>
+                    <strong>{machine.name}</strong>
+                    <span>{machine.country || machine.groupName || "未知国家"} · {fmtDate(machine.lastSeenAt)}</span>
+                  </div>
+                  <button className="secondary compactBtn" title="把这台机器的全部 IPv4/IPv6 加入 IP 池子" onClick={() => addMachineToPool(machine.items)}>
+                    <Plus size={14} />
+                    <span>整机加入池子</span>
+                  </button>
                 </div>
                 <div className="externalMachineIps">
                   {machine.items.map((item) => (
-                    <span className="externalIpChip" key={item.id} title={`${item.name} · ${fmtDate(item.last_seen_at)}`}>
-                      {externalIpFamilyText(item)} {item.target}:{item.port}
-                    </span>
+                    <div className="externalIpAddItem" key={item.id}>
+                      <span className="externalIpChip" title={`${item.name} · ${fmtDate(item.last_seen_at)}`}>
+                        {externalIpFamilyText(item)} {item.target}:{item.port}
+                      </span>
+                      <button className="externalIpAddBtn" title="加入 IP 池子" onClick={() => addExternalIpToPool(item)}>
+                        <Plus size={12} />
+                        <span>加入池子</span>
+                      </button>
+                    </div>
                   ))}
                 </div>
               </div>

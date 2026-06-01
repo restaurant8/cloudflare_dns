@@ -617,7 +617,7 @@ form.panel {
 }
 
 .externalMachineHead {
-  align-items: baseline;
+  align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -625,18 +625,27 @@ form.panel {
 }
 
 .externalMachineHead strong {
+  display: block;
   overflow-wrap: anywhere;
 }
 
 .externalMachineHead span {
   color: #667789;
+  display: block;
   font-size: 12px;
+  margin-top: 2px;
 }
 
 .externalMachineIps {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.externalIpAddItem {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
 }
 
 .externalIpChip {
@@ -646,6 +655,14 @@ form.panel {
   font-size: 12px;
   font-weight: 800;
   padding: 4px 8px;
+}
+
+.externalIpAddBtn {
+  background: #e8eef3;
+  color: #26374a;
+  font-size: 12px;
+  min-height: 26px;
+  padding: 0 8px;
 }
 
 .emptyInline {
