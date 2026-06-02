@@ -4,10 +4,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import CloudflareCredential, FailoverGroup, Origin, User, Zone
+from app.models import Agent, CloudflareCredential, FailoverGroup, Origin, ProbeState, User, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, resolved_ips
 from app.routes.groups import create_group, update_origin
-from app.schemas import FailoverGroupCreate, OriginUpdate
+from app.schemas import FailoverGroupCreate, OriginOut, OriginUpdate
 from app.security import encrypt_secret
 
 
@@ -199,3 +199,29 @@ def test_update_current_origin_to_expanded_saves_when_no_healthy_ip_yet(monkeypa
     assert updated.publish_mode == EXPANDED_PUBLISH_MODE
     assert resolved_ips(updated) == ["192.0.2.10"]
     assert "暂不发布" in group.last_error
+
+
+def test_origin_output_hides_disabled_agent_probe_state():
+    db = make_session()
+    zone, _ = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com")
+    db.add(group)
+    db.flush()
+    origin = Origin(group_id=group.id, target="192.0.2.10", target_type="ipv4", port=22, status="healthy")
+    enabled_agent = Agent(name="上海", region="china", token_hash="hash-1", enabled=True, status="online")
+    disabled_agent = Agent(name="杭州", region="china", token_hash="hash-2", enabled=False, status="offline")
+    db.add_all([origin, enabled_agent, disabled_agent])
+    db.flush()
+    db.add_all(
+        [
+            ProbeState(origin_id=origin.id, source_key="local", status="healthy"),
+            ProbeState(origin_id=origin.id, agent_id=enabled_agent.id, source_key=f"agent:{enabled_agent.id}", status="healthy"),
+            ProbeState(origin_id=origin.id, agent_id=disabled_agent.id, source_key=f"agent:{disabled_agent.id}", status="healthy"),
+        ]
+    )
+    db.commit()
+
+    output = OriginOut.model_validate(origin)
+
+    assert {state.agent_name for state in output.probe_states} == {None, "上海"}
+    assert "杭州" not in {state.agent_name for state in output.probe_states}

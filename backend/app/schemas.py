@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 
 class TokenResponse(BaseModel):
@@ -113,6 +113,7 @@ class ProbeStateOut(BaseModel):
     id: int
     source_key: str
     agent_name: str | None = None
+    agent_enabled: bool = True
     status: str
     success_count: int
     fail_count: int
@@ -121,6 +122,10 @@ class ProbeStateOut(BaseModel):
     last_rtt_ms: float | None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+def _enabled_probe_states(probe_states: list[ProbeStateOut]) -> list[ProbeStateOut]:
+    return [state for state in probe_states if state.agent_enabled]
 
 
 class OriginOut(BaseModel):
@@ -143,6 +148,11 @@ class OriginOut(BaseModel):
     probe_states: list[ProbeStateOut] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def hide_disabled_agent_probe_states(self):
+        self.probe_states = _enabled_probe_states(self.probe_states)
+        return self
 
 
 class TargetPoolCreate(BaseModel):
@@ -197,6 +207,11 @@ class TargetPoolOut(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def hide_disabled_agent_probe_states(self):
+        self.probe_states = _enabled_probe_states(self.probe_states)
+        return self
 
 
 class ExternalIpSourceCreate(BaseModel):

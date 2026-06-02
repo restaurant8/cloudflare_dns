@@ -6,9 +6,9 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.health import LOCAL_SOURCE, run_target_pool_checks
-from app.models import CloudflareCredential, FailoverGroup, Origin, ProbeState, TargetPoolItem, User, Zone
+from app.models import Agent, CloudflareCredential, FailoverGroup, Origin, ProbeState, TargetPoolItem, TargetPoolProbeState, User, Zone
 from app.routes.target_pool import bulk_create_target_pool_items, create_target_pool_item
-from app.schemas import TargetPoolBulkCreate, TargetPoolCreate
+from app.schemas import TargetPoolBulkCreate, TargetPoolCreate, TargetPoolOut
 from app.security import encrypt_secret
 
 
@@ -99,6 +99,28 @@ def test_target_pool_reuses_fresh_matching_origin_status():
     assert pool_item.last_checked_at == checked_at
     assert pool_item.probe_states[0].source_key == LOCAL_SOURCE
     assert pool_item.probe_states[0].last_rtt_ms == 9.1
+
+
+def test_target_pool_output_hides_disabled_agent_probe_state():
+    db = make_session()
+    pool_item = TargetPoolItem(target="192.0.2.10", target_type="ipv4", port=22)
+    enabled_agent = Agent(name="上海", region="china", token_hash="hash-1", enabled=True, status="online")
+    disabled_agent = Agent(name="杭州", region="china", token_hash="hash-2", enabled=False, status="offline")
+    db.add_all([pool_item, enabled_agent, disabled_agent])
+    db.flush()
+    db.add_all(
+        [
+            TargetPoolProbeState(item_id=pool_item.id, source_key=LOCAL_SOURCE, status="healthy"),
+            TargetPoolProbeState(item_id=pool_item.id, agent_id=enabled_agent.id, source_key=f"agent:{enabled_agent.id}", status="healthy"),
+            TargetPoolProbeState(item_id=pool_item.id, agent_id=disabled_agent.id, source_key=f"agent:{disabled_agent.id}", status="healthy"),
+        ]
+    )
+    db.commit()
+
+    output = TargetPoolOut.model_validate(pool_item)
+
+    assert {state.agent_name for state in output.probe_states} == {None, "上海"}
+    assert "杭州" not in {state.agent_name for state in output.probe_states}
 
 
 def test_bulk_create_target_pool_items_skips_duplicates_and_reports_invalid():

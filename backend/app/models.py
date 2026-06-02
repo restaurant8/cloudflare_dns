@@ -170,6 +170,10 @@ class TargetPoolProbeState(Base, TimestampMixin):
     def agent_name(self) -> str | None:
         return self.agent.name if self.agent else None
 
+    @property
+    def agent_enabled(self) -> bool:
+        return True if self.agent is None else self.agent.enabled
+
 
 class ExternalIpSource(Base, TimestampMixin):
     __tablename__ = "external_ip_sources"
@@ -244,6 +248,10 @@ class ProbeState(Base, TimestampMixin):
     @property
     def agent_name(self) -> str | None:
         return self.agent.name if self.agent else None
+
+    @property
+    def agent_enabled(self) -> bool:
+        return True if self.agent is None else self.agent.enabled
 
 
 class ProbeResult(Base, TimestampMixin):

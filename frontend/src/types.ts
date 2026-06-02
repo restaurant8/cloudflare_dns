@@ -34,6 +34,7 @@ export type ProbeState = {
   id: number;
   source_key: string;
   agent_name: string | null;
+  agent_enabled: boolean;
   status: string;
   success_count: number;
   fail_count: number;

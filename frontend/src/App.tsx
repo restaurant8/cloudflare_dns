@@ -155,10 +155,15 @@ function externalIpPoolRemark(item: ExternalIpItem): string {
   return [item.name, item.country].filter(Boolean).join(" · ");
 }
 
+function activeProbeStates(probeStates: ProbeState[]) {
+  return probeStates.filter((probe) => probe.agent_enabled !== false);
+}
+
 function currentProbeStates(origin: Origin) {
-  if (origin.publish_mode !== "expanded") return origin.probe_states;
+  const activeStates = activeProbeStates(origin.probe_states);
+  if (origin.publish_mode !== "expanded") return activeStates;
   const currentIps = new Set(origin.resolved_ips);
-  return origin.probe_states.filter((probe) => {
+  return activeStates.filter((probe) => {
     const ip = probeSourceIp(probe.source_key);
     return !ip || currentIps.has(ip);
   });
@@ -1102,9 +1107,9 @@ function TargetPoolPanel({ token, targetPool, act }: { token: string; targetPool
                         <strong title={`${item.target}:${item.port}`}>{displayTargetWithRemark(item.target, item.port, item.remark)}</strong>
                         <span>{targetTypeText(item.target_type)} · 发布为 {recordTypeForTargetType(item.target_type)} · 检测周期 {item.check_interval_seconds}s · 最后检测 {fmtDate(item.last_checked_at)}</span>
                         {item.last_error && <small className="danger">{item.last_error}</small>}
-                        {item.probe_states.length > 0 && (
+                        {activeProbeStates(item.probe_states).length > 0 && (
                           <div className="probeChips">
-                            {item.probe_states.map((probe) => (
+                            {activeProbeStates(item.probe_states).map((probe) => (
                               <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || `最后检测 ${fmtDate(probe.last_checked_at)}`}>
                                 {probeSourceText(probe)}：{statusText(probe.status)} · {fmtTime(probe.last_checked_at)}
                               </span>
@@ -1410,8 +1415,9 @@ function GroupsPanel({
                       const editType = inferDraftTargetType(originEdit.target);
                       const isCurrentOrigin = group.current_origin_id === origin.id;
                       const isPrimaryOrigin = origin.priority === primaryPriority;
+                      const activeOriginProbeStates = activeProbeStates(origin.probe_states);
                       const visibleProbeStates = currentProbeStates(origin);
-                      const hiddenProbeCount = origin.probe_states.length - visibleProbeStates.length;
+                      const hiddenProbeCount = activeOriginProbeStates.length - visibleProbeStates.length;
                       return (
                         <div
                           className={`origin ${editingOriginId === origin.id ? "originEditing" : ""} ${isCurrentOrigin ? "originCurrent" : ""} ${isPrimaryOrigin ? "originPrimary" : "originBackup"}`}
