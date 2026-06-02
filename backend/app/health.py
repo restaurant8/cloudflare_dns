@@ -138,7 +138,7 @@ def _probe_health_for_state(
     if state is None or state.last_checked_at is None:
         return "unknown", None
     if state.last_checked_at < stale_before:
-        return "unhealthy", f"{source_key} 探测结果过期"
+        return "unknown", f"{source_key} 探测结果过期，等待新结果"
     if state.status in {"healthy", "unhealthy"}:
         return state.status, state.last_error
     return "unknown", None
@@ -289,21 +289,9 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
     source_health: dict[str, str] = {}
     source_errors: dict[str, str | None] = {}
     for source_key in required_sources:
-        state = states.get(source_key)
-        if state is None or state.last_checked_at is None:
-            source_health[source_key] = "unknown"
-            source_errors[source_key] = None
-            continue
-        if state.last_checked_at < stale_before:
-            source_health[source_key] = "unhealthy"
-            source_errors[source_key] = f"{source_key} 探测结果过期"
-            continue
-        if state.status in {"healthy", "unhealthy"}:
-            source_health[source_key] = state.status
-            source_errors[source_key] = state.last_error
-            continue
-        source_health[source_key] = "unknown"
-        source_errors[source_key] = None
+        status, error = _probe_health_for_state(states, source_key, stale_before)
+        source_health[source_key] = status
+        source_errors[source_key] = error
 
     foreign_status = _aggregate_source_health(source_health, foreign_source_keys)
     china_status = _aggregate_source_health(source_health, china_source_keys)

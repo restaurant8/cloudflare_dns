@@ -72,6 +72,27 @@ def test_origin_blocked_when_local_healthy_but_china_agent_fails():
     assert "疑似被墙" in origin.last_error
 
 
+def test_stale_china_probe_waits_instead_of_marking_blocked():
+    db = make_session()
+    origin, agent = make_origin_with_agent(db)
+    set_probe(db, origin, LOCAL_SOURCE, "healthy")
+    db.add(
+        ProbeState(
+            origin_id=origin.id,
+            source_key=f"agent:{agent.id}",
+            status="unhealthy",
+            last_checked_at=datetime.utcnow() - timedelta(minutes=5),
+            last_error="connect failed",
+        )
+    )
+    db.commit()
+
+    recalculate_origin_status(db, origin)
+
+    assert origin.status == "unknown"
+    assert "等待国内探针" in origin.last_error
+
+
 def test_offline_agent_does_not_mark_origin_unhealthy():
     db = make_session()
     origin, agent = make_origin_with_agent(db)
