@@ -66,6 +66,21 @@ def _migrate_existing_schema() -> None:
                     connection.execute(text("ALTER TABLE failover_groups MODIFY current_record_id TEXT NULL"))
                 elif dialect == "postgresql" and "text" not in column_type:
                     connection.execute(text("ALTER TABLE failover_groups ALTER COLUMN current_record_id TYPE TEXT"))
+            if "failover_hostnames" in table_names:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO failover_hostnames (group_id, hostname, current_record_id, created_at, updated_at)
+                        SELECT g.id, g.hostname, g.current_record_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        FROM failover_groups g
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                            FROM failover_hostnames h
+                            WHERE h.group_id = g.id AND h.hostname = g.hostname
+                        )
+                        """
+                    )
+                )
 
         if "telegram_notifications" in table_names:
             existing = {column["name"] for column in inspector.get_columns("telegram_notifications")}

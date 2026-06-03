@@ -744,6 +744,41 @@ form.panel {
   margin-top: 5px;
 }
 
+.hostnameChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.hostnameChip {
+  align-items: center;
+  background: #eef4f8;
+  border: 1px solid #cbd8e3;
+  border-radius: 999px;
+  color: #334155;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 800;
+  gap: 6px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 4px 8px;
+}
+
+.hostnameChip.primary {
+  background: #dcfce7;
+  border-color: #86efac;
+  color: #166534;
+}
+
+.hostnameChip button {
+  background: transparent;
+  color: inherit;
+  min-height: 18px;
+  padding: 0 2px;
+}
+
 .rowActions {
   flex-shrink: 0;
   gap: 8px;

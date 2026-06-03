@@ -6,8 +6,8 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import Agent, CloudflareCredential, FailoverGroup, Origin, ProbeState, User, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, resolved_ips
-from app.routes.groups import create_group, update_origin
-from app.schemas import FailoverGroupCreate, OriginOut, OriginUpdate
+from app.routes.groups import add_group_hostname, create_group, delete_group_hostname, update_origin
+from app.schemas import FailoverGroupCreate, FailoverHostnameCreate, OriginOut, OriginUpdate
 from app.security import encrypt_secret
 
 
@@ -120,6 +120,74 @@ def test_create_group_adopts_record_by_id_when_name_filter_misses(monkeypatch):
 
     assert group.current_record_id == "record-1"
     assert group.origins[0].target == "192.0.2.10"
+
+
+def test_add_group_hostname_publishes_current_origin(monkeypatch):
+    class MultiHostnameClient(FakeCloudflareClient):
+        records = [
+            {
+                "id": "record-1",
+                "name": "www.example.com",
+                "type": "A",
+                "content": "192.0.2.10",
+                "ttl": 60,
+                "proxied": False,
+            },
+            {
+                "id": "record-2",
+                "name": "api.example.com",
+                "type": "A",
+                "content": "192.0.2.99",
+                "ttl": 60,
+                "proxied": False,
+            },
+        ]
+
+    monkeypatch.setattr("app.routes.groups.CloudflareClient", MultiHostnameClient)
+    monkeypatch.setattr("app.failover.CloudflareClient", MultiHostnameClient)
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = create_group(
+        FailoverGroupCreate(
+            zone_id=zone.id,
+            hostname="www.example.com",
+            adopt_record_id="record-1",
+            primary_port=22,
+        ),
+        user,
+        db,
+    )
+
+    updated = add_group_hostname(group.id, FailoverHostnameCreate(hostname="api.example.com", adopt_record_id="record-2"), user, db)
+
+    assert {item.hostname for item in updated.hostnames} == {"www.example.com", "api.example.com"}
+    assert {(item["name"], item["content"]) for item in MultiHostnameClient.records} == {
+        ("www.example.com", "192.0.2.10"),
+        ("api.example.com", "192.0.2.10"),
+    }
+
+
+def test_delete_group_hostname_keeps_at_least_one_hostname(monkeypatch):
+    monkeypatch.setattr("app.routes.groups.CloudflareClient", FakeCloudflareClient)
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = create_group(
+        FailoverGroupCreate(
+            zone_id=zone.id,
+            hostname="www.example.com",
+            adopt_record_id="record-1",
+            primary_port=22,
+        ),
+        user,
+        db,
+    )
+
+    try:
+        delete_group_hostname(group.hostnames[0].id, user, db)
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    else:
+        raise AssertionError("Expected last hostname deletion to fail")
 
 
 def test_update_current_origin_publishes_new_dns_target(monkeypatch):

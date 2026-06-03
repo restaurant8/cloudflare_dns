@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.dns_utils import parse_target
 from app.failover import choose_desired_origin, evaluate_failover_groups, publish_origin, validate_group_hostname_records
-from app.models import CloudflareCredential, FailoverGroup, Origin, Zone
+from app.models import CloudflareCredential, FailoverGroup, FailoverHostname, Origin, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, set_healthy_ips
 from app.security import encrypt_secret
 
@@ -99,6 +99,27 @@ def test_publish_origin_updates_record_type_for_ipv6(monkeypatch):
 
     assert record["type"] == "AAAA"
     assert record["content"] == "2001:db8::5"
+
+
+def test_publish_origin_updates_all_group_hostnames(monkeypatch):
+    FakeCloudflareClient.records = [
+        {"id": "record-1", "name": "www.example.com", "type": "A", "content": "192.0.2.1", "ttl": 60, "proxied": False},
+        {"id": "record-2", "name": "api.example.com", "type": "A", "content": "192.0.2.2", "ttl": 60, "proxied": False},
+    ]
+    monkeypatch.setattr("app.failover.CloudflareClient", FakeCloudflareClient)
+    db = make_session()
+    group, origin_model = setup_group(db, "192.0.2.20")
+    db.add(FailoverHostname(group_id=group.id, hostname="www.example.com", current_record_id="record-1"))
+    db.add(FailoverHostname(group_id=group.id, hostname="api.example.com", current_record_id="record-2"))
+    db.commit()
+
+    record = publish_origin(db, group, origin_model)
+
+    assert record["id"] == "record-1,record-2"
+    assert {(item["name"], item["content"]) for item in FakeCloudflareClient.records} == {
+        ("www.example.com", "192.0.2.20"),
+        ("api.example.com", "192.0.2.20"),
+    }
 
 
 def test_publish_origin_creates_cname_for_hostname(monkeypatch):

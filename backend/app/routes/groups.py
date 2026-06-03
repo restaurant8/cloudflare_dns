@@ -6,12 +6,12 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import normalize_hostname, parse_target
 from ..events import add_event
-from ..failover import evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records
+from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records
 from ..health import run_local_checks
-from ..models import FailoverGroup, Origin, ProbeState, User, Zone
+from ..models import FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
 from ..origin_expansion import DIRECT_PUBLISH_MODE, EXPANDED_PUBLISH_MODE, set_healthy_ips, set_published_ips, set_resolved_ips
-from ..schemas import FailoverGroupCreate, FailoverGroupOut, FailoverGroupUpdate, Message, OriginBulkCreate, OriginCreate, OriginOut, OriginUpdate
+from ..schemas import FailoverGroupCreate, FailoverGroupOut, FailoverGroupUpdate, FailoverHostnameCreate, Message, OriginBulkCreate, OriginCreate, OriginOut, OriginUpdate
 from ..security import decrypt_secret
 from ..sync import MANAGED_RECORD_TYPES
 
@@ -27,12 +27,21 @@ def _normalize_remark(value: str | None) -> str | None:
 
 
 def _group_query(db: Session):
-    return db.query(FailoverGroup).options(selectinload(FailoverGroup.origins).selectinload(Origin.probe_states).selectinload(ProbeState.agent))
+    return db.query(FailoverGroup).options(
+        selectinload(FailoverGroup.hostnames),
+        selectinload(FailoverGroup.origins).selectinload(Origin.probe_states).selectinload(ProbeState.agent),
+    )
+
+
+def _group_hostname_values(group: FailoverGroup) -> set[str]:
+    values = {group.hostname}
+    values.update(hostname.hostname for hostname in group.hostnames)
+    return values
 
 
 def _origin_from_payload(group: FailoverGroup, payload: OriginCreate) -> Origin:
     target_info = parse_target(payload.target)
-    if target_info.record_type == "CNAME" and target_info.value == group.hostname:
+    if target_info.record_type == "CNAME" and target_info.value in _group_hostname_values(group):
         raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
     if payload.publish_mode == EXPANDED_PUBLISH_MODE and target_info.target_type != "hostname":
         raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
@@ -52,7 +61,7 @@ def _origin_from_dns_record(group: FailoverGroup, record: dict, port: int) -> Or
     if record.get("type") not in MANAGED_RECORD_TYPES:
         raise HTTPException(status_code=400, detail="只支持接管 A/AAAA/CNAME 记录")
     target_info = parse_target(str(record.get("content") or ""))
-    if target_info.record_type == "CNAME" and target_info.value == group.hostname:
+    if target_info.record_type == "CNAME" and target_info.value in _group_hostname_values(group):
         raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
     return Origin(
         group_id=group.id,
@@ -94,6 +103,8 @@ def create_group(payload: FailoverGroupCreate, _: User = Depends(get_current_use
     )
     db.add(group)
     db.flush()
+    db.add(FailoverHostname(group_id=group.id, hostname=hostname, current_record_id=group.current_record_id))
+    db.flush()
     managed_record_id = group.current_record_id
     if managed_record_id:
         current_record = find_managed_dns_record_by_id(client, zone.cf_zone_id, managed_record_id)
@@ -129,6 +140,82 @@ def update_group(group_id: int, payload: FailoverGroupUpdate, _: User = Depends(
         evaluate_failover_groups(db)
     db.commit()
     return _group_query(db).filter(FailoverGroup.id == group_id).one()
+
+
+@router.post("/{group_id}/hostnames", response_model=FailoverGroupOut)
+def add_group_hostname(group_id: int, payload: FailoverHostnameCreate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    group = db.get(FailoverGroup, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="切换组不存在")
+    ensure_group_hostname_entries(db, group)
+    hostname = normalize_hostname(payload.hostname)
+    duplicate_in_group = (
+        db.query(FailoverHostname)
+        .filter(FailoverHostname.group_id == group.id, FailoverHostname.hostname == hostname)
+        .one_or_none()
+    )
+    if duplicate_in_group:
+        raise HTTPException(status_code=409, detail="该主域名已经在这个切换组中")
+    duplicate_in_zone = (
+        db.query(FailoverHostname)
+        .join(FailoverGroup)
+        .filter(FailoverGroup.zone_id == group.zone_id, FailoverGroup.id != group.id, FailoverHostname.hostname == hostname)
+        .one_or_none()
+    )
+    legacy_group = (
+        db.query(FailoverGroup)
+        .filter(FailoverGroup.zone_id == group.zone_id, FailoverGroup.id != group.id, FailoverGroup.hostname == hostname)
+        .one_or_none()
+    )
+    if duplicate_in_zone or legacy_group:
+        raise HTTPException(status_code=409, detail="该主域名已经被其他切换组接管")
+
+    client = CloudflareClient(decrypt_secret(group.zone.credential.token_encrypted))
+    try:
+        existing_record_id = validate_group_hostname_records(client, group.zone.cf_zone_id, hostname, payload.adopt_record_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    hostname_entry = FailoverHostname(
+        group=group,
+        hostname=hostname,
+        current_record_id=payload.adopt_record_id or existing_record_id,
+    )
+    db.add(hostname_entry)
+    db.flush()
+
+    current_origin = db.get(Origin, group.current_origin_id) if group.current_origin_id else None
+    if group.enabled and current_origin and current_origin.enabled:
+        try:
+            publish_origin(db, group, current_origin)
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(status_code=502, detail=f"DNS 发布失败，主域名未添加：{exc}") from exc
+    add_event(db, "group.hostname_added", "info", f"{group.hostname} 已添加主域名 {hostname}", {"group_id": group.id, "hostname": hostname})
+    db.commit()
+    return _group_query(db).filter(FailoverGroup.id == group_id).one()
+
+
+@router.delete("/hostnames/{hostname_id}", response_model=FailoverGroupOut)
+def delete_group_hostname(hostname_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    hostname_entry = db.get(FailoverHostname, hostname_id)
+    if hostname_entry is None:
+        raise HTTPException(status_code=404, detail="主域名不存在")
+    group = hostname_entry.group
+    ensure_group_hostname_entries(db, group)
+    remaining = [item for item in group.hostnames if item.id != hostname_entry.id]
+    if not remaining:
+        raise HTTPException(status_code=400, detail="至少需要保留一个主域名")
+    removed_hostname = hostname_entry.hostname
+    was_primary = removed_hostname == group.hostname
+    db.delete(hostname_entry)
+    if was_primary:
+        next_primary = sorted(remaining, key=lambda item: item.id)[0]
+        group.hostname = next_primary.hostname
+        group.current_record_id = next_primary.current_record_id
+    add_event(db, "group.hostname_removed", "info", f"{group.hostname} 已取消接管主域名 {removed_hostname}", {"group_id": group.id, "hostname": removed_hostname})
+    db.commit()
+    return _group_query(db).filter(FailoverGroup.id == group.id).one()
 
 
 @router.delete("/{group_id}", response_model=Message)
@@ -186,7 +273,7 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     new_publish_mode = origin.publish_mode
     if "target" in updates and updates["target"] is not None:
         target_info = parse_target(updates.pop("target"))
-        if target_info.record_type == "CNAME" and target_info.value == group.hostname:
+        if target_info.record_type == "CNAME" and target_info.value in _group_hostname_values(group):
             raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
         new_target = target_info.value
         new_target_type = target_info.target_type

@@ -90,6 +90,19 @@ class FailoverGroup(Base, TimestampMixin):
 
     zone: Mapped["Zone"] = relationship("Zone", back_populates="groups")
     origins: Mapped[list["Origin"]] = relationship("Origin", back_populates="group", cascade="all, delete-orphan")
+    hostnames: Mapped[list["FailoverHostname"]] = relationship("FailoverHostname", back_populates="group", cascade="all, delete-orphan")
+
+
+class FailoverHostname(Base, TimestampMixin):
+    __tablename__ = "failover_hostnames"
+    __table_args__ = (UniqueConstraint("group_id", "hostname", name="uq_failover_hostname_group_hostname"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("failover_groups.id", ondelete="CASCADE"), nullable=False)
+    hostname: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    current_record_id: Mapped[str | None] = mapped_column(Text)
+
+    group: Mapped["FailoverGroup"] = relationship("FailoverGroup", back_populates="hostnames")
 
 
 class Origin(Base, TimestampMixin):

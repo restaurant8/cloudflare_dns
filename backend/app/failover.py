@@ -7,7 +7,7 @@ from .config import get_settings
 from .dns_utils import record_type_for_target_type
 from .events import add_event
 from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, run_local_checks
-from .models import DnsRecord, FailoverGroup, Origin
+from .models import DnsRecord, FailoverGroup, FailoverHostname, Origin
 from .notifier import send_webhooks
 from .origin_expansion import (
     DIRECT_PUBLISH_MODE,
@@ -136,14 +136,26 @@ def validate_group_hostname_records(
     return record["id"]
 
 
-def _record_ids(group: FailoverGroup) -> set[str]:
-    if not group.current_record_id:
+def ensure_group_hostname_entries(db: Session, group: FailoverGroup) -> list[FailoverHostname]:
+    if group.hostnames:
+        return sorted(group.hostnames, key=lambda item: (item.hostname != group.hostname, item.id))
+    entry = FailoverHostname(group_id=group.id, hostname=group.hostname, current_record_id=group.current_record_id)
+    db.add(entry)
+    db.flush()
+    group.hostnames.append(entry)
+    return [entry]
+
+
+def _record_ids(hostname_entry: FailoverHostname) -> set[str]:
+    if not hostname_entry.current_record_id:
         return set()
-    return {item.strip() for item in group.current_record_id.split(",") if item.strip()}
+    return {item.strip() for item in hostname_entry.current_record_id.split(",") if item.strip()}
 
 
-def _store_record_ids(group: FailoverGroup, record_ids: list[str]) -> None:
-    group.current_record_id = ",".join(record_ids) if record_ids else None
+def _store_record_ids(group: FailoverGroup, hostname_entry: FailoverHostname, record_ids: list[str]) -> None:
+    hostname_entry.current_record_id = ",".join(record_ids) if record_ids else None
+    if hostname_entry.hostname == group.hostname:
+        group.current_record_id = hostname_entry.current_record_id
 
 
 def _record_is_owned_by_app(record: dict) -> bool:
@@ -155,27 +167,27 @@ def _record_label(record: dict) -> str:
     return f"{record.get('type')} {record.get('content')}（{proxy_state}，ID {record.get('id')}）"
 
 
-def _same_name_records(client: CloudflareClient, group: FailoverGroup) -> list[dict]:
-    return _managed_dns_records(client, group.zone.cf_zone_id, group.hostname)
+def _same_name_records(client: CloudflareClient, group: FailoverGroup, hostname_entry: FailoverHostname) -> list[dict]:
+    return _managed_dns_records(client, group.zone.cf_zone_id, hostname_entry.hostname)
 
 
-def _validate_same_name_records(group: FailoverGroup, records: list[dict]) -> list[dict]:
-    managed_ids = _record_ids(group)
+def _validate_same_name_records(group: FailoverGroup, hostname_entry: FailoverHostname, records: list[dict]) -> list[dict]:
+    managed_ids = _record_ids(hostname_entry)
     if managed_ids:
         managed_records = [record for record in records if record["id"] in managed_ids]
         orphaned_app_records = [record for record in records if record["id"] not in managed_ids and _record_is_owned_by_app(record)]
         conflicts = [record for record in records if record["id"] not in managed_ids and not _record_is_owned_by_app(record)]
         if conflicts:
             details = "；".join(_record_label(record) for record in conflicts)
-            raise ValueError(f"该主机名存在未托管的 A/AAAA/CNAME 冲突记录：{details}")
+            raise ValueError(f"{hostname_entry.hostname} 存在未托管的 A/AAAA/CNAME 冲突记录：{details}")
         if orphaned_app_records:
             managed_records.extend(orphaned_app_records)
-            _store_record_ids(group, [record["id"] for record in managed_records])
+            _store_record_ids(group, hostname_entry, [record["id"] for record in managed_records])
         return managed_records
     if len(records) > 1:
-        raise ValueError("该主机名存在多个 A/AAAA/CNAME 记录，启用故障切换前必须先清理为唯一记录")
+        raise ValueError(f"{hostname_entry.hostname} 存在多个 A/AAAA/CNAME 记录，启用故障切换前必须先清理为唯一记录")
     if records and records[0].get("proxied"):
-        raise ValueError("仅支持 DNS-only 记录，请先关闭 Cloudflare 代理")
+        raise ValueError(f"{hostname_entry.hostname} 仅支持 DNS-only 记录，请先关闭 Cloudflare 代理")
     return records
 
 
@@ -184,50 +196,64 @@ def publish_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
         return publish_expanded_origin(db, group, origin)
 
     record_type = record_type_for_target_type(origin.target_type)
-    if record_type == "CNAME" and origin.target.rstrip(".").lower() == group.hostname.rstrip(".").lower():
-        raise ValueError("CNAME 目标不能和当前主机名相同")
 
     credential = group.zone.credential
     token = decrypt_secret(credential.token_encrypted)
     client = CloudflareClient(token)
-    managed_records = _validate_same_name_records(group, _same_name_records(client, group))
-    target_record_id = managed_records[0]["id"] if managed_records else None
-    for extra_record in managed_records[1:]:
-        client.delete_dns_record(group.zone.cf_zone_id, extra_record["id"])
+    hostname_entries = ensure_group_hostname_entries(db, group)
+    managed_by_hostname = []
+    for hostname_entry in hostname_entries:
+        if record_type == "CNAME" and origin.target.rstrip(".").lower() == hostname_entry.hostname.rstrip(".").lower():
+            raise ValueError(f"CNAME 目标不能和当前主机名相同：{hostname_entry.hostname}")
+        managed_by_hostname.append(
+            (hostname_entry, _validate_same_name_records(group, hostname_entry, _same_name_records(client, group, hostname_entry)))
+        )
 
-    body = {
-        "type": record_type,
-        "name": group.hostname,
-        "content": origin.target,
-        "ttl": group.ttl,
-        "proxied": False,
-        "comment": MANAGED_RECORD_COMMENT_PREFIX,
-    }
+    published_records = []
+    for hostname_entry, managed_records in managed_by_hostname:
+        target_record_id = managed_records[0]["id"] if managed_records else None
+        for extra_record in managed_records[1:]:
+            client.delete_dns_record(group.zone.cf_zone_id, extra_record["id"])
 
-    if target_record_id:
-        try:
-            record = client.update_dns_record(group.zone.cf_zone_id, target_record_id, body)
-        except CloudflareError:
-            client.delete_dns_record(group.zone.cf_zone_id, target_record_id)
+        body = {
+            "type": record_type,
+            "name": hostname_entry.hostname,
+            "content": origin.target,
+            "ttl": group.ttl,
+            "proxied": False,
+            "comment": MANAGED_RECORD_COMMENT_PREFIX,
+        }
+
+        if target_record_id:
+            try:
+                record = client.update_dns_record(group.zone.cf_zone_id, target_record_id, body)
+            except CloudflareError:
+                client.delete_dns_record(group.zone.cf_zone_id, target_record_id)
+                record = client.create_dns_record(group.zone.cf_zone_id, body)
+        else:
             record = client.create_dns_record(group.zone.cf_zone_id, body)
-    else:
-        record = client.create_dns_record(group.zone.cf_zone_id, body)
 
-    _store_record_ids(group, [record["id"]])
+        _store_record_ids(group, hostname_entry, [record["id"]])
+        published_records.append(record)
+        local_record = (
+            db.query(DnsRecord)
+            .filter(DnsRecord.zone_id == group.zone_id, DnsRecord.cf_record_id == record["id"])
+            .one_or_none()
+        )
+        if local_record:
+            local_record.type = record_type
+            local_record.content = origin.target
+            local_record.ttl = group.ttl
+            local_record.proxied = False
     origin.publish_mode = DIRECT_PUBLISH_MODE
     set_published_ips(origin, [])
     sync_zone_records(db, credential, group.zone, client=client)
-    local_record = (
-        db.query(DnsRecord)
-        .filter(DnsRecord.zone_id == group.zone_id, DnsRecord.cf_record_id == record["id"])
-        .one_or_none()
-    )
-    if local_record:
-        local_record.type = record_type
-        local_record.content = origin.target
-        local_record.ttl = group.ttl
-        local_record.proxied = False
-    return record
+    return {
+        "id": ",".join(record["id"] for record in published_records),
+        "type": record_type,
+        "content": origin.target,
+        "hostnames": [record.get("name") for record in published_records],
+    }
 
 
 def publish_expanded_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
@@ -240,33 +266,41 @@ def publish_expanded_origin(db: Session, group: FailoverGroup, origin: Origin) -
     credential = group.zone.credential
     token = decrypt_secret(credential.token_encrypted)
     client = CloudflareClient(token)
-    managed_records = _validate_same_name_records(group, _same_name_records(client, group))
-    for record in managed_records:
-        client.delete_dns_record(group.zone.cf_zone_id, record["id"])
+    hostname_entries = ensure_group_hostname_entries(db, group)
+    managed_by_hostname = [
+        (hostname_entry, _validate_same_name_records(group, hostname_entry, _same_name_records(client, group, hostname_entry)))
+        for hostname_entry in hostname_entries
+    ]
 
     created_records = []
-    for ip in ips:
-        created_records.append(
-            client.create_dns_record(
-                group.zone.cf_zone_id,
-                {
-                    "type": record_type_for_ip(ip),
-                    "name": group.hostname,
-                    "content": ip,
-                    "ttl": group.ttl,
-                    "proxied": False,
-                    "comment": f"{MANAGED_RECORD_COMMENT_PREFIX} expanded from {origin.target}",
-                },
+    for hostname_entry, managed_records in managed_by_hostname:
+        for record in managed_records:
+            client.delete_dns_record(group.zone.cf_zone_id, record["id"])
+        hostname_records = []
+        for ip in ips:
+            hostname_records.append(
+                client.create_dns_record(
+                    group.zone.cf_zone_id,
+                    {
+                        "type": record_type_for_ip(ip),
+                        "name": hostname_entry.hostname,
+                        "content": ip,
+                        "ttl": group.ttl,
+                        "proxied": False,
+                        "comment": f"{MANAGED_RECORD_COMMENT_PREFIX} expanded from {origin.target}",
+                    },
+                )
             )
-        )
+        created_records.extend(hostname_records)
+        _store_record_ids(group, hostname_entry, [record["id"] for record in hostname_records])
 
-    _store_record_ids(group, [record["id"] for record in created_records])
     set_published_ips(origin, ips)
     sync_zone_records(db, credential, group.zone, client=client)
     return {
-        "id": group.current_record_id or "",
+        "id": ",".join(record["id"] for record in created_records),
         "type": "A/AAAA",
         "content": ", ".join(ips),
+        "hostnames": sorted({str(record.get("name")) for record in created_records}),
     }
 
 
@@ -275,6 +309,7 @@ def evaluate_failover_groups(db: Session) -> int:
         db.query(FailoverGroup)
         .options(
             selectinload(FailoverGroup.origins),
+            selectinload(FailoverGroup.hostnames),
             selectinload(FailoverGroup.zone),
         )
         .filter(FailoverGroup.enabled.is_(True))

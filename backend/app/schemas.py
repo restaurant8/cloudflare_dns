@@ -87,6 +87,21 @@ class FailoverGroupUpdate(BaseModel):
     min_switch_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
 
 
+class FailoverHostnameCreate(BaseModel):
+    hostname: str = Field(min_length=1, max_length=255)
+    adopt_record_id: str | None = None
+
+
+class FailoverHostnameOut(BaseModel):
+    id: int
+    group_id: int
+    hostname: str
+    current_record_id: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class OriginCreate(BaseModel):
     target: str = Field(min_length=1, max_length=255)
     port: int = Field(ge=1, le=65535)
@@ -277,6 +292,7 @@ class FailoverGroupOut(BaseModel):
     current_record_id: str | None
     last_switch_at: datetime | None
     last_error: str | None
+    hostnames: list[FailoverHostnameOut] = []
     origins: list[OriginOut] = []
 
     model_config = ConfigDict(from_attributes=True)

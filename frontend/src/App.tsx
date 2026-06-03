@@ -32,6 +32,7 @@ type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" |
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
+type HostnameAddDraft = { hostname: string; adopt_record_id: string };
 type TargetPoolDraft = { target: string; port: number; remark: string; check_interval_seconds: number; enabled: boolean };
 type ExternalIpSourceDraft = { name: string; base_url: string; token: string; default_port: number; sync_interval_seconds: number; enabled: boolean };
 type AgentEditDraft = { name: string };
@@ -1159,10 +1160,13 @@ function GroupsPanel({
   const [originAdd, setOriginAdd] = useState<OriginAddDraft>(defaultOriginAddDraft);
   const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
   const [groupEdits, setGroupEdits] = useState<Record<number, GroupEditDraft>>({});
+  const [addingHostnameGroupId, setAddingHostnameGroupId] = useState<number | null>(null);
+  const [hostnameAdd, setHostnameAdd] = useState<HostnameAddDraft>({ hostname: "", adopt_record_id: "" });
   const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
   const [originEdits, setOriginEdits] = useState<Record<number, OriginEditDraft>>({});
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<number>>(new Set());
   const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
+  const addingHostnameGroup = addingHostnameGroupId ? groups.find((group) => group.id === addingHostnameGroupId) : undefined;
   const enabledPoolItems = targetPool.filter((item) => item.enabled);
   const healthyExternalItems = externalIpItems.filter((item) => item.status === "healthy");
   const addTargetType = inferDraftTargetType(originAdd.target);
@@ -1220,6 +1224,42 @@ function GroupsPanel({
         setAddingGroupId(null);
         setOriginAdd(defaultOriginAddDraft);
       }
+    );
+  }
+
+  function beginAddHostname(group: FailoverGroup) {
+    expandGroup(group.id);
+    setAddingHostnameGroupId(group.id);
+    setHostnameAdd({ hostname: "", adopt_record_id: "" });
+  }
+
+  async function createHostname() {
+    if (!addingHostnameGroup) return;
+    await act(
+      () => {
+        if (!hostnameAdd.hostname.trim()) {
+          throw new Error("请填写主域名");
+        }
+        return apiFetch(`/api/groups/${addingHostnameGroup.id}/hostnames`, token, {
+          method: "POST",
+          body: JSON.stringify({
+            hostname: hostnameAdd.hostname.trim(),
+            adopt_record_id: hostnameAdd.adopt_record_id.trim() || null
+          })
+        });
+      },
+      "主域名已添加并应用",
+      () => {
+        setAddingHostnameGroupId(null);
+        setHostnameAdd({ hostname: "", adopt_record_id: "" });
+      }
+    );
+  }
+
+  async function deleteHostname(hostnameId: number) {
+    await act(
+      () => apiFetch(`/api/groups/hostnames/${hostnameId}`, token, { method: "DELETE" }),
+      "主域名已取消接管"
     );
   }
 
@@ -1332,6 +1372,7 @@ function GroupsPanel({
           const primaryPriority = sortedOrigins[0]?.priority;
           const currentOrigin = sortedOrigins.find((origin) => origin.id === group.current_origin_id);
           const currentTarget = currentOrigin ? displayTargetWithRemark(currentOrigin.target, currentOrigin.port, currentOrigin.remark) : "未发布";
+          const groupHostnames = group.hostnames && group.hostnames.length > 0 ? [...group.hostnames].sort((left, right) => left.id - right.id) : [];
           const groupLastCheckedAt = sortedOrigins.reduce<string | null>((latest, origin) => {
             if (!origin.last_checked_at) return latest;
             if (!latest) return origin.last_checked_at;
@@ -1344,9 +1385,21 @@ function GroupsPanel({
                 <div>
                   <div className="groupTitleLine">
                     <h2 className="groupHostname">{group.hostname}</h2>
-                    <span className="groupRoleBadge">主域名</span>
+                    <span className="groupRoleBadge">主域名 {Math.max(groupHostnames.length, 1)} 个</span>
                   </div>
                   <span className="groupMetaLine">TTL {group.ttl} · 源站 {sortedOrigins.length} 个 · 当前 {currentTarget} · 最后检测 {fmtDate(groupLastCheckedAt)}</span>
+                  <div className="hostnameChips">
+                    {(groupHostnames.length > 0 ? groupHostnames : [{ id: 0, hostname: group.hostname, current_record_id: group.current_record_id }]).map((hostname) => (
+                      <span className={`hostnameChip ${hostname.hostname === group.hostname ? "primary" : ""}`} key={hostname.id || hostname.hostname}>
+                        {hostname.hostname}
+                        {groupHostnames.length > 1 && hostname.id > 0 && (
+                          <button type="button" title="取消接管这个主域名" onClick={() => deleteHostname(hostname.id)}>
+                            ×
+                          </button>
+                        )}
+                      </span>
+                    ))}
+                  </div>
                 </div>
                 <div className="rowActions">
                   <Status value={group.last_error ? "error" : group.enabled ? "enabled" : "disabled"} />
@@ -1360,6 +1413,10 @@ function GroupsPanel({
                   <button className="secondary" title="添加备用目标" onClick={() => beginAddOrigin(group)}>
                     <Plus size={15} />
                     <span>添加备用</span>
+                  </button>
+                  <button className="secondary" title="添加主域名" onClick={() => beginAddHostname(group)}>
+                    <Plus size={15} />
+                    <span>主域名</span>
                   </button>
                   <button className="icon secondaryIcon" title="修改切换组" onClick={() => beginEditGroup(group)}>
                     <Pencil size={15} />
@@ -1535,6 +1592,32 @@ function GroupsPanel({
           </div>
         )}
       </div>
+      {addingHostnameGroup && (
+        <div className="modalBackdrop" role="dialog" aria-modal="true">
+          <div className="modalPanel">
+            <div className="panelTitle">
+              <h2>添加主域名</h2>
+              <p>{addingHostnameGroup.hostname}</p>
+            </div>
+            <label>
+              主域名
+              <input placeholder="例如 b.example.com" value={hostnameAdd.hostname} onChange={(event) => setHostnameAdd((current) => ({ ...current, hostname: event.target.value }))} />
+            </label>
+            <label>
+              接管记录 ID（可选）
+              <input placeholder="不填则自动接管唯一 DNS-only 记录" value={hostnameAdd.adopt_record_id} onChange={(event) => setHostnameAdd((current) => ({ ...current, adopt_record_id: event.target.value }))} />
+            </label>
+            <div className="hintBox">添加后会和本组其他主域名共用同一套源站与切换策略。</div>
+            <div className="modalActions">
+              <button className="secondary" onClick={() => setAddingHostnameGroupId(null)}>取消</button>
+              <button onClick={createHostname}>
+                <Plus size={16} />
+                <span>添加主域名</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {addingGroup && (
         <div className="modalBackdrop" role="dialog" aria-modal="true">
           <div className="modalPanel">

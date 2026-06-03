@@ -80,6 +80,14 @@ export type TargetPoolItem = {
   updated_at: string;
 };
 
+export type FailoverHostname = {
+  id: number;
+  group_id: number;
+  hostname: string;
+  current_record_id: string | null;
+  created_at: string;
+};
+
 export type ExternalIpSource = {
   id: number;
   name: string;
@@ -121,6 +129,7 @@ export type FailoverGroup = {
   current_record_id: string | null;
   last_switch_at: string | null;
   last_error: string | null;
+  hostnames: FailoverHostname[];
   origins: Origin[];
 };
 
