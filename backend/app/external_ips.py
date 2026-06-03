@@ -7,9 +7,9 @@ from urllib.parse import urlencode, urlparse, urlunparse
 from sqlalchemy.orm import Session
 from websockets.sync.client import connect
 
-from .config import get_settings
 from .dns_utils import parse_target
 from .models import ExternalIpItem, ExternalIpSource
+from .runtime_settings import get_runtime_settings
 from .security import decrypt_secret
 
 
@@ -165,7 +165,7 @@ def sync_external_ip_source(db: Session, source: ExternalIpSource) -> int:
 
 
 def sync_due_external_ip_sources(db: Session) -> int:
-    settings = get_settings()
+    settings = get_runtime_settings(db)
     now = datetime.utcnow()
     sources = db.query(ExternalIpSource).filter(ExternalIpSource.enabled.is_(True)).all()
     synced = 0

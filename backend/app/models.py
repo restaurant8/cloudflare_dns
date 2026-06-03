@@ -24,6 +24,13 @@ class User(Base, TimestampMixin):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
+class AppSetting(Base, TimestampMixin):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class CloudflareCredential(Base, TimestampMixin):
     __tablename__ = "cloudflare_credentials"
 

@@ -432,6 +432,48 @@ button.zonePill.active {
   margin-top: 12px;
 }
 
+.settingsPanel {
+  display: grid;
+  gap: 18px;
+  max-width: 1040px;
+}
+
+.settingsSections {
+  display: grid;
+  gap: 16px;
+}
+
+.settingsSection {
+  background: #f8fafc;
+  border: 1px solid #dfe6ee;
+  border-radius: 8px;
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
+.settingsSection h3 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.settingsGrid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+}
+
+.settingsGrid label span {
+  color: #667789;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.formActions {
+  display: flex;
+  justify-content: flex-start;
+}
+
 .metrics {
   display: grid;
   gap: 12px;
@@ -1370,6 +1412,7 @@ form.panel {
   .batchPoolGrid,
   .externalSourceEditGrid,
   .externalSourceGrid,
+  .settingsGrid,
   .modalFormGrid {
     grid-template-columns: 1fr;
   }

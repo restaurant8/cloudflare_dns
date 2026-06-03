@@ -3,11 +3,11 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
 from ..database import get_db
 from ..deps import get_current_user
 from ..models import User
 from ..request_utils import client_ip_from_request
+from ..runtime_settings import RuntimeSettings, get_runtime_settings
 from ..schemas import BootstrapRequest, LoginRequest, Message, PasswordChangeRequest, SetupStatus, TokenResponse
 from ..security import create_access_token, hash_password, verify_password
 
@@ -24,8 +24,8 @@ def _login_key(request: Request, username: str) -> str:
     return f"{_client_ip(request)}:{username.strip().lower()}"
 
 
-def _check_login_limiter(key: str) -> None:
-    settings = get_settings()
+def _check_login_limiter(key: str, settings: RuntimeSettings | None = None) -> None:
+    settings = settings or get_runtime_settings()
     now = time.time()
     state = _login_failures.get(key)
     if not state:
@@ -37,8 +37,8 @@ def _check_login_limiter(key: str) -> None:
         _login_failures.pop(key, None)
 
 
-def _record_login_failure(key: str) -> None:
-    settings = get_settings()
+def _record_login_failure(key: str, settings: RuntimeSettings | None = None) -> None:
+    settings = settings or get_runtime_settings()
     now = time.time()
     state = _login_failures.get(key)
     if not state or now - state.get("first_failed_at", now) > settings.login_failure_window_seconds:
@@ -71,12 +71,12 @@ def bootstrap(payload: BootstrapRequest, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
-    settings = get_settings()
+    settings = get_runtime_settings(db)
     key = _login_key(request, payload.username)
-    _check_login_limiter(key)
+    _check_login_limiter(key, settings)
     user = db.query(User).filter(User.username == payload.username).one_or_none()
     if user is None or not verify_password(payload.password, user.password_hash):
-        _record_login_failure(key)
+        _record_login_failure(key, settings)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
     _clear_login_failures(key)
     ttl_seconds = settings.access_token_remember_ttl_seconds if payload.remember_me else settings.access_token_ttl_seconds

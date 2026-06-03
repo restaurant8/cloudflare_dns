@@ -9,14 +9,16 @@ from .database import SessionLocal, init_db
 from .external_ips import sync_due_external_ip_sources
 from .failover import evaluate_failover_groups
 from .health import mark_stale_agents, run_local_checks, run_target_pool_checks
+from .runtime_settings import get_runtime_settings
 from .routes import routers
 
 
 async def scheduler_loop(stop_event: asyncio.Event) -> None:
-    settings = get_settings()
+    timeout_seconds = get_settings().check_interval_seconds
     while not stop_event.is_set():
         try:
             with SessionLocal() as db:
+                runtime_settings = get_runtime_settings(db)
                 mark_stale_agents(db)
                 check_cache = {}
                 run_local_checks(db, check_cache=check_cache)
@@ -24,11 +26,12 @@ async def scheduler_loop(stop_event: asyncio.Event) -> None:
                 sync_due_external_ip_sources(db)
                 evaluate_failover_groups(db)
                 db.commit()
+                timeout_seconds = runtime_settings.check_interval_seconds
         except Exception:
             # The next loop will retry; API event logging may not be available if DB init failed.
             pass
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=settings.check_interval_seconds)
+            await asyncio.wait_for(stop_event.wait(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
             continue
 

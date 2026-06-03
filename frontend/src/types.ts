@@ -172,6 +172,20 @@ export type EventItem = {
   created_at: string;
 };
 
+export type SystemSettings = {
+  check_interval_seconds: number;
+  check_timeout_seconds: number;
+  fail_threshold: number;
+  recovery_threshold: number;
+  no_healthy_notification_interval_seconds: number;
+  external_ip_sync_interval_seconds: number;
+  access_token_ttl_seconds: number;
+  access_token_remember_ttl_seconds: number;
+  login_max_failures: number;
+  login_failure_window_seconds: number;
+  login_lockout_seconds: number;
+};
+
 export type Overview = {
   credentials: number;
   zones: number;

@@ -6,13 +6,13 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session, selectinload
 
 from ..agent_installer import build_install_script
-from ..config import get_settings
 from ..database import get_db
 from ..deps import get_agent, get_current_user
 from ..health import active_agents, agent_region, apply_probe_result, apply_target_pool_probe_result, mark_agent_online, origin_needs_probe, refresh_expanded_origin_ips, target_pool_check_due, target_pool_stale_before
 from ..models import Agent, FailoverGroup, Origin, TargetPoolItem, User
 from ..origin_expansion import expanded_source_key, is_expanded_origin, resolved_ips
 from ..request_utils import client_ip_from_request
+from ..runtime_settings import get_runtime_settings
 from ..schemas import AgentCreate, AgentCreated, AgentOut, AgentResultsIn, AgentTasksResponse, AgentTask, AgentUpdate, Message
 from ..security import hash_token
 
@@ -180,7 +180,7 @@ def delete_agent(agent_id: int, _: User = Depends(get_current_user), db: Session
 
 @router.get("/agent/tasks", response_model=AgentTasksResponse)
 def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session = Depends(get_db)):
-    settings = get_settings()
+    settings = get_runtime_settings(db)
     mark_agent_online(db, agent, client_ip_from_request(request))
     origins = (
         db.query(Origin)

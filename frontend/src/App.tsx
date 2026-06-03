@@ -22,13 +22,14 @@ import {
   Save,
   Server,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverGroup, Origin, Overview, ProbeState, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
+import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverGroup, Origin, Overview, ProbeState, SystemSettings, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
 
-type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "agents" | "webhooks" | "account" | "events";
+type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "agents" | "webhooks" | "settings" | "account" | "events";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
@@ -36,6 +37,8 @@ type HostnameAddDraft = { hostname: string; adopt_record_id: string };
 type TargetPoolDraft = { target: string; port: number; remark: string; check_interval_seconds: number; enabled: boolean };
 type ExternalIpSourceDraft = { name: string; base_url: string; token: string; default_port: number; sync_interval_seconds: number; enabled: boolean };
 type AgentEditDraft = { name: string };
+type SystemSettingsDraft = { [K in keyof SystemSettings]: string };
+type SystemSettingField = { key: keyof SystemSettings; label: string; min: number; max: number; step?: number; hint?: string };
 type ToastTone = "info" | "success" | "error" | "loading";
 type ActionRunner = <T>(fn: () => Promise<T>, done?: string, afterSuccess?: () => void) => Promise<boolean>;
 
@@ -48,6 +51,7 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "externalIps", label: "外部 IP", icon: Globe2 },
   { id: "agents", label: "探针", icon: RadioTower },
   { id: "webhooks", label: "通知", icon: WebhookIcon },
+  { id: "settings", label: "设置", icon: SlidersHorizontal },
   { id: "account", label: "账户", icon: LockKeyhole },
   { id: "events", label: "事件", icon: DatabaseZap }
 ];
@@ -251,6 +255,10 @@ const liveRefreshIntervalMs = 3000;
 const accessTokenStorageKey = "accessToken";
 const rememberedUsernameStorageKey = "cloudflareDnsRememberedUsername";
 
+function systemSettingsToDraft(settings: SystemSettings): SystemSettingsDraft {
+  return Object.fromEntries(Object.entries(settings).map(([key, value]) => [key, String(value)])) as SystemSettingsDraft;
+}
+
 function getStoredAccessToken(): string | null {
   try {
     return localStorage.getItem(accessTokenStorageKey) || sessionStorage.getItem(accessTokenStorageKey);
@@ -291,6 +299,7 @@ export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [telegramNotifications, setTelegramNotifications] = useState<TelegramNotification[]>([]);
   const [webhooks, setWebhooks] = useState<Webhook[]>([]);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
   const [events, setEvents] = useState<EventItem[]>([]);
   const [agentToken, setAgentToken] = useState("");
 
@@ -304,7 +313,7 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAgents, nextTelegram, nextWebhooks, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
@@ -315,6 +324,7 @@ export default function App() {
       apiFetch<Agent[]>("/api/agents", activeToken),
       apiFetch<TelegramNotification[]>("/api/telegram", activeToken),
       apiFetch<Webhook[]>("/api/webhooks", activeToken),
+      apiFetch<SystemSettings>("/api/settings", activeToken),
       apiFetch<EventItem[]>("/api/events?limit=100", activeToken)
     ]);
     setOverview(nextOverview);
@@ -327,6 +337,7 @@ export default function App() {
     setAgents(nextAgents);
     setTelegramNotifications(nextTelegram);
     setWebhooks(nextWebhooks);
+    setSystemSettings(nextSystemSettings);
     setEvents(nextEvents);
     if (!selectedZoneId && nextZones.length > 0) {
       setSelectedZoneId(nextZones[0].id);
@@ -614,6 +625,7 @@ export default function App() {
           <AgentsPanel token={token} agents={agents} agentToken={agentToken} setAgentToken={setAgentToken} act={act} />
         )}
         {section === "webhooks" && <NotificationsPanel token={token} telegramNotifications={telegramNotifications} webhooks={webhooks} act={act} />}
+        {section === "settings" && systemSettings && <SettingsPanel token={token} settings={systemSettings} act={act} />}
         {section === "account" && <AccountPanel token={token} onPasswordChanged={logout} />}
         {section === "events" && <EventsPanel events={events} />}
       </main>
@@ -2207,6 +2219,107 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
         </div>
       </div>
     </section>
+  );
+}
+
+function SettingsPanel({ token, settings, act }: { token: string; settings: SystemSettings; act: ActionRunner }) {
+  const [draft, setDraft] = useState<SystemSettingsDraft>(() => systemSettingsToDraft(settings));
+
+  useEffect(() => {
+    setDraft(systemSettingsToDraft(settings));
+  }, [settings]);
+
+  const sections: { title: string; description: string; fields: SystemSettingField[] }[] = [
+    {
+      title: "健康检查",
+      description: "控制本地与探针的 TCP 检查频率、超时和连续判定阈值。",
+      fields: [
+        { key: "check_interval_seconds", label: "探针检查周期", min: 10, max: 3600, hint: "秒" },
+        { key: "check_timeout_seconds", label: "TCP 超时", min: 1, max: 60, step: 0.1, hint: "秒" },
+        { key: "fail_threshold", label: "连续失败判故障", min: 1, max: 20, hint: "次" },
+        { key: "recovery_threshold", label: "连续成功判恢复", min: 1, max: 20, hint: "次" }
+      ]
+    },
+    {
+      title: "通知与外部来源",
+      description: "控制无健康源站通知防抖，以及 Nyanpass 等外部健康 IP 来源的默认拉取周期。",
+      fields: [
+        { key: "no_healthy_notification_interval_seconds", label: "无健康源站通知间隔", min: 60, max: 86400, hint: "秒" },
+        { key: "external_ip_sync_interval_seconds", label: "外部 IP 默认拉取周期", min: 60, max: 86400, hint: "秒" }
+      ]
+    },
+    {
+      title: "登录安全",
+      description: "控制登录有效期、记住登录有效期和爆破保护锁定策略。",
+      fields: [
+        { key: "access_token_ttl_seconds", label: "普通登录有效期", min: 3600, max: 31536000, hint: "秒" },
+        { key: "access_token_remember_ttl_seconds", label: "记住登录有效期", min: 3600, max: 31536000, hint: "秒" },
+        { key: "login_max_failures", label: "最大失败次数", min: 1, max: 100, hint: "次" },
+        { key: "login_failure_window_seconds", label: "失败统计窗口", min: 60, max: 86400, hint: "秒" },
+        { key: "login_lockout_seconds", label: "锁定时间", min: 60, max: 86400, hint: "秒" }
+      ]
+    }
+  ];
+
+  function updateField(key: keyof SystemSettings, value: string) {
+    setDraft((current) => ({ ...current, [key]: value }));
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const payload = Object.fromEntries(
+      Object.entries(draft).map(([key, value]) => [key, key === "check_timeout_seconds" ? Number.parseFloat(value) : Number.parseInt(value, 10)])
+    );
+    await act(
+      () =>
+        apiFetch("/api/settings", token, {
+          method: "PATCH",
+          body: JSON.stringify(payload)
+        }),
+      "设置已保存"
+    );
+  }
+
+  return (
+    <form className="panel settingsPanel" onSubmit={submit}>
+      <div className="panelTitle">
+        <h2>系统设置</h2>
+        <p>这些参数保存在数据库里，保存后下一轮检查会自动生效，不需要登录服务器修改配置。</p>
+      </div>
+      <div className="settingsSections">
+        {sections.map((section) => (
+          <section className="settingsSection" key={section.title}>
+            <div className="panelTitle">
+              <h3>{section.title}</h3>
+              <p>{section.description}</p>
+            </div>
+            <div className="settingsGrid">
+              {section.fields.map((field) => (
+                <label key={field.key}>
+                  {field.label}
+                  <input
+                    type="number"
+                    min={field.min}
+                    max={field.max}
+                    step={field.step || 1}
+                    value={draft[field.key]}
+                    onChange={(event) => updateField(field.key, event.target.value)}
+                    required
+                  />
+                  <span>{field.min} - {field.max}{field.hint ? ` ${field.hint}` : ""}</span>
+                </label>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+      <div className="formActions">
+        <button>
+          <Save size={16} />
+          <span>保存设置</span>
+        </button>
+      </div>
+    </form>
   );
 }
 

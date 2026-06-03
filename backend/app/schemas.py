@@ -29,6 +29,34 @@ class PasswordChangeRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=200)
 
 
+class SystemSettingsOut(BaseModel):
+    check_interval_seconds: int
+    check_timeout_seconds: float
+    fail_threshold: int
+    recovery_threshold: int
+    no_healthy_notification_interval_seconds: int
+    external_ip_sync_interval_seconds: int
+    access_token_ttl_seconds: int
+    access_token_remember_ttl_seconds: int
+    login_max_failures: int
+    login_failure_window_seconds: int
+    login_lockout_seconds: int
+
+
+class SystemSettingsUpdate(BaseModel):
+    check_interval_seconds: int | None = Field(default=None, ge=10, le=3600)
+    check_timeout_seconds: float | None = Field(default=None, ge=1.0, le=60.0)
+    fail_threshold: int | None = Field(default=None, ge=1, le=20)
+    recovery_threshold: int | None = Field(default=None, ge=1, le=20)
+    no_healthy_notification_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
+    external_ip_sync_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
+    access_token_ttl_seconds: int | None = Field(default=None, ge=3600, le=31_536_000)
+    access_token_remember_ttl_seconds: int | None = Field(default=None, ge=3600, le=31_536_000)
+    login_max_failures: int | None = Field(default=None, ge=1, le=100)
+    login_failure_window_seconds: int | None = Field(default=None, ge=60, le=86400)
+    login_lockout_seconds: int | None = Field(default=None, ge=60, le=86400)
+
+
 class CloudflareCredentialCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     token: str = Field(min_length=10)

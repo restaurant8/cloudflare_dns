@@ -2,7 +2,6 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session, selectinload
 
-from .config import get_settings
 from .dns_utils import tcp_check
 from .events import add_event
 from .models import Agent, FailoverGroup, Origin, ProbeResult, ProbeState, TargetPoolItem, TargetPoolProbeState
@@ -18,6 +17,7 @@ from .origin_expansion import (
     set_resolved_ips,
     split_expanded_source_key,
 )
+from .runtime_settings import get_runtime_settings
 
 
 LOCAL_SOURCE = "local"
@@ -80,7 +80,7 @@ def target_pool_check_due(item: TargetPoolItem, now: datetime | None = None, sou
 
 
 def active_agents(db: Session, stale_before: datetime | None = None) -> list[Agent]:
-    settings = get_settings()
+    settings = get_runtime_settings(db)
     cutoff = stale_before or datetime.utcnow() - timedelta(seconds=max(settings.check_interval_seconds * 3, 90))
     return (
         db.query(Agent)
@@ -194,7 +194,7 @@ def apply_probe_result(
     target: str | None = None,
     port: int | None = None,
 ) -> None:
-    settings = get_settings()
+    settings = get_runtime_settings(db)
     now = datetime.utcnow()
     state = _probe_state(db, origin, source_key, agent)
     old_state_status = state.status
@@ -247,7 +247,7 @@ def apply_target_pool_probe_result(
     source_key: str = LOCAL_SOURCE,
     agent: Agent | None = None,
 ) -> None:
-    settings = get_settings()
+    settings = get_runtime_settings(db)
     now = datetime.utcnow()
     state = _target_pool_probe_state(db, item, source_key, agent)
     if success:
@@ -272,7 +272,7 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
         recalculate_expanded_origin_status(db, origin)
         return
 
-    settings = get_settings()
+    settings = get_runtime_settings(db)
     old_status = origin.status
     if not origin.enabled:
         origin.status = "disabled"
@@ -437,7 +437,7 @@ def recalculate_target_pool_status(db: Session, item: TargetPoolItem) -> None:
 
 
 def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
-    settings = get_settings()
+    settings = get_runtime_settings(db)
     old_status = origin.status
     if not origin.enabled:
         origin.status = "disabled"
@@ -551,7 +551,7 @@ def run_local_checks(
     include_all: bool = False,
     check_cache: dict[tuple[str, int], object] | None = None,
 ) -> int:
-    settings = get_settings()
+    settings = get_runtime_settings(db)
     query = (
         db.query(Origin)
         .options(selectinload(Origin.group).selectinload(FailoverGroup.origins))
@@ -625,7 +625,7 @@ def run_target_pool_checks(
     include_all: bool = False,
     check_cache: dict[tuple[str, int], object] | None = None,
 ) -> int:
-    settings = get_settings()
+    settings = get_runtime_settings(db)
     query = db.query(TargetPoolItem).filter(TargetPoolItem.enabled.is_(True))
     if item_id is not None:
         query = query.filter(TargetPoolItem.id == item_id)
@@ -665,7 +665,7 @@ def mark_agent_online(db: Session, agent: Agent, last_ip: str | None) -> None:
 
 
 def mark_stale_agents(db: Session) -> int:
-    settings = get_settings()
+    settings = get_runtime_settings(db)
     stale_before = datetime.utcnow() - timedelta(seconds=max(settings.check_interval_seconds * 3, 90))
     stale_agents = (
         db.query(Agent)

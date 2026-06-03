@@ -3,7 +3,6 @@ from datetime import datetime
 from sqlalchemy.orm import Session, selectinload
 
 from .cloudflare import CloudflareClient, CloudflareError
-from .config import get_settings
 from .dns_utils import record_type_for_target_type
 from .events import add_event
 from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, run_local_checks
@@ -17,6 +16,7 @@ from .origin_expansion import (
     record_type_for_ip,
     set_published_ips,
 )
+from .runtime_settings import get_runtime_settings
 from .security import decrypt_secret
 from .sync import MANAGED_RECORD_TYPES, sync_zone_records
 
@@ -66,9 +66,8 @@ def _has_pending_origin_checks(group: FailoverGroup) -> bool:
     return any(origin.enabled and origin.status not in FINAL_ORIGIN_STATUSES for origin in group.origins)
 
 
-def _should_notify_no_healthy(group: FailoverGroup, now: datetime) -> bool:
-    settings = get_settings()
-    interval = max(settings.no_healthy_notification_interval_seconds, 60)
+def _should_notify_no_healthy(group: FailoverGroup, now: datetime, interval_seconds: int) -> bool:
+    interval = max(interval_seconds, 60)
     if group.no_healthy_notified_at is None:
         return True
     return (now - group.no_healthy_notified_at).total_seconds() >= interval
@@ -317,6 +316,7 @@ def evaluate_failover_groups(db: Session) -> int:
     )
     switches = 0
     now = datetime.utcnow()
+    settings = get_runtime_settings(db)
     for group in groups:
         if _should_probe_group_before_switch(group):
             run_local_checks(db, group_id=group.id, include_all=True)
@@ -327,7 +327,7 @@ def evaluate_failover_groups(db: Session) -> int:
                 group.last_error = WAITING_FOR_PROBES_MESSAGE
                 continue
             group.last_error = NO_HEALTHY_ORIGIN_MESSAGE
-            if _should_notify_no_healthy(group, now):
+            if _should_notify_no_healthy(group, now, settings.no_healthy_notification_interval_seconds):
                 group.no_healthy_notified_at = now
                 payload = {"group_id": group.id, "hostname": group.hostname, "origins": _origin_status_summaries(group)}
                 add_event(db, "failover.no_healthy_origin", "error", f"{group.hostname} 没有可用的健康源站", payload)
