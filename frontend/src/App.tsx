@@ -248,9 +248,27 @@ const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
 const liveRefreshIntervalMs = 3000;
+const accessTokenStorageKey = "accessToken";
+const rememberedUsernameStorageKey = "cloudflareDnsRememberedUsername";
+
+function getStoredAccessToken(): string | null {
+  try {
+    return localStorage.getItem(accessTokenStorageKey) || sessionStorage.getItem(accessTokenStorageKey);
+  } catch {
+    return null;
+  }
+}
+
+function getRememberedUsername(): string {
+  try {
+    return localStorage.getItem(rememberedUsernameStorageKey) || "admin";
+  } catch {
+    return "admin";
+  }
+}
 
 export default function App() {
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem("accessToken"));
+  const [token, setToken] = useState<string | null>(() => getStoredAccessToken());
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
   const [bootError, setBootError] = useState("");
   const [section, setSection] = useState<Section>(() => initialSection());
@@ -460,14 +478,31 @@ export default function App() {
     }
   }, [selectedZoneId]);
 
-  function onAuth(nextToken: string) {
-    localStorage.setItem("accessToken", nextToken);
+  function onAuth(nextToken: string, options: { rememberLogin: boolean; rememberUsername: boolean; username: string }) {
+    try {
+      const persistentStorage = options.rememberLogin ? localStorage : sessionStorage;
+      const otherStorage = options.rememberLogin ? sessionStorage : localStorage;
+      otherStorage.removeItem(accessTokenStorageKey);
+      persistentStorage.setItem(accessTokenStorageKey, nextToken);
+      if (options.rememberUsername) {
+        localStorage.setItem(rememberedUsernameStorageKey, options.username);
+      } else {
+        localStorage.removeItem(rememberedUsernameStorageKey);
+      }
+    } catch {
+      // Keep the in-memory token even if browser storage is unavailable.
+    }
     setToken(nextToken);
     setSetupRequired(false);
   }
 
   function logout() {
-    localStorage.removeItem("accessToken");
+    try {
+      localStorage.removeItem(accessTokenStorageKey);
+      sessionStorage.removeItem(accessTokenStorageKey);
+    } catch {
+      // Ignore private browsing or storage-disabled environments.
+    }
     setToken(null);
   }
 
@@ -586,9 +621,17 @@ export default function App() {
   );
 }
 
-function AuthScreen({ setupRequired, onAuth }: { setupRequired: boolean; onAuth: (token: string) => void }) {
-  const [username, setUsername] = useState("admin");
+function AuthScreen({
+  setupRequired,
+  onAuth
+}: {
+  setupRequired: boolean;
+  onAuth: (token: string, options: { rememberLogin: boolean; rememberUsername: boolean; username: string }) => void;
+}) {
+  const [username, setUsername] = useState(() => getRememberedUsername());
   const [password, setPassword] = useState("");
+  const [rememberLogin, setRememberLogin] = useState(true);
+  const [rememberUsername, setRememberUsername] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -600,9 +643,9 @@ function AuthScreen({ setupRequired, onAuth }: { setupRequired: boolean; onAuth:
       const path = setupRequired ? "/api/auth/bootstrap" : "/api/auth/login";
       const data = await apiFetch<{ access_token: string }>(path, null, {
         method: "POST",
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify(setupRequired ? { username, password } : { username, password, remember_me: rememberLogin })
       });
-      onAuth(data.access_token);
+      onAuth(data.access_token, { rememberLogin, rememberUsername, username: username.trim() });
     } catch (err) {
       setError(err instanceof Error ? err.message : "登录失败");
     } finally {
@@ -628,6 +671,17 @@ function AuthScreen({ setupRequired, onAuth }: { setupRequired: boolean; onAuth:
           密码
           <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
         </label>
+        <div className="authOptions">
+          <label className="inlineCheck">
+            <input type="checkbox" checked={rememberLogin} onChange={(event) => setRememberLogin(event.target.checked)} />
+            记住登录
+          </label>
+          <label className="inlineCheck">
+            <input type="checkbox" checked={rememberUsername} onChange={(event) => setRememberUsername(event.target.checked)} />
+            记住账号
+          </label>
+        </div>
+        <p className="authHint">不会保存明文密码。</p>
         {error && <div className="error">{error}</div>}
         <button disabled={busy}>
           <KeyRound size={16} />

@@ -1315,6 +1315,19 @@ form.panel {
   padding: 0;
 }
 
+.authOptions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.authHint {
+  color: #667789;
+  font-size: 12px;
+  margin: -6px 0 0;
+}
+
 @media (max-width: 980px) {
   .shell {
     grid-template-columns: 1fr;

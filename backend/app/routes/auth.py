@@ -71,6 +71,7 @@ def bootstrap(payload: BootstrapRequest, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    settings = get_settings()
     key = _login_key(request, payload.username)
     _check_login_limiter(key)
     user = db.query(User).filter(User.username == payload.username).one_or_none()
@@ -78,7 +79,8 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
         _record_login_failure(key)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
     _clear_login_failures(key)
-    return TokenResponse(access_token=create_access_token(user.id))
+    ttl_seconds = settings.access_token_remember_ttl_seconds if payload.remember_me else settings.access_token_ttl_seconds
+    return TokenResponse(access_token=create_access_token(user.id, ttl_seconds=ttl_seconds))
 
 
 @router.patch("/password", response_model=Message)

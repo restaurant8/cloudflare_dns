@@ -46,12 +46,13 @@ def _sign(payload: str) -> str:
     return _b64url(hmac.new(settings.secret_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).digest())
 
 
-def create_access_token(user_id: int) -> str:
+def create_access_token(user_id: int, ttl_seconds: int | None = None) -> str:
     settings = get_settings()
+    ttl = ttl_seconds if ttl_seconds is not None else settings.access_token_ttl_seconds
     payload = {
         "sub": str(user_id),
         "iat": int(time.time()),
-        "exp": int(time.time()) + settings.access_token_ttl_seconds,
+        "exp": int(time.time()) + ttl,
     }
     encoded = _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     return f"{encoded}.{_sign(encoded)}"
@@ -104,4 +105,3 @@ def sign_webhook_payload(secret: str, body: bytes) -> str:
 
 def json_dumps(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-
