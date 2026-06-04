@@ -1183,10 +1183,6 @@ function TargetPoolPanel({ token, targetPool, groups, act }: { token: string; ta
                 检查端口
                 <input type="number" min={1} max={65535} value={poolDraft.port} onChange={(event) => setPoolDraft((current) => ({ ...current, port: Number(event.target.value) }))} />
               </label>
-              <label>
-                健康检查周期（秒）
-                <input type="number" min={60} max={86400} value={poolDraft.check_interval_seconds} onChange={(event) => setPoolDraft((current) => ({ ...current, check_interval_seconds: Number(event.target.value) }))} />
-              </label>
             </div>
             <label>
               备注
@@ -1215,10 +1211,6 @@ function TargetPoolPanel({ token, targetPool, groups, act }: { token: string; ta
               <label>
                 默认端口
                 <input type="number" min={1} max={65535} value={batchPort} onChange={(event) => setBatchPort(Number(event.target.value))} />
-              </label>
-              <label>
-                检查周期（秒）
-                <input type="number" min={60} max={86400} value={batchInterval} onChange={(event) => setBatchInterval(Number(event.target.value))} />
               </label>
             </div>
             <label>
@@ -1266,7 +1258,6 @@ function TargetPoolPanel({ token, targetPool, groups, act }: { token: string; ta
                       <div className="poolEditGrid">
                         <input value={edit.target} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, target: event.target.value } }))} />
                         <input type="number" min={1} max={65535} value={edit.port} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, port: Number(event.target.value) } }))} />
-                        <input type="number" min={60} max={86400} value={edit.check_interval_seconds} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, check_interval_seconds: Number(event.target.value) } }))} title="健康检查周期（秒）" />
                         <input value={edit.remark} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, remark: event.target.value } }))} placeholder="备注" />
                         <label className="inlineCheck">
                           <input type="checkbox" checked={edit.enabled} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, enabled: event.target.checked } }))} />
@@ -1286,23 +1277,10 @@ function TargetPoolPanel({ token, targetPool, groups, act }: { token: string; ta
                     <>
                       <div className="poolItemMain">
                         <strong title={`${item.target}:${item.port}`}>{displayTargetWithRemark(item.target, item.port, item.remark)}</strong>
-                        <span>{targetTypeText(item.target_type)} · 发布为 {recordTypeForTargetType(item.target_type)} · 检测周期 {item.check_interval_seconds}s · 最后检测 {fmtDate(item.last_checked_at)}</span>
-                        {item.last_error && <small className="danger">{item.last_error}</small>}
-                        {activeProbeStates(item.probe_states).length > 0 && (
-                          <div className="probeChips">
-                            {activeProbeStates(item.probe_states).map((probe) => (
-                              <span className={`probeChip ${probe.status}`} key={probe.id} title={probe.last_error || `最后检测 ${fmtDate(probe.last_checked_at)}`}>
-                                {probeSourceText(probe)}：{statusText(probe.status)} · {fmtTime(probe.last_checked_at)}
-                              </span>
-                            ))}
-                          </div>
-                        )}
+                        <span>{targetTypeText(item.target_type)} · 发布为 {recordTypeForTargetType(item.target_type)} · 备用仓库，不做连通性检测</span>
                       </div>
                       <div className="rowActions">
-                        <Status value={item.enabled ? item.status : "disabled"} />
-                        <button className="icon secondaryIcon" title="手动检测目标池" onClick={() => act(() => apiFetch(`/api/target-pool/${item.id}/run`, token, { method: "POST" }), "目标池检测已完成")}>
-                          <Play size={15} />
-                        </button>
+                        <Status value={item.enabled ? "enabled" : "disabled"} />
                         <button className="icon secondaryIcon" title="修改" onClick={() => beginEditPoolItem(item)}>
                           <Pencil size={15} />
                         </button>

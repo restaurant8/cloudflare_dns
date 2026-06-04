@@ -4,7 +4,6 @@ from sqlalchemy.orm import Session, selectinload
 from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import parse_target
-from ..health import run_target_pool_checks
 from ..models import FailoverGroup, Origin, TargetPoolItem, TargetPoolProbeState, User
 from ..origin_expansion import DIRECT_PUBLISH_MODE
 from ..schemas import (
@@ -268,7 +267,7 @@ def update_target_pool_item(item_id: int, payload: TargetPoolUpdate, _: User = D
     if endpoint_changed:
         item.status = "unknown"
         item.last_checked_at = None
-        item.last_error = "等待下次池子健康检查"
+        item.last_error = None
         item.last_rtt_ms = None
         item.probe_states.clear()
     db.commit()
@@ -281,9 +280,7 @@ def run_target_pool_item_now(item_id: int, _: User = Depends(get_current_user), 
     item = db.get(TargetPoolItem, item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="目标不存在")
-    checked = run_target_pool_checks(db, item_id=item_id, include_all=True)
-    db.commit()
-    return Message(message="目标池检测已完成", detail={"checked": checked})
+    return Message(message="IP 池子仅作为备用仓库，不再执行连通性检测", detail={"checked": 0})
 
 
 @router.delete("/{item_id}", response_model=Message)

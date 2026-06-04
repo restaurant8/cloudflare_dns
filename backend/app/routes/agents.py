@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session, selectinload
 from ..agent_installer import build_install_script
 from ..database import get_db
 from ..deps import get_agent, get_current_user
-from ..health import active_agents, agent_region, apply_probe_result, apply_target_pool_probe_result, mark_agent_online, origin_needs_probe, refresh_expanded_origin_ips, target_pool_check_due, target_pool_stale_before
-from ..models import Agent, FailoverGroup, Origin, TargetPoolItem, User
+from ..health import active_agents, agent_region, apply_probe_result, mark_agent_online, origin_needs_probe, refresh_expanded_origin_ips
+from ..models import Agent, FailoverGroup, Origin, User
 from ..origin_expansion import expanded_source_key, is_expanded_origin, resolved_ips
 from ..request_utils import client_ip_from_request
 from ..runtime_settings import get_runtime_settings
@@ -44,16 +44,6 @@ def _probe_status_for_agent(origin: Origin, agent: Agent, stale_before: datetime
     return state.status if state.status in {"healthy", "unhealthy"} else "unknown"
 
 
-def _pool_probe_status_for_agent(item: TargetPoolItem, agent: Agent, stale_before: datetime) -> str:
-    source_key = _agent_source_key(agent)
-    state = next((probe_state for probe_state in item.probe_states if probe_state.source_key == source_key), None)
-    if state is None or state.last_checked_at is None:
-        return "unknown"
-    if state.last_checked_at < stale_before:
-        return "unhealthy"
-    return state.status if state.status in {"healthy", "unhealthy"} else "unknown"
-
-
 def _same_region_agents_by_region(agents: list[Agent]) -> dict[str, list[Agent]]:
     grouped: dict[str, list[Agent]] = {}
     for item in agents:
@@ -68,17 +58,6 @@ def _should_agent_probe_target(agent: Agent, same_region_agents: list[Agent], or
         return False
     for previous_agent in same_region_agents[:agent_index]:
         if _probe_status_for_agent(origin, previous_agent, stale_before, target) != "unhealthy":
-            return False
-    return True
-
-
-def _should_agent_probe_pool_item(agent: Agent, same_region_agents: list[Agent], item: TargetPoolItem, stale_before: datetime) -> bool:
-    try:
-        agent_index = next(index for index, candidate in enumerate(same_region_agents) if candidate.id == agent.id)
-    except StopIteration:
-        return False
-    for previous_agent in same_region_agents[:agent_index]:
-        if _pool_probe_status_for_agent(item, previous_agent, stale_before) != "unhealthy":
             return False
     return True
 
@@ -98,15 +77,6 @@ def _matching_origins_for_probe(origins: list[Origin], target: str, port: int) -
         if _normalized_probe_target(origin.target) == normalized_target:
             matches.append(origin)
     return matches
-
-
-def _matching_pool_items_for_probe(items: list[TargetPoolItem], target: str, port: int) -> list[TargetPoolItem]:
-    normalized_target = _normalized_probe_target(target)
-    return [
-        item
-        for item in items
-        if item.enabled and item.port == port and _normalized_probe_target(item.target) == normalized_target
-    ]
 
 
 @router.get("/agent/install.sh", response_class=PlainTextResponse)
@@ -182,7 +152,6 @@ def delete_agent(agent_id: int, _: User = Depends(get_current_user), db: Session
 def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session = Depends(get_db)):
     settings = get_runtime_settings(db)
     mark_agent_online(db, agent, client_ip_from_request(request))
-    is_china_agent = agent_region(agent) == "china"
     origins = (
         db.query(Origin)
         .options(selectinload(Origin.group).selectinload(FailoverGroup.origins), selectinload(Origin.probe_states))
@@ -190,15 +159,6 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
         .filter(Origin.enabled.is_(True))
         .all()
     )
-    if is_china_agent:
-        pool_items = []
-    else:
-        pool_items = (
-            db.query(TargetPoolItem)
-            .options(selectinload(TargetPoolItem.probe_states))
-            .filter(TargetPoolItem.enabled.is_(True))
-            .all()
-        )
     stale_before = datetime.utcnow() - timedelta(seconds=max(settings.check_interval_seconds * 3, 90))
     agents_by_region = _same_region_agents_by_region(active_agents(db, stale_before))
     same_region_agents = agents_by_region.get(agent_region(agent), [])
@@ -226,13 +186,6 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
             continue
         if _should_agent_probe_target(agent, same_region_agents, origin, stale_before):
             add_task(origin.id, origin.target, origin.port)
-    now = datetime.utcnow()
-    for item in pool_items:
-        if not target_pool_check_due(item, now, _agent_source_key(agent)):
-            continue
-        pool_stale_before = target_pool_stale_before(item)
-        if _should_agent_probe_pool_item(agent, same_region_agents, item, pool_stale_before):
-            add_task(0, item.target, item.port)
     db.commit()
     return AgentTasksResponse(interval_seconds=settings.check_interval_seconds, tasks=tasks)
 
@@ -247,7 +200,6 @@ def agent_results(payload: AgentResultsIn, request: Request, agent: Agent = Depe
         .filter(Origin.enabled.is_(True))
         .all()
     )
-    pool_items = db.query(TargetPoolItem).filter(TargetPoolItem.enabled.is_(True)).all()
     processed_keys: set[tuple[str, int]] = set()
     for item in payload.results:
         key = _probe_key(item.target, item.port)
@@ -268,16 +220,6 @@ def agent_results(payload: AgentResultsIn, request: Request, agent: Agent = Depe
                 agent=agent,
                 target=item.target,
                 port=item.port,
-            )
-        for pool_item in _matching_pool_items_for_probe(pool_items, item.target, item.port):
-            apply_target_pool_probe_result(
-                db,
-                pool_item,
-                item.success,
-                item.rtt_ms,
-                item.error,
-                source_key=f"agent:{agent.id}",
-                agent=agent,
             )
     db.commit()
     return Message(message="探测结果已接收")

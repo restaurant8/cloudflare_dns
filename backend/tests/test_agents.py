@@ -184,7 +184,7 @@ def test_china_agent_tasks_include_first_candidate_when_current_is_unhealthy():
     assert "192.0.2.30" not in {task.target for task in response.tasks}
 
 
-def test_china_agent_tasks_skip_target_pool_items():
+def test_agent_tasks_skip_target_pool_items():
     db = make_session()
     china_agent = Agent(name="china", region="china", token_hash="hash", status="online", last_seen_at=datetime.utcnow())
     foreign_agent = Agent(name="foreign", region="foreign", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow())
@@ -196,4 +196,4 @@ def test_china_agent_tasks_skip_target_pool_items():
     foreign_response = agent_tasks(request(), agent=foreign_agent, db=db)
 
     assert china_response.tasks == []
-    assert [(task.origin_id, task.target, task.port) for task in foreign_response.tasks] == [(0, "198.51.100.10", 22)]
+    assert foreign_response.tasks == []
