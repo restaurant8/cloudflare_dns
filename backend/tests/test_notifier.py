@@ -51,6 +51,13 @@ def test_important_telegram_level_skips_noisy_origin_status_changes():
     assert should_send_telegram(channel, "agent.status_changed", {"status": "online"}) is False
 
 
+def test_critical_telegram_level_includes_dns_switches():
+    channel = SimpleNamespace(notify_level="critical")
+
+    assert should_send_telegram(channel, "dns.switched", {"hostname": "www.example.com"}) is True
+    assert should_send_telegram(channel, "origin.status_changed", {"status": "blocked"}) is False
+
+
 def test_all_telegram_level_includes_origin_status_changes():
     channel = SimpleNamespace(notify_level="all")
 

@@ -98,7 +98,7 @@ const eventTypeLabels: Record<string, string> = {
 
 const telegramNotifyLevelLabels: Record<string, string> = {
   important: "重要通知",
-  critical: "仅故障",
+  critical: "故障和切换",
   all: "全部通知"
 };
 
@@ -2651,7 +2651,7 @@ function NotificationsPanel({
             通知级别
             <select value={telegramNotifyLevel} onChange={(event) => setTelegramNotifyLevel(event.target.value)}>
               <option value="important">重要通知：DNS 切换、故障、探针离线</option>
-              <option value="critical">仅故障：失败、无可用源站、探针离线</option>
+              <option value="critical">故障和切换：DNS 切换、失败、无可用源站、探针离线</option>
               <option value="all">全部通知：包含源站健康/被墙变化</option>
             </select>
           </label>
@@ -2670,7 +2670,7 @@ function NotificationsPanel({
                       <input value={telegramEdit.bot_token} onChange={(event) => setTelegramEdit((current) => ({ ...current, bot_token: event.target.value }))} placeholder="新 Bot Token，留空不修改" />
                       <select value={telegramEdit.notify_level} onChange={(event) => setTelegramEdit((current) => ({ ...current, notify_level: event.target.value }))}>
                         <option value="important">重要通知</option>
-                        <option value="critical">仅故障</option>
+                        <option value="critical">故障和切换</option>
                         <option value="all">全部通知</option>
                       </select>
                       <label className="inlineCheck">

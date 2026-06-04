@@ -53,7 +53,7 @@ TELEGRAM_EVENT_PRIORITIES = {
     "origin.status_changed": 10,
     "agent.status_changed": 10,
     "cloudflare.synced": 10,
-    "dns.switched": 20,
+    "dns.switched": 30,
     "dns.publish_failed": 30,
     "failover.no_healthy_origin": 30,
     "cloudflare.sync_failed": 30,
