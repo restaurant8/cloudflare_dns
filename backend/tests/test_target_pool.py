@@ -7,8 +7,8 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.health import LOCAL_SOURCE, run_target_pool_checks
 from app.models import Agent, CloudflareCredential, FailoverGroup, Origin, ProbeState, TargetPoolItem, TargetPoolProbeState, User, Zone
-from app.routes.target_pool import bulk_create_target_pool_items, create_target_pool_item
-from app.schemas import TargetPoolBulkCreate, TargetPoolCreate, TargetPoolOut
+from app.routes.target_pool import assign_target_pool_to_groups, bulk_create_target_pool_items, create_target_pool_item
+from app.schemas import TargetPoolAssignToGroupsRequest, TargetPoolBulkCreate, TargetPoolCreate, TargetPoolOut
 from app.security import encrypt_secret
 
 
@@ -146,3 +146,61 @@ def test_bulk_create_target_pool_items_skips_duplicates_and_reports_invalid():
     assert result.skipped == 1
     assert result.failed == 1
     assert db.query(TargetPoolItem).filter(TargetPoolItem.target == "1.1.1.1").one().remark == "cf"
+
+
+def test_assign_target_pool_items_to_selected_groups_skips_existing():
+    db = make_session()
+    user = User(username="admin", password_hash="hash")
+    credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
+    db.add_all([user, credential])
+    db.flush()
+    zone = Zone(credential_id=credential.id, cf_zone_id="zone-1", name="example.com")
+    db.add(zone)
+    db.flush()
+    group_one = FailoverGroup(zone_id=zone.id, hostname="a.example.com")
+    group_two = FailoverGroup(zone_id=zone.id, hostname="b.example.com")
+    db.add_all([group_one, group_two])
+    db.flush()
+    pool_one = TargetPoolItem(target="192.0.2.10", target_type="ipv4", port=22, remark="node-1")
+    pool_two = TargetPoolItem(target="2001:db8::10", target_type="ipv6", port=22, remark="node-2")
+    db.add_all([pool_one, pool_two])
+    db.flush()
+    db.add(Origin(group_id=group_one.id, target=pool_one.target, target_type=pool_one.target_type, port=pool_one.port, priority=5))
+    db.commit()
+
+    result = assign_target_pool_to_groups(
+        TargetPoolAssignToGroupsRequest(item_ids=[pool_one.id, pool_two.id], group_ids=[group_one.id, group_two.id], priority=30),
+        user,
+        db,
+    )
+
+    assert result.created == 3
+    assert result.skipped == 1
+    created_origin = db.query(Origin).filter(Origin.group_id == group_one.id, Origin.target == pool_two.target).one()
+    assert created_origin.priority == 30
+    assert created_origin.remark == "node-2"
+
+
+def test_assign_target_pool_items_rejects_self_hostname_target():
+    db = make_session()
+    user = User(username="admin", password_hash="hash")
+    credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
+    db.add_all([user, credential])
+    db.flush()
+    zone = Zone(credential_id=credential.id, cf_zone_id="zone-1", name="example.com")
+    db.add(zone)
+    db.flush()
+    group = FailoverGroup(zone_id=zone.id, hostname="a.example.com")
+    pool_item = TargetPoolItem(target="a.example.com", target_type="hostname", port=443)
+    db.add_all([group, pool_item])
+    db.commit()
+
+    result = assign_target_pool_to_groups(
+        TargetPoolAssignToGroupsRequest(item_ids=[pool_item.id], group_ids=[group.id], priority=10),
+        user,
+        db,
+    )
+
+    assert result.created == 0
+    assert result.failed == 1
+    assert "主机名相同" in (result.results[0].message or "")

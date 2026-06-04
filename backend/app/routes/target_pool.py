@@ -5,8 +5,20 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import parse_target
 from ..health import run_target_pool_checks
-from ..models import TargetPoolItem, TargetPoolProbeState, User
-from ..schemas import Message, TargetPoolBulkCreate, TargetPoolBulkItemResult, TargetPoolBulkOut, TargetPoolCreate, TargetPoolOut, TargetPoolUpdate
+from ..models import FailoverGroup, Origin, TargetPoolItem, TargetPoolProbeState, User
+from ..origin_expansion import DIRECT_PUBLISH_MODE
+from ..schemas import (
+    Message,
+    TargetPoolAssignGroupResult,
+    TargetPoolAssignToGroupsOut,
+    TargetPoolAssignToGroupsRequest,
+    TargetPoolBulkCreate,
+    TargetPoolBulkItemResult,
+    TargetPoolBulkOut,
+    TargetPoolCreate,
+    TargetPoolOut,
+    TargetPoolUpdate,
+)
 
 
 router = APIRouter(prefix="/target-pool", tags=["target-pool"])
@@ -25,6 +37,12 @@ def _ensure_unique(db: Session, target: str, port: int, item_id: int | None = No
         query = query.filter(TargetPoolItem.id != item_id)
     if query.one_or_none():
         raise HTTPException(status_code=409, detail=f"{target}:{port} 已经在目标池中")
+
+
+def _group_hostname_values(group: FailoverGroup) -> set[str]:
+    values = {group.hostname}
+    values.update(hostname.hostname for hostname in group.hostnames)
+    return values
 
 
 @router.get("", response_model=list[TargetPoolOut])
@@ -101,6 +119,126 @@ def bulk_create_target_pool_items(payload: TargetPoolBulkCreate, _: User = Depen
 
     db.commit()
     return TargetPoolBulkOut(created=created, skipped=skipped, failed=failed, results=results)
+
+
+@router.post("/assign-to-groups", response_model=TargetPoolAssignToGroupsOut)
+def assign_target_pool_to_groups(payload: TargetPoolAssignToGroupsRequest, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    item_ids = list(dict.fromkeys(payload.item_ids))
+    group_ids = list(dict.fromkeys(payload.group_ids))
+    items = db.query(TargetPoolItem).filter(TargetPoolItem.id.in_(item_ids)).all()
+    items_by_id = {item.id: item for item in items}
+    missing_item_ids = [item_id for item_id in item_ids if item_id not in items_by_id]
+
+    if payload.all_groups:
+        groups = (
+            db.query(FailoverGroup)
+            .options(selectinload(FailoverGroup.hostnames), selectinload(FailoverGroup.origins))
+            .order_by(FailoverGroup.hostname.asc())
+            .all()
+        )
+    else:
+        if not group_ids:
+            raise HTTPException(status_code=400, detail="请选择至少一个故障切换组")
+        groups = (
+            db.query(FailoverGroup)
+            .options(selectinload(FailoverGroup.hostnames), selectinload(FailoverGroup.origins))
+            .filter(FailoverGroup.id.in_(group_ids))
+            .order_by(FailoverGroup.hostname.asc())
+            .all()
+        )
+
+    groups_by_id = {group.id: group for group in groups}
+    missing_group_ids = [] if payload.all_groups else [group_id for group_id in group_ids if group_id not in groups_by_id]
+    results: list[TargetPoolAssignGroupResult] = []
+    created = skipped = failed = 0
+
+    for item_id in missing_item_ids:
+        failed += 1
+        results.append(
+            TargetPoolAssignGroupResult(
+                group_id=0,
+                group_hostname="-",
+                target=f"pool:{item_id}",
+                port=0,
+                status="failed",
+                message="池子目标不存在",
+            )
+        )
+
+    for group_id in missing_group_ids:
+        failed += 1
+        results.append(
+            TargetPoolAssignGroupResult(
+                group_id=group_id,
+                group_hostname="-",
+                target="-",
+                port=0,
+                status="failed",
+                message="故障切换组不存在",
+            )
+        )
+
+    for group in groups:
+        existing_keys = {(origin.target, origin.port) for origin in group.origins}
+        for item_id in item_ids:
+            item = items_by_id.get(item_id)
+            if item is None:
+                continue
+            if item.target_type == "hostname" and item.target in _group_hostname_values(group):
+                failed += 1
+                results.append(
+                    TargetPoolAssignGroupResult(
+                        group_id=group.id,
+                        group_hostname=group.hostname,
+                        target=item.target,
+                        port=item.port,
+                        status="failed",
+                        message="域名目标不能和当前组主机名相同",
+                    )
+                )
+                continue
+            key = (item.target, item.port)
+            if key in existing_keys:
+                skipped += 1
+                results.append(
+                    TargetPoolAssignGroupResult(
+                        group_id=group.id,
+                        group_hostname=group.hostname,
+                        target=item.target,
+                        port=item.port,
+                        status="skipped",
+                        message="该组已存在相同目标",
+                    )
+                )
+                continue
+
+            origin = Origin(
+                group_id=group.id,
+                target=item.target,
+                target_type=item.target_type,
+                publish_mode=DIRECT_PUBLISH_MODE,
+                port=item.port,
+                priority=payload.priority,
+                remark=_normalize_remark(item.remark),
+                enabled=payload.enabled,
+            )
+            db.add(origin)
+            db.flush()
+            existing_keys.add(key)
+            created += 1
+            results.append(
+                TargetPoolAssignGroupResult(
+                    group_id=group.id,
+                    group_hostname=group.hostname,
+                    target=item.target,
+                    port=item.port,
+                    status="created",
+                    origin_id=origin.id,
+                )
+            )
+
+    db.commit()
+    return TargetPoolAssignToGroupsOut(created=created, skipped=skipped, failed=failed, results=results)
 
 
 @router.patch("/{item_id}", response_model=TargetPoolOut)

@@ -234,6 +234,31 @@ class TargetPoolBulkOut(BaseModel):
     results: list[TargetPoolBulkItemResult]
 
 
+class TargetPoolAssignToGroupsRequest(BaseModel):
+    item_ids: list[int] = Field(min_length=1, max_length=500)
+    all_groups: bool = False
+    group_ids: list[int] = Field(default_factory=list, max_length=500)
+    priority: int = Field(default=10, ge=0, le=100000)
+    enabled: bool = True
+
+
+class TargetPoolAssignGroupResult(BaseModel):
+    group_id: int
+    group_hostname: str
+    target: str
+    port: int
+    status: str
+    message: str | None = None
+    origin_id: int | None = None
+
+
+class TargetPoolAssignToGroupsOut(BaseModel):
+    created: int
+    skipped: int
+    failed: int
+    results: list[TargetPoolAssignGroupResult]
+
+
 class TargetPoolOut(BaseModel):
     id: int
     target: str

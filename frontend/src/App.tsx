@@ -616,7 +616,7 @@ export default function App() {
           <GroupsPanel token={token} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} act={act} />
         )}
         {section === "targetPool" && (
-          <TargetPoolPanel token={token} targetPool={targetPool} act={act} />
+          <TargetPoolPanel token={token} targetPool={targetPool} groups={groups} act={act} />
         )}
         {section === "externalIps" && (
           <ExternalIpsPanel token={token} externalIpSources={externalIpSources} externalIpItems={externalIpItems} act={act} />
@@ -952,7 +952,7 @@ function RecordsPanel({
   );
 }
 
-function TargetPoolPanel({ token, targetPool, act }: { token: string; targetPool: TargetPoolItem[]; act: ActionRunner }) {
+function TargetPoolPanel({ token, targetPool, groups, act }: { token: string; targetPool: TargetPoolItem[]; groups: FailoverGroup[]; act: ActionRunner }) {
   const [poolDraft, setPoolDraft] = useState<TargetPoolDraft>(defaultTargetPoolDraft);
   const [batchText, setBatchText] = useState("");
   const [batchPort, setBatchPort] = useState(22);
@@ -960,6 +960,13 @@ function TargetPoolPanel({ token, targetPool, act }: { token: string; targetPool
   const [batchRemark, setBatchRemark] = useState("");
   const [editingPoolId, setEditingPoolId] = useState<number | null>(null);
   const [poolEdits, setPoolEdits] = useState<Record<number, TargetPoolDraft>>({});
+  const [selectedPoolIds, setSelectedPoolIds] = useState<Set<number>>(new Set());
+  const [assignModalOpen, setAssignModalOpen] = useState(false);
+  const [assignAllGroups, setAssignAllGroups] = useState(true);
+  const [assignGroupIds, setAssignGroupIds] = useState<Set<number>>(new Set());
+  const [assignPriority, setAssignPriority] = useState(10);
+  const selectedPoolItems = targetPool.filter((item) => selectedPoolIds.has(item.id));
+  const allPoolSelected = targetPool.length > 0 && targetPool.every((item) => selectedPoolIds.has(item.id));
 
   async function createPoolItem(event: FormEvent) {
     event.preventDefault();
@@ -1061,6 +1068,94 @@ function TargetPoolPanel({ token, targetPool, act }: { token: string; targetPool
     );
   }
 
+  function togglePoolSelected(itemId: number) {
+    setSelectedPoolIds((current) => {
+      const next = new Set(current);
+      if (next.has(itemId)) {
+        next.delete(itemId);
+      } else {
+        next.add(itemId);
+      }
+      return next;
+    });
+  }
+
+  function toggleAllPoolSelected() {
+    setSelectedPoolIds((current) => {
+      if (targetPool.length > 0 && targetPool.every((item) => current.has(item.id))) {
+        return new Set();
+      }
+      return new Set(targetPool.map((item) => item.id));
+    });
+  }
+
+  async function openAssignModal() {
+    if (selectedPoolItems.length === 0) {
+      await act(async () => {
+        throw new Error("请先选择要加入故障组的池子目标");
+      });
+      return;
+    }
+    if (groups.length === 0) {
+      await act(async () => {
+        throw new Error("还没有可加入的故障切换组");
+      });
+      return;
+    }
+    setAssignAllGroups(true);
+    setAssignGroupIds(new Set(groups.map((group) => group.id)));
+    setAssignModalOpen(true);
+  }
+
+  function toggleAssignGroup(groupId: number) {
+    setAssignGroupIds((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
+  }
+
+  function toggleAssignAllVisibleGroups() {
+    setAssignGroupIds((current) => {
+      if (groups.length > 0 && groups.every((group) => current.has(group.id))) {
+        return new Set();
+      }
+      return new Set(groups.map((group) => group.id));
+    });
+  }
+
+  async function assignSelectedPoolToGroups() {
+    const groupIds = Array.from(assignGroupIds);
+    if (!assignAllGroups && groupIds.length === 0) {
+      await act(async () => {
+        throw new Error("请选择至少一个故障切换组");
+      });
+      return;
+    }
+    await act(
+      () =>
+        apiFetch("/api/target-pool/assign-to-groups", token, {
+          method: "POST",
+          body: JSON.stringify({
+            item_ids: selectedPoolItems.map((item) => item.id),
+            all_groups: assignAllGroups,
+            group_ids: assignAllGroups ? [] : groupIds,
+            priority: assignPriority,
+            enabled: true
+          })
+        }),
+      "池子目标已加入故障组",
+      () => {
+        setAssignModalOpen(false);
+        setSelectedPoolIds(new Set());
+      }
+    );
+  }
+
   return (
     <section className="stack">
       <div className="panelTitle groupsIntro">
@@ -1136,6 +1231,17 @@ function TargetPoolPanel({ token, targetPool, act }: { token: string; targetPool
             <h2>池子列表</h2>
             <p>故障切换组里点击添加备用，即可从这里选择目标。</p>
           </div>
+          <div className="poolBulkBar">
+            <label className="inlineCheck">
+              <input type="checkbox" checked={allPoolSelected} onChange={toggleAllPoolSelected} disabled={targetPool.length === 0} />
+              全选池子目标
+            </label>
+            <span>已选 {selectedPoolItems.length}/{targetPool.length}</span>
+            <button className="secondary compactBtn" type="button" disabled={selectedPoolItems.length === 0 || groups.length === 0} onClick={openAssignModal}>
+              <Plus size={15} />
+              <span>加入故障组</span>
+            </button>
+          </div>
           <div className="poolList">
             {targetPool.map((item) => {
               const edit = poolEdits[item.id] || {
@@ -1147,6 +1253,9 @@ function TargetPoolPanel({ token, targetPool, act }: { token: string; targetPool
               };
               return (
                 <div className="poolItem" key={item.id}>
+                  <label className="poolSelectCheck" title="选择这个池子目标">
+                    <input type="checkbox" checked={selectedPoolIds.has(item.id)} onChange={() => togglePoolSelected(item.id)} />
+                  </label>
                   {editingPoolId === item.id ? (
                     <>
                       <div className="poolEditGrid">
@@ -1205,6 +1314,62 @@ function TargetPoolPanel({ token, targetPool, act }: { token: string; targetPool
           </div>
         </div>
       </div>
+      {assignModalOpen && (
+        <div className="modalBackdrop" role="dialog" aria-modal="true">
+          <div className="modalPanel wideModal">
+            <div className="panelTitle">
+              <h2>池子目标加入故障组</h2>
+              <p>把已选择的池子目标批量加入为备用源站；同组已存在的相同 IP/端口会自动跳过。</p>
+            </div>
+            <div className="bulkAssignSummary">
+              <span>已选池子目标</span>
+              <div>
+                {selectedPoolItems.map((item) => (
+                  <code key={item.id}>{displayTargetWithRemark(item.target, item.port, item.remark)}</code>
+                ))}
+              </div>
+            </div>
+            <div className="modalFormGrid">
+              <label>
+                统一优先级
+                <input type="number" min={0} max={100000} value={assignPriority} onChange={(event) => setAssignPriority(Number(event.target.value))} />
+              </label>
+              <label className="inlineCheck assignAllCheck">
+                <input type="checkbox" checked={assignAllGroups} onChange={(event) => setAssignAllGroups(event.target.checked)} />
+                加入所有故障切换组
+              </label>
+            </div>
+            {!assignAllGroups && (
+              <div className="groupPicker">
+                <div className="groupPickerHead">
+                  <strong>选择故障切换组</strong>
+                  <button type="button" className="miniBtn" onClick={toggleAssignAllVisibleGroups}>
+                    {groups.every((group) => assignGroupIds.has(group.id)) ? "取消全选" : "全选"}
+                  </button>
+                </div>
+                <div className="groupPickerList">
+                  {groups.map((group) => (
+                    <label className="groupPickerItem" key={group.id}>
+                      <input type="checkbox" checked={assignGroupIds.has(group.id)} onChange={() => toggleAssignGroup(group.id)} />
+                      <span>
+                        <strong>{group.hostname}</strong>
+                        <em>{group.enabled ? "已启用" : "已停用"} · 源站 {group.origins.length} 个</em>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="modalActions">
+              <button type="button" className="secondary" onClick={() => setAssignModalOpen(false)}>取消</button>
+              <button type="button" onClick={assignSelectedPoolToGroups}>
+                <Plus size={16} />
+                <span>确认加入</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

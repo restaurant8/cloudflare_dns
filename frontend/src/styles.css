@@ -623,6 +623,26 @@ form.panel {
   margin-top: 12px;
 }
 
+.poolBulkBar {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid #dfe6ee;
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 10px 12px;
+}
+
+.poolBulkBar > span {
+  color: #667789;
+  font-size: 12px;
+  font-weight: 800;
+  margin-right: auto;
+}
+
 .poolItem,
 .externalSourceItem {
   align-items: center;
@@ -631,8 +651,25 @@ form.panel {
   border-radius: 8px;
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto;
   padding: 10px 12px;
+}
+
+.poolItem {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.externalSourceItem {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.poolSelectCheck {
+  align-items: center;
+  display: inline-flex;
+}
+
+.poolSelectCheck input {
+  min-height: auto;
+  width: auto;
 }
 
 .externalSourceList {
@@ -727,6 +764,99 @@ form.panel {
   font-size: 12px;
   margin-top: 3px;
   overflow-wrap: anywhere;
+}
+
+.wideModal {
+  max-width: 760px;
+}
+
+.bulkAssignSummary {
+  background: #f8fafc;
+  border: 1px solid #dfe6ee;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.bulkAssignSummary > span {
+  color: #667789;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.bulkAssignSummary > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bulkAssignSummary code {
+  background: #e9eff6;
+  border-radius: 999px;
+  color: #26374a;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 4px 8px;
+}
+
+.assignAllCheck {
+  align-self: end;
+  min-height: 38px;
+}
+
+.groupPicker {
+  border: 1px solid #dfe6ee;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.groupPickerHead {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.groupPickerHead strong {
+  font-size: 13px;
+}
+
+.groupPickerList {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.groupPickerItem {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid #e4e9ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 8px 10px;
+}
+
+.groupPickerItem input {
+  min-height: auto;
+  width: auto;
+}
+
+.groupPickerItem strong,
+.groupPickerItem em {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.groupPickerItem em {
+  color: #667789;
+  font-size: 12px;
+  font-style: normal;
+  margin-top: 2px;
 }
 
 .poolEditGrid {
