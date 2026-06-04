@@ -1881,9 +1881,9 @@ function GroupsPanel({
               </select>
             </label>
             <label>
-              从外部健康 IP 选择
+              从外部 IP 选择
               <select value={selectedExternalItemId} onChange={(event) => selectExternalIpItem(Number(event.target.value))} disabled={healthyExternalItems.length === 0}>
-                <option value="">{healthyExternalItems.length > 0 ? "选择一个已同步的健康 IP" : "暂无外部健康 IP"}</option>
+                <option value="">{healthyExternalItems.length > 0 ? "选择一个已同步 IP" : "暂无外部 IP"}</option>
                 {healthyExternalItems.map((item) => (
                   <option value={item.id} key={item.id}>
                     {externalIpLabel(item)}
@@ -2082,8 +2082,8 @@ function ExternalIpsPanel({
   return (
     <section className="stack">
       <div className="panelTitle groupsIntro">
-        <h2>外部健康 IP</h2>
-        <p>从 Nyanpass 服务器状态页同步在线节点 IP，添加备用时可直接选择。</p>
+        <h2>外部 IP</h2>
+        <p>从 Nyanpass 服务器状态页同步节点 IP，添加备用时可直接选择。</p>
       </div>
       <div className="externalIpPanel">
         <form className="panel externalSourceForm" onSubmit={createExternalIpSource}>
@@ -2120,8 +2120,8 @@ function ExternalIpsPanel({
         </form>
         <div className="panel externalIpListPanel">
           <div className="panelTitle">
-            <h2>来源与健康列表</h2>
-            <p>只显示在线且公网可用的 IPv4 / IPv6。来源同步后会自动刷新。</p>
+            <h2>来源与同步列表</h2>
+            <p>显示外部来源返回的 IPv4 / IPv6。来源同步后会自动刷新。</p>
           </div>
           <div className="externalSourceList">
             {externalIpSources.map((source) => {
@@ -2181,7 +2181,7 @@ function ExternalIpsPanel({
                       </div>
                       <div className="rowActions">
                         <Status value={source.enabled ? source.status : "disabled"} />
-                        <button className="icon secondaryIcon" title="立即同步" onClick={() => act(() => apiFetch(`/api/external-ips/sources/${source.id}/sync`, token, { method: "POST" }), "外部健康 IP 已同步")}>
+                        <button className="icon secondaryIcon" title="立即同步" onClick={() => act(() => apiFetch(`/api/external-ips/sources/${source.id}/sync`, token, { method: "POST" }), "外部 IP 已同步")}>
                           <RefreshCw size={15} />
                         </button>
                         <button className="icon secondaryIcon" title="修改来源" onClick={() => beginEditExternalIpSource(source)}>
@@ -2226,7 +2226,7 @@ function ExternalIpsPanel({
                 </div>
               </div>
             ))}
-            {externalMachines.length === 0 && <span className="emptyInline">暂无外部健康 IP</span>}
+            {externalMachines.length === 0 && <span className="emptyInline">暂无外部 IP</span>}
           </div>
         </div>
       </div>
@@ -2420,7 +2420,7 @@ function SettingsPanel({ token, settings, act }: { token: string; settings: Syst
     },
     {
       title: "通知与外部来源",
-      description: "控制无健康源站通知防抖，以及 Nyanpass 等外部健康 IP 来源的默认拉取周期。",
+      description: "控制无健康源站通知防抖，以及 Nyanpass 等外部 IP 来源的默认拉取周期。",
       fields: [
         { key: "no_healthy_notification_interval_seconds", label: "无健康源站通知间隔", min: 60, max: 86400, hint: "秒" },
         { key: "external_ip_sync_interval_seconds", label: "外部 IP 默认拉取周期", min: 60, max: 86400, hint: "秒" }

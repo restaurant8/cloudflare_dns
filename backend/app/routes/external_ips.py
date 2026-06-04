@@ -83,7 +83,7 @@ def sync_external_ip_source_route(source_id: int, _: User = Depends(get_current_
         db.commit()
         raise HTTPException(status_code=400, detail=f"同步失败: {exc}") from exc
     db.commit()
-    return Message(message="外部健康 IP 已同步", detail={"count": count})
+    return Message(message="外部 IP 已同步", detail={"count": count})
 
 
 @router.get("/items", response_model=list[ExternalIpItemOut])
