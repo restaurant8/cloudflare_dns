@@ -83,6 +83,28 @@ def _should_agent_probe_pool_item(agent: Agent, same_region_agents: list[Agent],
     return True
 
 
+def _china_agent_origin_ids(origins: list[Origin]) -> set[int]:
+    origins_by_group: dict[int, list[Origin]] = {}
+    for origin in origins:
+        if not origin.group or not origin.group.enabled or not origin.enabled:
+            continue
+        origins_by_group.setdefault(origin.group_id, []).append(origin)
+
+    allowed: set[int] = set()
+    for group_origins in origins_by_group.values():
+        group = group_origins[0].group
+        sorted_origins = sorted(group_origins, key=lambda item: (item.priority, item.id))
+        current = next((origin for origin in sorted_origins if origin.id == group.current_origin_id), None)
+        if current is not None:
+            allowed.add(current.id)
+        for candidate in sorted_origins:
+            if current is not None and candidate.id == current.id:
+                continue
+            allowed.add(candidate.id)
+            break
+    return allowed
+
+
 def _matching_origins_for_probe(origins: list[Origin], target: str, port: int) -> list[Origin]:
     matches: list[Origin] = []
     normalized_target = _normalized_probe_target(target)
@@ -182,6 +204,7 @@ def delete_agent(agent_id: int, _: User = Depends(get_current_user), db: Session
 def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session = Depends(get_db)):
     settings = get_runtime_settings(db)
     mark_agent_online(db, agent, client_ip_from_request(request))
+    is_china_agent = agent_region(agent) == "china"
     origins = (
         db.query(Origin)
         .options(selectinload(Origin.group).selectinload(FailoverGroup.origins), selectinload(Origin.probe_states))
@@ -189,12 +212,17 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
         .filter(Origin.enabled.is_(True))
         .all()
     )
-    pool_items = (
-        db.query(TargetPoolItem)
-        .options(selectinload(TargetPoolItem.probe_states))
-        .filter(TargetPoolItem.enabled.is_(True))
-        .all()
-    )
+    if is_china_agent:
+        allowed_origin_ids = _china_agent_origin_ids(origins)
+        origins = [origin for origin in origins if origin.id in allowed_origin_ids]
+        pool_items = []
+    else:
+        pool_items = (
+            db.query(TargetPoolItem)
+            .options(selectinload(TargetPoolItem.probe_states))
+            .filter(TargetPoolItem.enabled.is_(True))
+            .all()
+        )
     stale_before = datetime.utcnow() - timedelta(seconds=max(settings.check_interval_seconds * 3, 90))
     agents_by_region = _same_region_agents_by_region(active_agents(db, stale_before))
     same_region_agents = agents_by_region.get(agent_region(agent), [])
