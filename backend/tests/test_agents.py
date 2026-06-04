@@ -129,7 +129,7 @@ def test_agent_tasks_use_second_same_region_probe_after_first_fails():
     assert response.tasks[0].target == current.target
 
 
-def test_china_agent_tasks_only_include_current_and_next_candidate_origins():
+def test_china_agent_tasks_only_include_current_origin_when_current_is_healthy():
     db = make_session()
     credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
     db.add(credential)
@@ -142,6 +142,32 @@ def test_china_agent_tasks_only_include_current_and_next_candidate_origins():
     db.flush()
     primary = Origin(group_id=group.id, target="192.0.2.10", target_type="ipv4", port=443, priority=1)
     current = Origin(group_id=group.id, target="192.0.2.20", target_type="ipv4", port=443, priority=5)
+    later_backup = Origin(group_id=group.id, target="192.0.2.30", target_type="ipv4", port=443, priority=10)
+    agent = Agent(name="china", region="china", token_hash="hash", status="online", last_seen_at=datetime.utcnow())
+    db.add_all([primary, current, later_backup, agent])
+    db.flush()
+    group.current_origin_id = current.id
+    db.commit()
+
+    response = agent_tasks(request(), agent=agent, db=db)
+
+    assert {(task.target, task.port) for task in response.tasks} == {("192.0.2.20", 443)}
+    assert "192.0.2.30" not in {task.target for task in response.tasks}
+
+
+def test_china_agent_tasks_include_first_candidate_when_current_is_unhealthy():
+    db = make_session()
+    credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
+    db.add(credential)
+    db.flush()
+    zone = Zone(credential_id=credential.id, cf_zone_id="zone-1", name="example.com")
+    db.add(zone)
+    db.flush()
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com")
+    db.add(group)
+    db.flush()
+    primary = Origin(group_id=group.id, target="192.0.2.10", target_type="ipv4", port=443, priority=1)
+    current = Origin(group_id=group.id, target="192.0.2.20", target_type="ipv4", port=443, priority=5, status="machine_down")
     later_backup = Origin(group_id=group.id, target="192.0.2.30", target_type="ipv4", port=443, priority=10)
     agent = Agent(name="china", region="china", token_hash="hash", status="online", last_seen_at=datetime.utcnow())
     db.add_all([primary, current, later_backup, agent])

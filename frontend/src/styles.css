@@ -1213,6 +1213,11 @@ form.panel {
   color: #516070;
 }
 
+.status.standby {
+  background: #e9eff6;
+  color: #425466;
+}
+
 .status.healthy,
 .status.enabled,
 .status.online,

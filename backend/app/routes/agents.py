@@ -83,33 +83,11 @@ def _should_agent_probe_pool_item(agent: Agent, same_region_agents: list[Agent],
     return True
 
 
-def _china_agent_origin_ids(origins: list[Origin]) -> set[int]:
-    origins_by_group: dict[int, list[Origin]] = {}
-    for origin in origins:
-        if not origin.group or not origin.group.enabled or not origin.enabled:
-            continue
-        origins_by_group.setdefault(origin.group_id, []).append(origin)
-
-    allowed: set[int] = set()
-    for group_origins in origins_by_group.values():
-        group = group_origins[0].group
-        sorted_origins = sorted(group_origins, key=lambda item: (item.priority, item.id))
-        current = next((origin for origin in sorted_origins if origin.id == group.current_origin_id), None)
-        if current is not None:
-            allowed.add(current.id)
-        for candidate in sorted_origins:
-            if current is not None and candidate.id == current.id:
-                continue
-            allowed.add(candidate.id)
-            break
-    return allowed
-
-
 def _matching_origins_for_probe(origins: list[Origin], target: str, port: int) -> list[Origin]:
     matches: list[Origin] = []
     normalized_target = _normalized_probe_target(target)
     for origin in origins:
-        if not origin.group.enabled or not origin_needs_probe(origin):
+        if not origin.group.enabled:
             continue
         if origin.port != port:
             continue
@@ -213,8 +191,6 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
         .all()
     )
     if is_china_agent:
-        allowed_origin_ids = _china_agent_origin_ids(origins)
-        origins = [origin for origin in origins if origin.id in allowed_origin_ids]
         pool_items = []
     else:
         pool_items = (

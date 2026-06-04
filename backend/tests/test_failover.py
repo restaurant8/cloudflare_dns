@@ -268,8 +268,52 @@ def test_evaluate_probes_group_before_switching_from_failed_current(monkeypatch)
     switches = evaluate_failover_groups(db)
 
     assert switches == 1
-    assert calls == [(group.id, True)]
+    assert calls == [(group.id, False)]
     assert group.current_origin_id == backup.id
+
+
+def test_evaluate_keeps_healthy_current_even_if_higher_priority_backup_has_old_healthy_status(monkeypatch):
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    higher_priority_backup = Origin(group_id=group.id, target="192.0.2.20", target_type="ipv4", port=443, status="healthy", priority=1)
+    current.priority = 10
+    group.current_origin_id = current.id
+    db.add(higher_priority_backup)
+    db.commit()
+
+    def fail_publish(*args, **kwargs):
+        raise AssertionError("should not publish")
+
+    monkeypatch.setattr("app.failover.publish_origin", fail_publish)
+
+    switches = evaluate_failover_groups(db)
+
+    assert switches == 0
+    assert group.current_origin_id == current.id
+
+
+def test_evaluate_does_not_skip_first_candidate_to_later_old_healthy_backup(monkeypatch):
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    first_backup = Origin(group_id=group.id, target="192.0.2.20", target_type="ipv4", port=443, status="machine_down", priority=1)
+    later_backup = Origin(group_id=group.id, target="192.0.2.30", target_type="ipv4", port=443, status="healthy", priority=2)
+    current.status = "machine_down"
+    current.priority = 0
+    group.current_origin_id = current.id
+    db.add_all([first_backup, later_backup])
+    db.commit()
+
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
+    def fail_publish(*args, **kwargs):
+        raise AssertionError("should not publish")
+
+    monkeypatch.setattr("app.failover.publish_origin", fail_publish)
+
+    switches = evaluate_failover_groups(db)
+
+    assert switches == 0
+    assert group.current_origin_id == current.id
 
 
 def test_no_healthy_origin_notification_is_throttled(monkeypatch):
