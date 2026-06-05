@@ -1,14 +1,70 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from ..cloudflare import CloudflareClient, CloudflareError
 from ..database import get_db
 from ..deps import get_current_user
-from ..models import DnsRecord, User, Zone
-from ..schemas import DnsRecordOut, Message, ZoneOut
+from ..dns_utils import normalize_hostname, parse_target
+from ..models import DnsRecord, FailoverGroup, User, Zone
+from ..schemas import DnsRecordOut, DnsRecordUpdate, Message, ZoneOut
+from ..security import decrypt_secret
 from ..sync import sync_zone_records
 
 
 router = APIRouter(prefix="/zones", tags=["zones"])
+
+
+def _record_ids(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
+def _failover_owner_for_record(db: Session, record: DnsRecord) -> str | None:
+    groups = db.query(FailoverGroup).filter(FailoverGroup.zone_id == record.zone_id).all()
+    for group in groups:
+        if record.cf_record_id in _record_ids(group.current_record_id):
+            return group.hostname
+        for hostname in group.hostnames:
+            if record.cf_record_id in _record_ids(hostname.current_record_id):
+                return hostname.hostname
+    return None
+
+
+def _normalize_record_name(value: str, zone: Zone) -> str:
+    cleaned = value.strip()
+    if cleaned == "@":
+        cleaned = zone.name
+    elif "." not in cleaned.rstrip("."):
+        cleaned = f"{cleaned}.{zone.name}"
+    hostname = normalize_hostname(cleaned)
+    zone_name = zone.name.rstrip(".").lower()
+    if hostname != zone_name and not hostname.endswith(f".{zone_name}"):
+        raise HTTPException(status_code=400, detail="记录名称必须属于当前域名区域")
+    return hostname
+
+
+def _normalize_record_content(record_type: str, value: str, record_name: str) -> str:
+    try:
+        target = parse_target(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if target.record_type != record_type:
+        raise HTTPException(status_code=400, detail=f"内容会被识别为 {target.record_type}，请把类型改为 {target.record_type} 或修改内容")
+    if record_type == "CNAME" and target.value.rstrip(".").lower() == record_name.rstrip(".").lower():
+        raise HTTPException(status_code=400, detail="CNAME 目标不能和记录名称相同")
+    return target.value
+
+
+def _apply_cloudflare_record(record: DnsRecord, payload: dict) -> None:
+    record.name = payload.get("name") or record.name
+    record.type = payload.get("type") or record.type
+    record.content = payload.get("content") or record.content
+    record.ttl = int(payload.get("ttl") or record.ttl)
+    record.proxied = bool(payload.get("proxied", record.proxied))
+    record.synced_at = datetime.utcnow()
 
 
 @router.get("", response_model=list[ZoneOut])
@@ -22,6 +78,41 @@ def search_records(zone_id: int = Query(...), q: str = Query(default=""), _: Use
     if q:
         query = query.filter(DnsRecord.name.contains(q))
     return query.order_by(DnsRecord.name.asc()).limit(100).all()
+
+
+@router.patch("/records/{record_id}", response_model=DnsRecordOut)
+def update_record(record_id: int, payload: DnsRecordUpdate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    record = db.get(DnsRecord, record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="解析记录不存在")
+
+    owner_hostname = _failover_owner_for_record(db, record)
+    if owner_hostname:
+        raise HTTPException(status_code=409, detail=f"该记录已由故障切换组托管（{owner_hostname}），请到故障切换里修改源站")
+
+    zone = record.zone
+    record_name = _normalize_record_name(payload.name, zone)
+    content = _normalize_record_content(payload.type, payload.content, record_name)
+    if payload.ttl != 1 and payload.ttl < 60:
+        raise HTTPException(status_code=400, detail="TTL 必须为 1（自动）或至少 60 秒")
+
+    client = CloudflareClient(decrypt_secret(zone.credential.token_encrypted))
+    body = {
+        "type": payload.type,
+        "name": record_name,
+        "content": content,
+        "ttl": payload.ttl,
+        "proxied": record.proxied,
+    }
+    try:
+        updated = client.update_dns_record(zone.cf_zone_id, record.cf_record_id, body)
+    except CloudflareError as exc:
+        raise HTTPException(status_code=502, detail=f"Cloudflare 更新失败：{exc}") from exc
+
+    _apply_cloudflare_record(record, updated)
+    db.commit()
+    db.refresh(record)
+    return record
 
 
 @router.get("/{zone_id}/records", response_model=list[DnsRecordOut])

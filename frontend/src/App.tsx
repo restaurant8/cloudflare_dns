@@ -34,6 +34,8 @@ type OriginAddDraft = { target: string; port: number; priority: number; publish_
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
 type HostnameAddDraft = { hostname: string; adopt_record_id: string };
+type DnsRecordType = "A" | "AAAA" | "CNAME";
+type DnsRecordEditDraft = { name: string; type: DnsRecordType; content: string; ttl: number };
 type TargetPoolDraft = { target: string; port: number; remark: string; check_interval_seconds: number; enabled: boolean };
 type ExternalIpSourceDraft = { name: string; base_url: string; token: string; default_port: number; sync_interval_seconds: number; enabled: boolean };
 type AgentEditDraft = { name: string };
@@ -116,6 +118,15 @@ function agentRegionText(value: string): string {
 
 function telegramNotifyLevelText(value: string): string {
   return telegramNotifyLevelLabels[value] || value;
+}
+
+function guessDnsRecordType(value: string): DnsRecordType | null {
+  const cleaned = value.trim();
+  if (!cleaned) return null;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(cleaned)) return "A";
+  if (cleaned.includes(":")) return "AAAA";
+  if (/^[A-Za-z0-9.-]+\.[A-Za-z0-9-]+\.?$/.test(cleaned)) return "CNAME";
+  return null;
 }
 
 function recordTypeForTargetType(value: string, publishMode = "direct"): string {
@@ -249,6 +260,7 @@ const emptyOverview: Overview = {
 };
 
 const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", remark: "", enabled: true };
+const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
 const liveRefreshIntervalMs = 3000;
@@ -810,6 +822,8 @@ function RecordsPanel({
   const [zoneQuery, setZoneQuery] = useState("");
   const [manageRecord, setManageRecord] = useState<DnsRecord | null>(null);
   const [managePort, setManagePort] = useState(22);
+  const [editRecord, setEditRecord] = useState<DnsRecord | null>(null);
+  const [recordEdit, setRecordEdit] = useState<DnsRecordEditDraft>({ name: "", type: "A", content: "", ttl: 60 });
   const filteredZones = zones.filter((zone) => zoneMatches(zone, zoneQuery));
   const selectedZone = zones.find((zone) => zone.id === selectedZoneId);
   const normalizedQuery = query.trim().toLowerCase();
@@ -825,6 +839,39 @@ function RecordsPanel({
   function openManageRecord(record: DnsRecord) {
     setManageRecord(record);
     setManagePort(22);
+  }
+
+  function openEditRecord(record: DnsRecord) {
+    const recordType = dnsRecordTypes.includes(record.type as DnsRecordType) ? (record.type as DnsRecordType) : "A";
+    setEditRecord(record);
+    setRecordEdit({ name: record.name, type: recordType, content: record.content, ttl: record.ttl });
+  }
+
+  function updateRecordContent(value: string) {
+    const detectedType = guessDnsRecordType(value);
+    setRecordEdit((draft) => ({
+      ...draft,
+      content: value,
+      type: detectedType || draft.type
+    }));
+  }
+
+  async function saveRecordEdit() {
+    if (!editRecord) return;
+    await act(
+      () =>
+        apiFetch(`/api/zones/records/${editRecord.id}`, token, {
+          method: "PATCH",
+          body: JSON.stringify({
+            name: recordEdit.name.trim(),
+            type: recordEdit.type,
+            content: recordEdit.content.trim(),
+            ttl: Number(recordEdit.ttl)
+          })
+        }),
+      "解析记录已修改",
+      () => setEditRecord(null)
+    );
   }
 
   async function confirmManageRecord() {
@@ -906,9 +953,14 @@ function RecordsPanel({
               <td>{record.ttl}</td>
               <td>{record.proxied ? "已代理" : "仅 DNS"}</td>
               <td>
-                <button className="icon" title="管理" disabled={record.proxied} onClick={() => openManageRecord(record)}>
-                  <Link2 size={16} />
-                </button>
+                <div className="rowActions">
+                  <button className="icon secondaryIcon" title="修改记录" onClick={() => openEditRecord(record)}>
+                    <Pencil size={16} />
+                  </button>
+                  <button className="icon" title="管理" disabled={record.proxied} onClick={() => openManageRecord(record)}>
+                    <Link2 size={16} />
+                  </button>
+                </div>
               </td>
             </tr>
           ))}
@@ -919,6 +971,51 @@ function RecordsPanel({
           )}
         </tbody>
       </table>
+      {editRecord && (
+        <div className="modalBackdrop" role="dialog" aria-modal="true">
+          <div className="modalPanel">
+            <div className="panelTitle">
+              <h2>修改解析记录</h2>
+              <p>会直接修改 Cloudflare 上的记录，并保留当前代理状态。A/AAAA/CNAME 会按内容自动识别，也可以手动选择。</p>
+            </div>
+            <div className="modalFormGrid">
+              <label>
+                记录名称
+                <input value={recordEdit.name} onChange={(event) => setRecordEdit((draft) => ({ ...draft, name: event.target.value }))} placeholder="例如 www.example.com 或 @" />
+              </label>
+              <label>
+                类型
+                <select value={recordEdit.type} onChange={(event) => setRecordEdit((draft) => ({ ...draft, type: event.target.value as DnsRecordType }))}>
+                  {dnsRecordTypes.map((type) => (
+                    <option key={type} value={type}>{type}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                内容
+                <input value={recordEdit.content} onChange={(event) => updateRecordContent(event.target.value)} placeholder="IPv4、IPv6 或域名" />
+              </label>
+              <label>
+                TTL（秒）
+                <input type="number" min={1} max={86400} value={recordEdit.ttl} onChange={(event) => setRecordEdit((draft) => ({ ...draft, ttl: Number(event.target.value) }))} />
+              </label>
+            </div>
+            <div className="confirmRecordBox">
+              <span>记录 ID</span>
+              <strong>{editRecord.cf_record_id}</strong>
+              <span>代理状态</span>
+              <strong>{editRecord.proxied ? "已代理" : "仅 DNS"}</strong>
+            </div>
+            <div className="modalActions">
+              <button type="button" className="secondary" onClick={() => setEditRecord(null)}>取消</button>
+              <button type="button" onClick={saveRecordEdit}>
+                <Save size={16} />
+                <span>保存修改</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {manageRecord && (
         <div className="modalBackdrop" role="dialog" aria-modal="true">
           <div className="modalPanel">
