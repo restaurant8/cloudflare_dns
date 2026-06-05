@@ -100,11 +100,15 @@ class DnsRecordOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class DnsRecordUpdate(BaseModel):
+class DnsRecordCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     type: Literal["A", "AAAA", "CNAME"]
     content: str = Field(min_length=1, max_length=255)
     ttl: int = Field(ge=1, le=86400)
+
+
+class DnsRecordUpdate(DnsRecordCreate):
+    pass
 
 
 class FailoverGroupCreate(BaseModel):

@@ -822,6 +822,8 @@ function RecordsPanel({
   const [zoneQuery, setZoneQuery] = useState("");
   const [manageRecord, setManageRecord] = useState<DnsRecord | null>(null);
   const [managePort, setManagePort] = useState(22);
+  const [addRecordOpen, setAddRecordOpen] = useState(false);
+  const [recordAdd, setRecordAdd] = useState<DnsRecordEditDraft>({ name: "", type: "A", content: "", ttl: 60 });
   const [editRecord, setEditRecord] = useState<DnsRecord | null>(null);
   const [recordEdit, setRecordEdit] = useState<DnsRecordEditDraft>({ name: "", type: "A", content: "", ttl: 60 });
   const filteredZones = zones.filter((zone) => zoneMatches(zone, zoneQuery));
@@ -841,10 +843,24 @@ function RecordsPanel({
     setManagePort(22);
   }
 
+  function openAddRecord() {
+    setRecordAdd({ name: "", type: "A", content: "", ttl: 60 });
+    setAddRecordOpen(true);
+  }
+
   function openEditRecord(record: DnsRecord) {
     const recordType = dnsRecordTypes.includes(record.type as DnsRecordType) ? (record.type as DnsRecordType) : "A";
     setEditRecord(record);
     setRecordEdit({ name: record.name, type: recordType, content: record.content, ttl: record.ttl });
+  }
+
+  function updateAddRecordContent(value: string) {
+    const detectedType = guessDnsRecordType(value);
+    setRecordAdd((draft) => ({
+      ...draft,
+      content: value,
+      type: detectedType || draft.type
+    }));
   }
 
   function updateRecordContent(value: string) {
@@ -854,6 +870,24 @@ function RecordsPanel({
       content: value,
       type: detectedType || draft.type
     }));
+  }
+
+  async function saveRecordAdd() {
+    if (!selectedZoneId) return;
+    await act(
+      () =>
+        apiFetch(`/api/zones/${selectedZoneId}/records`, token, {
+          method: "POST",
+          body: JSON.stringify({
+            name: recordAdd.name.trim(),
+            type: recordAdd.type,
+            content: recordAdd.content.trim(),
+            ttl: Number(recordAdd.ttl)
+          })
+        }),
+      "解析记录已添加",
+      () => setAddRecordOpen(false)
+    );
   }
 
   async function saveRecordEdit() {
@@ -920,6 +954,10 @@ function RecordsPanel({
       </div>
       <div className="toolbar">
         <div className="selectedZoneLabel">当前域名：{selectedZone ? selectedZone.name : "未选择"}</div>
+        <button disabled={!selectedZoneId} onClick={openAddRecord}>
+          <Plus size={16} />
+          <span>添加解析</span>
+        </button>
         <button className="secondary" disabled={!selectedZoneId} onClick={() => act(() => apiFetch(`/api/zones/${selectedZoneId}/records/sync`, token, { method: "POST" }), "解析记录已同步")}>
           <RefreshCw size={16} />
           <span>同步</span>
@@ -971,6 +1009,51 @@ function RecordsPanel({
           )}
         </tbody>
       </table>
+      {addRecordOpen && (
+        <div className="modalBackdrop" role="dialog" aria-modal="true">
+          <div className="modalPanel">
+            <div className="panelTitle">
+              <h2>添加解析记录</h2>
+              <p>默认创建 DNS-only 记录。名称可填 @、www，或完整域名；内容支持 IPv4、IPv6 或域名。</p>
+            </div>
+            <div className="modalFormGrid">
+              <label>
+                记录名称
+                <input value={recordAdd.name} onChange={(event) => setRecordAdd((draft) => ({ ...draft, name: event.target.value }))} placeholder="例如 @、www 或 www.example.com" />
+              </label>
+              <label>
+                类型
+                <select value={recordAdd.type} onChange={(event) => setRecordAdd((draft) => ({ ...draft, type: event.target.value as DnsRecordType }))}>
+                  {dnsRecordTypes.map((type) => (
+                    <option key={type} value={type}>{type}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                内容
+                <input value={recordAdd.content} onChange={(event) => updateAddRecordContent(event.target.value)} placeholder="IPv4、IPv6 或域名" />
+              </label>
+              <label>
+                TTL（秒）
+                <input type="number" min={1} max={86400} value={recordAdd.ttl} onChange={(event) => setRecordAdd((draft) => ({ ...draft, ttl: Number(event.target.value) }))} />
+              </label>
+            </div>
+            <div className="confirmRecordBox">
+              <span>域名区域</span>
+              <strong>{selectedZone ? selectedZone.name : "-"}</strong>
+              <span>代理状态</span>
+              <strong>仅 DNS</strong>
+            </div>
+            <div className="modalActions">
+              <button type="button" className="secondary" onClick={() => setAddRecordOpen(false)}>取消</button>
+              <button type="button" onClick={saveRecordAdd}>
+                <Plus size={16} />
+                <span>确认添加</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {editRecord && (
         <div className="modalBackdrop" role="dialog" aria-modal="true">
           <div className="modalPanel">
