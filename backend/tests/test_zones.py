@@ -65,7 +65,7 @@ def test_update_record_updates_cloudflare_and_local_cache(monkeypatch):
 
     updated = update_record(
         record.id,
-        DnsRecordUpdate(name="www.example.com", type="CNAME", content="backup.example.net", ttl=120),
+        DnsRecordUpdate(name="www.example.com", type="CNAME", content="backup.example.net", ttl=120, proxied=True),
         user,
         db,
     )
@@ -73,6 +73,7 @@ def test_update_record_updates_cloudflare_and_local_cache(monkeypatch):
     assert updated.type == "CNAME"
     assert updated.content == "backup.example.net"
     assert updated.ttl == 120
+    assert updated.proxied is True
     assert FakeCloudflareClient.updates == [
         {
             "zone_id": "zone-1",
@@ -82,7 +83,7 @@ def test_update_record_updates_cloudflare_and_local_cache(monkeypatch):
                 "name": "www.example.com",
                 "content": "backup.example.net",
                 "ttl": 120,
-                "proxied": False,
+                "proxied": True,
             },
         }
     ]
@@ -97,7 +98,7 @@ def test_create_record_creates_cloudflare_record_and_local_cache(monkeypatch):
 
     created = create_record(
         zone.id,
-        DnsRecordCreate(name="api", type="AAAA", content="2001:db8::10", ttl=60),
+        DnsRecordCreate(name="api", type="AAAA", content="2001:db8::10", ttl=60, proxied=True),
         user,
         db,
     )
@@ -106,6 +107,7 @@ def test_create_record_creates_cloudflare_record_and_local_cache(monkeypatch):
     assert created.name == "api.example.com"
     assert created.type == "AAAA"
     assert created.content == "2001:db8::10"
+    assert created.proxied is True
     assert FakeCloudflareClient.creates == [
         {
             "zone_id": "zone-1",
@@ -114,7 +116,7 @@ def test_create_record_creates_cloudflare_record_and_local_cache(monkeypatch):
                 "name": "api.example.com",
                 "content": "2001:db8::10",
                 "ttl": 60,
-                "proxied": False,
+                "proxied": True,
             },
         }
     ]

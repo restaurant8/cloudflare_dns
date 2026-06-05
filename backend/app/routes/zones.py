@@ -133,7 +133,7 @@ def create_record(zone_id: int, payload: DnsRecordCreate, _: User = Depends(get_
         "name": record_name,
         "content": content,
         "ttl": payload.ttl,
-        "proxied": False,
+        "proxied": payload.proxied,
     }
     try:
         created = client.create_dns_record(zone.cf_zone_id, body)
@@ -167,7 +167,7 @@ def update_record(record_id: int, payload: DnsRecordUpdate, _: User = Depends(ge
         "name": record_name,
         "content": content,
         "ttl": payload.ttl,
-        "proxied": record.proxied,
+        "proxied": payload.proxied,
     }
     try:
         updated = client.update_dns_record(zone.cf_zone_id, record.cf_record_id, body)

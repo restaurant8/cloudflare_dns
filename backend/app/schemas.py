@@ -105,6 +105,7 @@ class DnsRecordCreate(BaseModel):
     type: Literal["A", "AAAA", "CNAME"]
     content: str = Field(min_length=1, max_length=255)
     ttl: int = Field(ge=1, le=86400)
+    proxied: bool = False
 
 
 class DnsRecordUpdate(DnsRecordCreate):

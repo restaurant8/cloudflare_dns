@@ -35,7 +35,7 @@ type OriginEditDraft = { target: string; port: number; priority: number; publish
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
 type HostnameAddDraft = { hostname: string; adopt_record_id: string };
 type DnsRecordType = "A" | "AAAA" | "CNAME";
-type DnsRecordEditDraft = { name: string; type: DnsRecordType; content: string; ttl: number };
+type DnsRecordEditDraft = { name: string; type: DnsRecordType; content: string; ttl: number; proxied: boolean };
 type TargetPoolDraft = { target: string; port: number; remark: string; check_interval_seconds: number; enabled: boolean };
 type ExternalIpSourceDraft = { name: string; base_url: string; token: string; default_port: number; sync_interval_seconds: number; enabled: boolean };
 type AgentEditDraft = { name: string };
@@ -823,9 +823,9 @@ function RecordsPanel({
   const [manageRecord, setManageRecord] = useState<DnsRecord | null>(null);
   const [managePort, setManagePort] = useState(22);
   const [addRecordOpen, setAddRecordOpen] = useState(false);
-  const [recordAdd, setRecordAdd] = useState<DnsRecordEditDraft>({ name: "", type: "A", content: "", ttl: 60 });
+  const [recordAdd, setRecordAdd] = useState<DnsRecordEditDraft>({ name: "", type: "A", content: "", ttl: 60, proxied: false });
   const [editRecord, setEditRecord] = useState<DnsRecord | null>(null);
-  const [recordEdit, setRecordEdit] = useState<DnsRecordEditDraft>({ name: "", type: "A", content: "", ttl: 60 });
+  const [recordEdit, setRecordEdit] = useState<DnsRecordEditDraft>({ name: "", type: "A", content: "", ttl: 60, proxied: false });
   const filteredZones = zones.filter((zone) => zoneMatches(zone, zoneQuery));
   const selectedZone = zones.find((zone) => zone.id === selectedZoneId);
   const normalizedQuery = query.trim().toLowerCase();
@@ -844,14 +844,14 @@ function RecordsPanel({
   }
 
   function openAddRecord() {
-    setRecordAdd({ name: "", type: "A", content: "", ttl: 60 });
+    setRecordAdd({ name: "", type: "A", content: "", ttl: 60, proxied: false });
     setAddRecordOpen(true);
   }
 
   function openEditRecord(record: DnsRecord) {
     const recordType = dnsRecordTypes.includes(record.type as DnsRecordType) ? (record.type as DnsRecordType) : "A";
     setEditRecord(record);
-    setRecordEdit({ name: record.name, type: recordType, content: record.content, ttl: record.ttl });
+    setRecordEdit({ name: record.name, type: recordType, content: record.content, ttl: record.ttl, proxied: record.proxied });
   }
 
   function updateAddRecordContent(value: string) {
@@ -882,7 +882,8 @@ function RecordsPanel({
             name: recordAdd.name.trim(),
             type: recordAdd.type,
             content: recordAdd.content.trim(),
-            ttl: Number(recordAdd.ttl)
+            ttl: Number(recordAdd.ttl),
+            proxied: recordAdd.proxied
           })
         }),
       "解析记录已添加",
@@ -900,7 +901,8 @@ function RecordsPanel({
             name: recordEdit.name.trim(),
             type: recordEdit.type,
             content: recordEdit.content.trim(),
-            ttl: Number(recordEdit.ttl)
+            ttl: Number(recordEdit.ttl),
+            proxied: recordEdit.proxied
           })
         }),
       "解析记录已修改",
@@ -1014,7 +1016,7 @@ function RecordsPanel({
           <div className="modalPanel">
             <div className="panelTitle">
               <h2>添加解析记录</h2>
-              <p>默认创建 DNS-only 记录。名称可填 @、www，或完整域名；内容支持 IPv4、IPv6 或域名。</p>
+              <p>名称可填 @、www，或完整域名；内容支持 IPv4、IPv6 或域名。</p>
             </div>
             <div className="modalFormGrid">
               <label>
@@ -1037,12 +1039,16 @@ function RecordsPanel({
                 TTL（秒）
                 <input type="number" min={1} max={86400} value={recordAdd.ttl} onChange={(event) => setRecordAdd((draft) => ({ ...draft, ttl: Number(event.target.value) }))} />
               </label>
+              <label className="inlineCheck">
+                <input type="checkbox" checked={recordAdd.proxied} onChange={(event) => setRecordAdd((draft) => ({ ...draft, proxied: event.target.checked }))} />
+                Cloudflare 代理（橙云）
+              </label>
             </div>
             <div className="confirmRecordBox">
               <span>域名区域</span>
               <strong>{selectedZone ? selectedZone.name : "-"}</strong>
               <span>代理状态</span>
-              <strong>仅 DNS</strong>
+              <strong>{recordAdd.proxied ? "已代理" : "仅 DNS"}</strong>
             </div>
             <div className="modalActions">
               <button type="button" className="secondary" onClick={() => setAddRecordOpen(false)}>取消</button>
@@ -1059,7 +1065,7 @@ function RecordsPanel({
           <div className="modalPanel">
             <div className="panelTitle">
               <h2>修改解析记录</h2>
-              <p>会直接修改 Cloudflare 上的记录，并保留当前代理状态。A/AAAA/CNAME 会按内容自动识别，也可以手动选择。</p>
+              <p>会直接修改 Cloudflare 上的记录。A/AAAA/CNAME 会按内容自动识别，也可以手动选择。</p>
             </div>
             <div className="modalFormGrid">
               <label>
@@ -1082,12 +1088,16 @@ function RecordsPanel({
                 TTL（秒）
                 <input type="number" min={1} max={86400} value={recordEdit.ttl} onChange={(event) => setRecordEdit((draft) => ({ ...draft, ttl: Number(event.target.value) }))} />
               </label>
+              <label className="inlineCheck">
+                <input type="checkbox" checked={recordEdit.proxied} onChange={(event) => setRecordEdit((draft) => ({ ...draft, proxied: event.target.checked }))} />
+                Cloudflare 代理（橙云）
+              </label>
             </div>
             <div className="confirmRecordBox">
               <span>记录 ID</span>
               <strong>{editRecord.cf_record_id}</strong>
               <span>代理状态</span>
-              <strong>{editRecord.proxied ? "已代理" : "仅 DNS"}</strong>
+              <strong>{recordEdit.proxied ? "已代理" : "仅 DNS"}</strong>
             </div>
             <div className="modalActions">
               <button type="button" className="secondary" onClick={() => setEditRecord(null)}>取消</button>
