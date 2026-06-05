@@ -272,7 +272,7 @@ def test_evaluate_probes_group_before_switching_from_failed_current(monkeypatch)
     assert group.current_origin_id == backup.id
 
 
-def test_evaluate_keeps_healthy_current_even_if_higher_priority_backup_has_old_healthy_status(monkeypatch):
+def test_evaluate_switches_to_higher_priority_healthy_origin_by_status(monkeypatch):
     db = make_session()
     group, current = setup_group(db, "192.0.2.10")
     higher_priority_backup = Origin(group_id=group.id, target="192.0.2.20", target_type="ipv4", port=443, status="healthy", priority=1)
@@ -281,18 +281,47 @@ def test_evaluate_keeps_healthy_current_even_if_higher_priority_backup_has_old_h
     db.add(higher_priority_backup)
     db.commit()
 
-    def fail_publish(*args, **kwargs):
-        raise AssertionError("should not publish")
+    def fake_publish_origin(db, group_arg, origin_arg):
+        return {"id": "record-1", "type": "A", "content": origin_arg.target}
 
-    monkeypatch.setattr("app.failover.publish_origin", fail_publish)
+    monkeypatch.setattr("app.failover.publish_origin", fake_publish_origin)
 
     switches = evaluate_failover_groups(db)
 
-    assert switches == 0
-    assert group.current_origin_id == current.id
+    assert switches == 1
+    assert group.current_origin_id == higher_priority_backup.id
 
 
-def test_evaluate_does_not_skip_first_candidate_to_later_old_healthy_backup(monkeypatch):
+def test_evaluate_switches_to_fresh_healthy_higher_priority_origin(monkeypatch):
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    higher_priority_backup = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=1,
+        last_checked_at=datetime.utcnow(),
+    )
+    current.priority = 10
+    group.current_origin_id = current.id
+    db.add(higher_priority_backup)
+    db.commit()
+    db.refresh(higher_priority_backup)
+
+    def fake_publish_origin(db, group_arg, origin_arg):
+        return {"id": "record-1", "type": "A", "content": origin_arg.target}
+
+    monkeypatch.setattr("app.failover.publish_origin", fake_publish_origin)
+
+    switches = evaluate_failover_groups(db)
+
+    assert switches == 1
+    assert group.current_origin_id == higher_priority_backup.id
+
+
+def test_evaluate_uses_later_healthy_backup_when_higher_priority_backup_is_unhealthy(monkeypatch):
     db = make_session()
     group, current = setup_group(db, "192.0.2.10")
     first_backup = Origin(group_id=group.id, target="192.0.2.20", target_type="ipv4", port=443, status="machine_down", priority=1)
@@ -305,15 +334,16 @@ def test_evaluate_does_not_skip_first_candidate_to_later_old_healthy_backup(monk
 
     monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
     monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
-    def fail_publish(*args, **kwargs):
-        raise AssertionError("should not publish")
 
-    monkeypatch.setattr("app.failover.publish_origin", fail_publish)
+    def fake_publish_origin(db, group_arg, origin_arg):
+        return {"id": "record-1", "type": "A", "content": origin_arg.target}
+
+    monkeypatch.setattr("app.failover.publish_origin", fake_publish_origin)
 
     switches = evaluate_failover_groups(db)
 
-    assert switches == 0
-    assert group.current_origin_id == current.id
+    assert switches == 1
+    assert group.current_origin_id == later_backup.id
 
 
 def test_no_healthy_origin_notification_is_throttled(monkeypatch):

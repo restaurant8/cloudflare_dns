@@ -43,32 +43,6 @@ def _current_origin(group: FailoverGroup) -> Origin | None:
     return next((origin for origin in group.origins if origin.id == group.current_origin_id), None)
 
 
-def _sorted_enabled_origins(group: FailoverGroup) -> list[Origin]:
-    return sorted([origin for origin in group.origins if origin.enabled], key=lambda item: (item.priority, item.id))
-
-
-def _first_switch_candidate(group: FailoverGroup, current: Origin | None) -> Origin | None:
-    for origin in _sorted_enabled_origins(group):
-        if current is not None and origin.id == current.id:
-            continue
-        return origin
-    return None
-
-
-def _switchable_origins(group: FailoverGroup) -> list[Origin]:
-    current = _current_origin(group)
-    if current is not None and current.enabled and current.status == ORIGIN_AVAILABLE_STATUS:
-        return [current]
-
-    candidate = _first_switch_candidate(group, current if current is not None and current.enabled else None)
-    origins: list[Origin] = []
-    if current is not None:
-        origins.append(current)
-    if candidate is not None and all(origin.id != candidate.id for origin in origins):
-        origins.append(candidate)
-    return origins
-
-
 def _should_probe_group_before_switch(group: FailoverGroup) -> bool:
     current = _current_origin(group)
     return current is None or not current.enabled or current.status != ORIGIN_AVAILABLE_STATUS
@@ -88,8 +62,8 @@ def _origin_status_summaries(group: FailoverGroup) -> list[dict]:
     ]
 
 
-def _has_pending_origin_checks(origins: list[Origin]) -> bool:
-    return any(origin.enabled and origin.status not in FINAL_ORIGIN_STATUSES for origin in origins)
+def _has_pending_origin_checks(group: FailoverGroup) -> bool:
+    return any(origin.enabled and origin.status not in FINAL_ORIGIN_STATUSES for origin in group.origins)
 
 
 def _should_notify_no_healthy(group: FailoverGroup, now: datetime, interval_seconds: int) -> bool:
@@ -347,10 +321,9 @@ def evaluate_failover_groups(db: Session) -> int:
         if _should_probe_group_before_switch(group):
             run_local_checks(db, group_id=group.id, include_all=False)
 
-        switchable_origins = _switchable_origins(group)
-        desired = choose_desired_origin(switchable_origins, group.current_origin_id)
+        desired = choose_desired_origin(group.origins, group.current_origin_id)
         if desired is None:
-            if _has_pending_origin_checks(switchable_origins):
+            if _has_pending_origin_checks(group):
                 group.last_error = WAITING_FOR_PROBES_MESSAGE
                 continue
             group.last_error = NO_HEALTHY_ORIGIN_MESSAGE

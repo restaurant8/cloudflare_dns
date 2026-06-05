@@ -62,7 +62,6 @@ const statusLabels: Record<string, string> = {
   ok: "正常",
   error: "错误",
   unknown: "未知",
-  standby: "备用待命",
   healthy: "健康",
   unhealthy: "不可用",
   blocked: "疑似被墙",
@@ -105,10 +104,6 @@ const telegramNotifyLevelLabels: Record<string, string> = {
 
 function statusText(value: string): string {
   return statusLabels[value] || value;
-}
-
-function originIsUnavailable(status: string): boolean {
-  return ["unhealthy", "blocked", "machine_down", "regional_issue"].includes(status);
 }
 
 function targetTypeText(value: string): string {
@@ -1585,8 +1580,6 @@ function GroupsPanel({
           const sortedOrigins = [...group.origins].sort((left, right) => left.priority - right.priority || left.id - right.id);
           const primaryPriority = sortedOrigins[0]?.priority;
           const currentOrigin = sortedOrigins.find((origin) => origin.id === group.current_origin_id);
-          const currentEnabledOrigin = currentOrigin?.enabled ? currentOrigin : undefined;
-          const firstBackupOrigin = sortedOrigins.find((origin) => origin.enabled && origin.id !== currentEnabledOrigin?.id);
           const currentTarget = currentOrigin ? displayTargetWithRemark(currentOrigin.target, currentOrigin.port, currentOrigin.remark) : "未发布";
           const groupHostnames = group.hostnames && group.hostnames.length > 0 ? [...group.hostnames].sort((left, right) => left.id - right.id) : [];
           const groupLastCheckedAt = sortedOrigins.reduce<string | null>((latest, origin) => {
@@ -1688,15 +1681,11 @@ function GroupsPanel({
                       const editType = inferDraftTargetType(originEdit.target);
                       const isCurrentOrigin = group.current_origin_id === origin.id;
                       const isPrimaryOrigin = origin.priority === primaryPriority;
-                      const shouldShowLiveHealth =
-                        origin.enabled &&
-                        (isCurrentOrigin ||
-                          (currentEnabledOrigin ? originIsUnavailable(currentEnabledOrigin.status) && firstBackupOrigin?.id === origin.id : firstBackupOrigin?.id === origin.id));
-                      const displayStatus = origin.enabled ? (shouldShowLiveHealth ? origin.status : "standby") : "disabled";
-                      const healthMeta = !origin.enabled ? "已停用，不参与检查" : shouldShowLiveHealth ? `最后检测 ${fmtDate(origin.last_checked_at)}` : "备用待命，当前源站故障时检测";
+                      const displayStatus = origin.enabled ? origin.status : "disabled";
+                      const healthMeta = !origin.enabled ? "已停用，不参与检查" : `最后检测 ${fmtDate(origin.last_checked_at)}`;
                       const activeOriginProbeStates = activeProbeStates(origin.probe_states);
-                      const visibleProbeStates = shouldShowLiveHealth ? currentProbeStates(origin) : [];
-                      const hiddenProbeCount = shouldShowLiveHealth ? activeOriginProbeStates.length - visibleProbeStates.length : 0;
+                      const visibleProbeStates = currentProbeStates(origin);
+                      const hiddenProbeCount = activeOriginProbeStates.length - visibleProbeStates.length;
                       return (
                         <div
                           className={`origin ${editingOriginId === origin.id ? "originEditing" : ""} ${isCurrentOrigin ? "originCurrent" : ""} ${isPrimaryOrigin ? "originPrimary" : "originBackup"}`}
@@ -1763,14 +1752,14 @@ function GroupsPanel({
                                   </div>
                                 </div>
                                 <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · {origin.enabled ? "已启用" : "已停用"} · {healthMeta}</span>
-                                {shouldShowLiveHealth && origin.publish_mode === "expanded" && (
+                                {origin.enabled && origin.publish_mode === "expanded" && (
                                   <div className="expandedIpList">
                                     <IpList label="解析 IP" values={origin.resolved_ips} empty="尚未解析，点击手动检测或等待下个周期" />
                                     <IpList label="健康 IP" values={origin.healthy_ips} />
                                     <IpList label="已发布" values={origin.published_ips} empty="当前未发布该目标" />
                                   </div>
                                 )}
-                                {shouldShowLiveHealth && origin.last_error && <small className="danger">{origin.last_error}</small>}
+                                {origin.enabled && origin.last_error && <small className="danger">{origin.last_error}</small>}
                                 {(visibleProbeStates.length > 0 || hiddenProbeCount > 0) && (
                                   <div className="probeChips">
                                     {visibleProbeStates.map((probe) => (

@@ -28,50 +28,13 @@ ORIGIN_UNAVAILABLE_STATUSES = {"unhealthy", "blocked", "machine_down", "regional
 FINAL_ORIGIN_STATUSES = {ORIGIN_AVAILABLE_STATUS, *ORIGIN_UNAVAILABLE_STATUSES}
 
 
-def _sorted_enabled_group_origins(group: FailoverGroup) -> list[Origin]:
-    return sorted(
-        [item for item in group.origins if item.enabled],
-        key=lambda item: (item.priority, item.id),
-    )
-
-
-def _current_enabled_origin(group: FailoverGroup) -> Origin | None:
-    if group.current_origin_id is None:
-        return None
-    for origin in group.origins:
-        if origin.id == group.current_origin_id and origin.enabled:
-            return origin
-    return None
-
-
-def _first_candidate_origin(group: FailoverGroup, current: Origin | None) -> Origin | None:
-    for origin in _sorted_enabled_group_origins(group):
-        if current is not None and origin.id == current.id:
-            continue
-        return origin
-    return None
-
-
 def origin_needs_probe(origin: Origin, include_all: bool = False) -> bool:
     if include_all:
         return True
     group = origin.group
     if not group or not group.enabled or not origin.enabled:
         return False
-
-    current = _current_enabled_origin(group)
-    if current is None:
-        first_origin = _first_candidate_origin(group, None)
-        return first_origin is not None and origin.id == first_origin.id
-
-    if origin.id == current.id:
-        return True
-
-    if current.status in ORIGIN_UNAVAILABLE_STATUSES:
-        first_backup = _first_candidate_origin(group, current)
-        return first_backup is not None and origin.id == first_backup.id
-
-    return False
+    return True
 
 
 def _probe_state(db: Session, origin: Origin, source_key: str, agent: Agent | None) -> ProbeState:

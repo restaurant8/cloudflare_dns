@@ -230,7 +230,7 @@ def make_group_with_current_and_backup(db, current_status: str = "healthy"):
     return group, current, backup
 
 
-def test_run_local_checks_only_checks_current_origin_when_current_is_healthy(monkeypatch):
+def test_run_local_checks_checks_all_enabled_origins(monkeypatch):
     db = make_session()
     _, current, backup = make_group_with_current_and_backup(db, "healthy")
     checked_targets = []
@@ -243,8 +243,28 @@ def test_run_local_checks_only_checks_current_origin_when_current_is_healthy(mon
 
     checked = run_local_checks(db)
 
-    assert checked == 1
-    assert checked_targets == [current.target]
+    assert checked == 2
+    assert checked_targets == [current.target, backup.target]
+
+
+def test_run_local_checks_checks_all_enabled_origins_when_current_is_lower_priority(monkeypatch):
+    db = make_session()
+    _, current, backup = make_group_with_current_and_backup(db, "healthy")
+    current.priority = 10
+    backup.priority = 1
+    db.commit()
+    checked_targets = []
+
+    def fake_tcp_check(target, port, timeout):
+        checked_targets.append(target)
+        return SimpleNamespace(success=True, rtt_ms=1.0, error=None)
+
+    monkeypatch.setattr("app.health.tcp_check", fake_tcp_check)
+
+    checked = run_local_checks(db)
+
+    assert checked == 2
+    assert checked_targets == [current.target, backup.target]
 
 
 def test_run_local_checks_include_all_checks_all_enabled_origins(monkeypatch):
