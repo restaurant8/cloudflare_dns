@@ -180,6 +180,28 @@ def update_record(record_id: int, payload: DnsRecordUpdate, _: User = Depends(ge
     return record
 
 
+@router.delete("/records/{record_id}", response_model=Message)
+def delete_record(record_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    record = db.get(DnsRecord, record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="解析记录不存在")
+
+    owner_hostname = _failover_owner_for_record(db, record)
+    if owner_hostname:
+        raise HTTPException(status_code=409, detail=f"该记录已由故障切换组托管（{owner_hostname}），请先到故障切换里删除或取消托管")
+
+    zone = record.zone
+    client = CloudflareClient(decrypt_secret(zone.credential.token_encrypted))
+    try:
+        client.delete_dns_record(zone.cf_zone_id, record.cf_record_id)
+    except CloudflareError as exc:
+        raise HTTPException(status_code=502, detail=f"Cloudflare 删除失败：{exc}") from exc
+
+    db.delete(record)
+    db.commit()
+    return Message(message="解析记录已删除")
+
+
 @router.get("/{zone_id}/records", response_model=list[DnsRecordOut])
 def list_records(zone_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
     zone = db.get(Zone, zone_id)

@@ -910,6 +910,15 @@ function RecordsPanel({
     );
   }
 
+  async function deleteRecord(record: DnsRecord) {
+    const confirmed = window.confirm(`确认删除 ${record.type} ${record.name} -> ${record.content} 吗？`);
+    if (!confirmed) return;
+    await act(
+      () => apiFetch(`/api/zones/records/${record.id}`, token, { method: "DELETE" }),
+      "解析记录已删除"
+    );
+  }
+
   async function confirmManageRecord() {
     if (!manageRecord) return;
     await act(
@@ -999,6 +1008,9 @@ function RecordsPanel({
                   </button>
                   <button className="icon" title="管理" disabled={record.proxied} onClick={() => openManageRecord(record)}>
                     <Link2 size={16} />
+                  </button>
+                  <button className="icon dangerBtn" title="删除记录" onClick={() => deleteRecord(record)}>
+                    <Trash2 size={16} />
                   </button>
                 </div>
               </td>

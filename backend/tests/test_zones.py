@@ -5,13 +5,14 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import CloudflareCredential, DnsRecord, FailoverGroup, FailoverHostname, User, Zone
-from app.routes.zones import create_record, update_record
+from app.routes.zones import create_record, delete_record, update_record
 from app.schemas import DnsRecordCreate, DnsRecordUpdate
 from app.security import encrypt_secret
 
 
 class FakeCloudflareClient:
     creates: list[dict] = []
+    deletes: list[dict] = []
     updates: list[dict] = []
 
     def __init__(self, token: str):
@@ -24,6 +25,9 @@ class FakeCloudflareClient:
     def update_dns_record(self, zone_id: str, record_id: str, record: dict):
         self.updates.append({"zone_id": zone_id, "record_id": record_id, "record": record})
         return {"id": record_id, **record}
+
+    def delete_dns_record(self, zone_id: str, record_id: str):
+        self.deletes.append({"zone_id": zone_id, "record_id": record_id})
 
 
 def make_session():
@@ -58,6 +62,7 @@ def setup_record(db):
 
 def test_update_record_updates_cloudflare_and_local_cache(monkeypatch):
     FakeCloudflareClient.creates = []
+    FakeCloudflareClient.deletes = []
     FakeCloudflareClient.updates = []
     monkeypatch.setattr("app.routes.zones.CloudflareClient", FakeCloudflareClient)
     db = make_session()
@@ -91,6 +96,7 @@ def test_update_record_updates_cloudflare_and_local_cache(monkeypatch):
 
 def test_create_record_creates_cloudflare_record_and_local_cache(monkeypatch):
     FakeCloudflareClient.creates = []
+    FakeCloudflareClient.deletes = []
     FakeCloudflareClient.updates = []
     monkeypatch.setattr("app.routes.zones.CloudflareClient", FakeCloudflareClient)
     db = make_session()
@@ -122,8 +128,25 @@ def test_create_record_creates_cloudflare_record_and_local_cache(monkeypatch):
     ]
 
 
+def test_delete_record_deletes_cloudflare_record_and_local_cache(monkeypatch):
+    FakeCloudflareClient.creates = []
+    FakeCloudflareClient.deletes = []
+    FakeCloudflareClient.updates = []
+    monkeypatch.setattr("app.routes.zones.CloudflareClient", FakeCloudflareClient)
+    db = make_session()
+    _, record, user = setup_record(db)
+    record_id = record.id
+
+    message = delete_record(record_id, user, db)
+
+    assert message.message
+    assert FakeCloudflareClient.deletes == [{"zone_id": "zone-1", "record_id": "record-1"}]
+    assert db.get(DnsRecord, record_id) is None
+
+
 def test_update_record_rejects_content_that_does_not_match_type(monkeypatch):
     FakeCloudflareClient.creates = []
+    FakeCloudflareClient.deletes = []
     FakeCloudflareClient.updates = []
     monkeypatch.setattr("app.routes.zones.CloudflareClient", FakeCloudflareClient)
     db = make_session()
@@ -143,6 +166,7 @@ def test_update_record_rejects_content_that_does_not_match_type(monkeypatch):
 
 def test_create_record_rejects_failover_managed_hostname(monkeypatch):
     FakeCloudflareClient.creates = []
+    FakeCloudflareClient.deletes = []
     FakeCloudflareClient.updates = []
     monkeypatch.setattr("app.routes.zones.CloudflareClient", FakeCloudflareClient)
     db = make_session()
@@ -167,6 +191,7 @@ def test_create_record_rejects_failover_managed_hostname(monkeypatch):
 
 def test_update_record_rejects_failover_managed_record(monkeypatch):
     FakeCloudflareClient.creates = []
+    FakeCloudflareClient.deletes = []
     FakeCloudflareClient.updates = []
     monkeypatch.setattr("app.routes.zones.CloudflareClient", FakeCloudflareClient)
     db = make_session()
@@ -187,3 +212,23 @@ def test_update_record_rejects_failover_managed_record(monkeypatch):
 
     assert exc_info.value.status_code == 409
     assert not FakeCloudflareClient.updates
+
+
+def test_delete_record_rejects_failover_managed_record(monkeypatch):
+    FakeCloudflareClient.creates = []
+    FakeCloudflareClient.deletes = []
+    FakeCloudflareClient.updates = []
+    monkeypatch.setattr("app.routes.zones.CloudflareClient", FakeCloudflareClient)
+    db = make_session()
+    zone, record, user = setup_record(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com", current_record_id=record.cf_record_id)
+    db.add(group)
+    db.flush()
+    db.add(FailoverHostname(group_id=group.id, hostname="www.example.com", current_record_id=record.cf_record_id))
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        delete_record(record.id, user, db)
+
+    assert exc_info.value.status_code == 409
+    assert not FakeCloudflareClient.deletes
