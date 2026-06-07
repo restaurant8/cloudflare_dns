@@ -593,11 +593,74 @@ form.panel {
   overflow-wrap: anywhere;
 }
 
+.collectionTitleButton {
+  align-items: flex-start;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  display: inline-grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr);
+  justify-items: start;
+  min-height: auto;
+  padding: 0;
+  text-align: left;
+  width: 100%;
+}
+
+.collectionTitleButton:hover {
+  background: transparent;
+  color: inherit;
+}
+
+.collectionTitleButton svg {
+  color: #64748b;
+  margin-top: 2px;
+}
+
+.collectionCollapsed {
+  gap: 0;
+}
+
+.collectionCollapsedSummary {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.collectionCollapsedSummary span,
+.collectionCollapsedSummary strong {
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  margin: 0;
+  padding: 5px 8px;
+}
+
+.collectionCollapsedSummary span {
+  background: #eef4f8;
+  color: #667789;
+}
+
+.collectionCollapsedSummary strong {
+  background: #e0f2fe;
+  color: #075985;
+}
+
 .collectionHead span {
   color: #667789;
   display: block;
   font-size: 12px;
   margin-top: 3px;
+}
+
+.collectionCollapsedSummary span,
+.collectionCollapsedSummary strong {
+  display: inline-flex;
+  margin: 0;
 }
 
 .collectionMain {

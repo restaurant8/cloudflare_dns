@@ -1591,6 +1591,7 @@ function GroupsPanel({
   const [hostnameAdd, setHostnameAdd] = useState<HostnameAddDraft>({ hostname: "", adopt_record_id: "" });
   const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
   const [originEdits, setOriginEdits] = useState<Record<number, OriginEditDraft>>({});
+  const [collapsedCollectionIds, setCollapsedCollectionIds] = useState<Set<string>>(new Set());
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<number>>(new Set());
   const addingGlobalCollection = addingGlobalCollectionId ? collections.find((collection) => collection.id === addingGlobalCollectionId) : undefined;
   const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
@@ -1940,6 +1941,23 @@ function GroupsPanel({
     });
   }
 
+  function collectionCollapseKey(collection: FailoverCollection | null): string {
+    return collection ? String(collection.id) : "ungrouped";
+  }
+
+  function toggleCollectionCollapsed(collection: FailoverCollection | null) {
+    const key = collectionCollapseKey(collection);
+    setCollapsedCollectionIds((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
+
   function renderGlobalOrigin(origin: FailoverGlobalOrigin) {
     const draft = globalOriginEdits[origin.id] || {
       target: origin.target,
@@ -2011,14 +2029,17 @@ function GroupsPanel({
     );
   }
 
-  function renderCollectionHeader(collection: FailoverCollection | null, groupCount: number) {
+  function renderCollectionHeader(collection: FailoverCollection | null, groupCount: number, isCollapsed: boolean) {
     if (!collection) {
       return (
         <div className="collectionHead ungrouped">
-          <div>
-            <strong>未分组</strong>
-            <span>{groupCount} 个切换组 · 移入业务分组后可使用全局备用</span>
-          </div>
+          <button type="button" className="collectionTitleButton" onClick={() => toggleCollectionCollapsed(collection)}>
+            {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+            <div>
+              <strong>未分组</strong>
+              <span>{groupCount} 个切换组 · 移入业务分组后可使用全局备用</span>
+            </div>
+          </button>
         </div>
       );
     }
@@ -2037,14 +2058,27 @@ function GroupsPanel({
               </button>
             </div>
           ) : (
-            <div>
-              <strong>{collection.name}</strong>
-              <span>{groupCount} 个切换组 · 全局备用 {collection.global_origins.length} 个</span>
+            <button type="button" className="collectionTitleButton" onClick={() => toggleCollectionCollapsed(collection)}>
+              {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              <div>
+                <strong>{collection.name}</strong>
+                <span>{groupCount} 个切换组 · 全局备用 {collection.global_origins.length} 个</span>
+              </div>
+            </button>
+          )}
+          {!isCollapsed && collection.global_origins.length > 0 && <div className="globalOriginList">{[...collection.global_origins].sort((left, right) => left.priority - right.priority || left.id - right.id).map(renderGlobalOrigin)}</div>}
+          {isCollapsed && collection.global_origins.length > 0 && (
+            <div className="collectionCollapsedSummary">
+              <span>已折叠</span>
+              <strong>全局备用 {collection.global_origins.length} 个</strong>
+              <span>切换组 {groupCount} 个</span>
             </div>
           )}
-          {collection.global_origins.length > 0 && <div className="globalOriginList">{[...collection.global_origins].sort((left, right) => left.priority - right.priority || left.id - right.id).map(renderGlobalOrigin)}</div>}
         </div>
         <div className="rowActions">
+          <button className="icon secondaryIcon" title={isCollapsed ? "展开业务分组" : "折叠业务分组"} onClick={() => toggleCollectionCollapsed(collection)}>
+            {isCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+          </button>
           <button className="secondary compactBtn" onClick={() => beginAddGlobalOrigin(collection)}>
             <Plus size={15} />
             <span>全局备用</span>
@@ -2078,8 +2112,9 @@ function GroupsPanel({
       </form>
       <div className="groupGrid">
         {groupedSections.map((section) => (
-          <div className="failoverCollectionBlock" key={section.collection?.id || "ungrouped"}>
-            {renderCollectionHeader(section.collection, section.groups.length)}
+          <div className={`failoverCollectionBlock ${collapsedCollectionIds.has(collectionCollapseKey(section.collection)) ? "collectionCollapsed" : ""}`} key={section.collection?.id || "ungrouped"}>
+            {renderCollectionHeader(section.collection, section.groups.length, collapsedCollectionIds.has(collectionCollapseKey(section.collection)))}
+            {!collapsedCollectionIds.has(collectionCollapseKey(section.collection)) && (
             <div className="collectionGroupGrid">
         {section.groups.map((group) => {
           const groupEdit = groupEdits[group.id] || {
@@ -2330,6 +2365,7 @@ function GroupsPanel({
                 </div>
               )}
             </div>
+            )}
           </div>
         ))}
         {groups.length === 0 && collections.length === 0 && (
