@@ -23,9 +23,11 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "external_ip_sync_interval_seconds": SettingDefinition(int, 60, 86400),
     "access_token_ttl_seconds": SettingDefinition(int, 3600, 31_536_000),
     "access_token_remember_ttl_seconds": SettingDefinition(int, 3600, 31_536_000),
+    "login_lockout_enabled": SettingDefinition(int, 0, 1),
     "login_max_failures": SettingDefinition(int, 1, 100),
     "login_failure_window_seconds": SettingDefinition(int, 60, 86400),
     "login_lockout_seconds": SettingDefinition(int, 60, 86400),
+    "cloudflare_access_enabled": SettingDefinition(int, 0, 1),
 }
 
 

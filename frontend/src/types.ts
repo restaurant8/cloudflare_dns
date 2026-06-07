@@ -201,6 +201,11 @@ export type SavedSnippet = {
   updated_at: string;
 };
 
+export type UserProfile = {
+  id: number;
+  username: string;
+};
+
 export type EventItem = {
   id: number;
   type: string;
@@ -219,9 +224,23 @@ export type SystemSettings = {
   external_ip_sync_interval_seconds: number;
   access_token_ttl_seconds: number;
   access_token_remember_ttl_seconds: number;
+  login_lockout_enabled: number;
   login_max_failures: number;
   login_failure_window_seconds: number;
   login_lockout_seconds: number;
+  cloudflare_access_enabled: number;
+};
+
+export type SshSettings = {
+  enabled: boolean;
+  upstream_url: string;
+  session_ttl_seconds: number;
+  entry_path: string;
+};
+
+export type SshSession = {
+  entry_url: string;
+  expires_in: number;
 };
 
 export type Overview = {

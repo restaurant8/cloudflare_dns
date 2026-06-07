@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 
 class TokenResponse(BaseModel):
@@ -29,6 +29,18 @@ class PasswordChangeRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=200)
 
 
+class UsernameChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    username: str = Field(min_length=3, max_length=80)
+
+
+class UserProfileOut(BaseModel):
+    id: int
+    username: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class SystemSettingsOut(BaseModel):
     check_interval_seconds: int
     check_timeout_seconds: float
@@ -38,9 +50,11 @@ class SystemSettingsOut(BaseModel):
     external_ip_sync_interval_seconds: int
     access_token_ttl_seconds: int
     access_token_remember_ttl_seconds: int
+    login_lockout_enabled: int
     login_max_failures: int
     login_failure_window_seconds: int
     login_lockout_seconds: int
+    cloudflare_access_enabled: int
 
 
 class SystemSettingsUpdate(BaseModel):
@@ -52,9 +66,43 @@ class SystemSettingsUpdate(BaseModel):
     external_ip_sync_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
     access_token_ttl_seconds: int | None = Field(default=None, ge=3600, le=31_536_000)
     access_token_remember_ttl_seconds: int | None = Field(default=None, ge=3600, le=31_536_000)
+    login_lockout_enabled: int | None = Field(default=None, ge=0, le=1)
     login_max_failures: int | None = Field(default=None, ge=1, le=100)
     login_failure_window_seconds: int | None = Field(default=None, ge=60, le=86400)
     login_lockout_seconds: int | None = Field(default=None, ge=60, le=86400)
+    cloudflare_access_enabled: int | None = Field(default=None, ge=0, le=1)
+
+
+class SshSettingsOut(BaseModel):
+    enabled: bool = False
+    upstream_url: str = "http://127.0.0.1:8182"
+    session_ttl_seconds: int = 300
+    entry_path: str = "/api/ssh/proxy/"
+
+
+class SshSettingsUpdate(BaseModel):
+    enabled: bool | None = None
+    upstream_url: str | None = Field(default=None, max_length=255)
+    session_ttl_seconds: int | None = Field(default=None, ge=60, le=3600)
+
+    @field_validator("upstream_url")
+    @classmethod
+    def validate_upstream_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        from urllib.parse import urlparse
+
+        parsed = urlparse(value.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("SSH upstream must be an HTTP URL")
+        if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("SSH upstream only supports localhost addresses")
+        return value.strip().rstrip("/")
+
+
+class SshSessionOut(BaseModel):
+    entry_url: str
+    expires_in: int
 
 
 class SavedSnippetCreate(BaseModel):

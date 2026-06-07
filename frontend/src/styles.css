@@ -469,6 +469,123 @@ button.zonePill.active {
   font-weight: 600;
 }
 
+.settingToggleLine {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  display: flex;
+  gap: 10px;
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.settingToggleLine input {
+  width: auto;
+}
+
+.settingToggleLine strong {
+  color: #183247;
+  font-size: 13px;
+}
+
+.checkboxLabel {
+  align-items: center;
+  align-self: end;
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  min-height: 38px;
+}
+
+.checkboxLabel input {
+  width: auto;
+}
+
+.sshPanel {
+  display: grid;
+  gap: 16px;
+}
+
+.sshSettingsPanel,
+.sshGuidePanel,
+.sshFramePanel {
+  display: grid;
+  gap: 14px;
+}
+
+.sshStatusLine {
+  align-items: center;
+  color: #5b6b7d;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  gap: 10px;
+}
+
+.pill {
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 6px 10px;
+}
+
+.pill.healthy {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.pill.muted {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.sshGuideGrid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+}
+
+.sshCodeBlock {
+  background: #0f172a;
+  border-radius: 8px;
+  color: #e5eef8;
+  overflow: hidden;
+}
+
+.sshCodeBlock pre {
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre;
+}
+
+.sshPlaceholder {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  color: #64748b;
+  display: flex;
+  font-weight: 700;
+  justify-content: center;
+  min-height: 220px;
+}
+
+.sshFrame {
+  background: #0f172a;
+  border: 1px solid #cfdbe7;
+  border-radius: 8px;
+  height: min(72vh, 760px);
+  min-height: 520px;
+  width: 100%;
+}
+
 .formActions {
   display: flex;
   justify-content: flex-start;
@@ -1833,6 +1950,7 @@ form.panel {
   .targetPoolPanel,
   .externalIpPanel,
   .snippetPanel,
+  .sshGuideGrid,
   .metrics {
     grid-template-columns: 1fr;
   }

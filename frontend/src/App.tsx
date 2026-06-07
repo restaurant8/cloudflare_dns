@@ -24,13 +24,14 @@ import {
   Server,
   ShieldCheck,
   SlidersHorizontal,
+  SquareTerminal,
   Trash2,
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, Overview, ProbeState, SavedSnippet, SystemSettings, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
+import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, Overview, ProbeState, SavedSnippet, SshSession, SshSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, Zone } from "./types";
 
-type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "snippets" | "agents" | "webhooks" | "settings" | "account" | "events";
+type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type GlobalOriginDraft = OriginAddDraft;
@@ -42,9 +43,10 @@ type DnsRecordEditDraft = { name: string; type: DnsRecordType; content: string; 
 type TargetPoolDraft = { target: string; port: number; remark: string; check_interval_seconds: number; enabled: boolean };
 type ExternalIpSourceDraft = { name: string; base_url: string; token: string; default_port: number; sync_interval_seconds: number; enabled: boolean };
 type SnippetDraft = { title: string; category: string; address: string; username: string; port: string; tags: string; content: string; code: string };
+type SshSettingsDraft = { enabled: boolean; upstream_url: string; session_ttl_seconds: string };
 type AgentEditDraft = { name: string };
 type SystemSettingsDraft = { [K in keyof SystemSettings]: string };
-type SystemSettingField = { key: keyof SystemSettings; label: string; min: number; max: number; step?: number; hint?: string };
+type SystemSettingField = { key: keyof SystemSettings; label: string; min?: number; max?: number; step?: number; hint?: string; type?: "number" | "toggle" };
 type ToastTone = "info" | "success" | "error" | "loading";
 type ActionRunner = <T>(fn: () => Promise<T>, done?: string, afterSuccess?: () => void) => Promise<boolean>;
 
@@ -56,6 +58,7 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "targetPool", label: "IP 池子", icon: Server },
   { id: "externalIps", label: "外部 IP", icon: Globe2 },
   { id: "snippets", label: "命令库", icon: FileCode2 },
+  { id: "ssh", label: "SSH", icon: SquareTerminal },
   { id: "agents", label: "探针", icon: RadioTower },
   { id: "webhooks", label: "通知", icon: WebhookIcon },
   { id: "settings", label: "设置", icon: SlidersHorizontal },
@@ -320,10 +323,12 @@ export default function App() {
   const [telegramNotifications, setTelegramNotifications] = useState<TelegramNotification[]>([]);
   const [webhooks, setWebhooks] = useState<Webhook[]>([]);
   const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
+  const [sshSettings, setSshSettings] = useState<SshSettings | null>(null);
   const [events, setEvents] = useState<EventItem[]>([]);
   const [agentToken, setAgentToken] = useState("");
 
   const selectedZone = useMemo(() => zones.find((zone) => zone.id === selectedZoneId), [selectedZoneId, zones]);
+  const sectionSubtitle = section === "ssh" ? "Sshwifty 通过本项目临时会话访问" : selectedZone ? selectedZone.name : "尚未选择域名区域";
 
   async function loadSetup() {
     setBootError("");
@@ -333,7 +338,7 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
@@ -347,6 +352,7 @@ export default function App() {
       apiFetch<TelegramNotification[]>("/api/telegram", activeToken),
       apiFetch<Webhook[]>("/api/webhooks", activeToken),
       apiFetch<SystemSettings>("/api/settings", activeToken),
+      apiFetch<SshSettings>("/api/ssh/settings", activeToken),
       apiFetch<EventItem[]>("/api/events?limit=100", activeToken)
     ]);
     setOverview(nextOverview);
@@ -362,6 +368,7 @@ export default function App() {
     setTelegramNotifications(nextTelegram);
     setWebhooks(nextWebhooks);
     setSystemSettings(nextSystemSettings);
+    setSshSettings(nextSshSettings);
     setEvents(nextEvents);
     if (!selectedZoneId && nextZones.length > 0) {
       setSelectedZoneId(nextZones[0].id);
@@ -600,7 +607,7 @@ export default function App() {
           <div>
             <h1>{nav.find((item) => item.id === section)?.label}</h1>
             <p>
-              {selectedZone ? selectedZone.name : "尚未选择域名区域"}
+              {sectionSubtitle}
               <span className="liveRefreshText">
                 实时更新{liveUpdatedAt ? ` · ${fmtTime(liveUpdatedAt)}` : ""}
               </span>
@@ -650,6 +657,7 @@ export default function App() {
           <ExternalIpsPanel token={token} externalIpSources={externalIpSources} externalIpItems={externalIpItems} act={act} />
         )}
         {section === "snippets" && <SnippetsPanel token={token} snippets={snippets} act={act} />}
+        {section === "ssh" && sshSettings && <SshPanel token={token} settings={sshSettings} act={act} />}
         {section === "agents" && (
           <AgentsPanel token={token} agents={agents} agentToken={agentToken} setAgentToken={setAgentToken} act={act} />
         )}
@@ -2824,6 +2832,198 @@ function SnippetsPanel({ token, snippets, act }: { token: string; snippets: Save
   );
 }
 
+function SshPanel({ token, settings, act }: { token: string; settings: SshSettings; act: ActionRunner }) {
+  const [draft, setDraft] = useState<SshSettingsDraft>({
+    enabled: settings.enabled,
+    upstream_url: settings.upstream_url,
+    session_ttl_seconds: String(settings.session_ttl_seconds)
+  });
+  const [frameUrl, setFrameUrl] = useState("");
+  const [copiedKey, setCopiedKey] = useState("");
+
+  useEffect(() => {
+    setDraft({
+      enabled: settings.enabled,
+      upstream_url: settings.upstream_url,
+      session_ttl_seconds: String(settings.session_ttl_seconds)
+    });
+  }, [settings]);
+
+  const dockerInstall = `mkdir -p /www/server/sshwifty
+cat > /www/server/sshwifty/sshwifty.conf.json <<'JSON'
+{
+  "HostName": "127.0.0.1",
+  "SharedKey": "CHANGE_THIS_STRONG_PASSWORD",
+  "DialTimeout": 10,
+  "Servers": [
+    {
+      "ListenInterface": "127.0.0.1",
+      "ListenPort": 8182,
+      "InitialTimeout": 10,
+      "ReadTimeout": 120,
+      "WriteTimeout": 120,
+      "HeartbeatTimeout": 10,
+      "ReadDelay": 10,
+      "WriteDelay": 10,
+      "TLSCertificateFile": "",
+      "TLSCertificateKeyFile": "",
+      "ServerMessage": "SSH is available only through the Cloudflare DNS panel."
+    }
+  ]
+}
+JSON
+docker rm -f sshwifty 2>/dev/null || true
+docker run --detach \\
+  --restart unless-stopped \\
+  --publish 127.0.0.1:8182:8182 \\
+  --volume /www/server/sshwifty/sshwifty.conf.json:/etc/sshwifty.conf.json:ro \\
+  --env SSHWIFTY_CONFIG=/etc/sshwifty.conf.json \\
+  --name sshwifty \\
+  niruix/sshwifty:latest`;
+
+  const nginxSnippet = `# 放在普通 /api/ location 前面，保证 SSH WebSocket 可以升级
+location /api/ssh/proxy/ {
+    proxy_pass http://127.0.0.1:8000/api/ssh/proxy/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}`;
+
+  async function copyText(key: string, value: string) {
+    await navigator.clipboard.writeText(value);
+    setCopiedKey(key);
+    window.setTimeout(() => setCopiedKey((current) => (current === key ? "" : current)), 1200);
+  }
+
+  async function saveSettings(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () =>
+        apiFetch("/api/ssh/settings", token, {
+          method: "PATCH",
+          body: JSON.stringify({
+            enabled: draft.enabled,
+            upstream_url: draft.upstream_url.trim(),
+            session_ttl_seconds: Number.parseInt(draft.session_ttl_seconds, 10)
+          })
+        }),
+      "SSH 设置已保存"
+    );
+  }
+
+  async function openSsh() {
+    await act(
+      async () => {
+        const session = await apiFetch<SshSession>("/api/ssh/session", token, { method: "POST" });
+        setFrameUrl(`${session.entry_url}?t=${Date.now()}`);
+      },
+      "SSH 会话已打开"
+    );
+  }
+
+  async function closeSsh() {
+    await act(
+      async () => {
+        await apiFetch("/api/ssh/session", token, { method: "DELETE" });
+        setFrameUrl("");
+      },
+      "SSH 会话已关闭"
+    );
+  }
+
+  function renderCopyBlock(key: string, title: string, value: string) {
+    return (
+      <div className="sshCodeBlock">
+        <div className="snippetCodeHead">
+          <span>{title}</span>
+          <button type="button" className="icon secondaryIcon" title="复制" onClick={() => copyText(key, value)}>
+            <Copy size={14} />
+          </button>
+        </div>
+        <pre><code>{value}</code></pre>
+        {copiedKey === key && <small className="successText">已复制</small>}
+      </div>
+    );
+  }
+
+  return (
+    <section className="sshPanel">
+      <form className="panel sshSettingsPanel" onSubmit={saveSettings}>
+        <div className="panelTitle">
+          <h2>SSH 接入</h2>
+          <p>使用 Sshwifty 作为独立 SSH 子服务；本项目只负责登录后的临时入口和本机代理，不接管你的服务器密码。</p>
+        </div>
+        <div className="sshStatusLine">
+          <span className={settings.enabled ? "pill healthy" : "pill muted"}>{settings.enabled ? "已启用" : "未启用"}</span>
+          <span>入口：{settings.entry_path}</span>
+          <span>上游：{settings.upstream_url}</span>
+        </div>
+        <div className="settingsGrid">
+          <label className="checkboxLabel">
+            <input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft((current) => ({ ...current, enabled: event.target.checked }))} />
+            启用 SSH 菜单入口
+          </label>
+          <label>
+            Sshwifty 本机地址
+            <input value={draft.upstream_url} onChange={(event) => setDraft((current) => ({ ...current, upstream_url: event.target.value }))} placeholder="http://127.0.0.1:8182" />
+            <span>只允许 localhost / 127.0.0.1 / ::1，避免暴露任意代理。</span>
+          </label>
+          <label>
+            临时会话有效期
+            <input type="number" min={60} max={3600} value={draft.session_ttl_seconds} onChange={(event) => setDraft((current) => ({ ...current, session_ttl_seconds: event.target.value }))} />
+            <span>60 - 3600 秒，到期后需要重新点击打开。</span>
+          </label>
+        </div>
+        <div className="formActions">
+          <button>
+            <Save size={16} />
+            <span>保存 SSH 设置</span>
+          </button>
+        </div>
+      </form>
+
+      <div className="panel sshGuidePanel">
+        <div className="panelTitle">
+          <h2>部署 Sshwifty</h2>
+          <p>容器只绑定 127.0.0.1:8182，不要把 8182 端口开放到公网。Sshwifty 的 SharedKey 请改成强密码。</p>
+        </div>
+        <div className="sshGuideGrid">
+          {renderCopyBlock("ssh-docker", "服务器安装命令", dockerInstall)}
+          {renderCopyBlock("ssh-nginx", "Nginx WebSocket 反代补充", nginxSnippet)}
+        </div>
+      </div>
+
+      <div className="panel sshFramePanel">
+        <div className="panelTitle">
+          <h2>SSH 窗口</h2>
+          <p>点击打开后会创建一个短期 HttpOnly 会话 cookie；没有这个 cookie，后端代理会拒绝访问。</p>
+        </div>
+        <div className="formActions">
+          <button type="button" disabled={!settings.enabled} onClick={openSsh}>
+            <SquareTerminal size={16} />
+            <span>打开 SSH</span>
+          </button>
+          {frameUrl && (
+            <button type="button" className="secondary" onClick={closeSsh}>
+              <PowerOff size={16} />
+              <span>关闭会话</span>
+            </button>
+          )}
+        </div>
+        {!settings.enabled && <div className="emptyGroupPanel"><h2>SSH 尚未启用</h2><p>先保存启用设置，并确认 Sshwifty 已在服务器本机运行。</p></div>}
+        {settings.enabled && !frameUrl && <div className="sshPlaceholder">点击“打开 SSH”后，终端会在这里显示。</div>}
+        {settings.enabled && frameUrl && <iframe className="sshFrame" src={frameUrl} title="SSH" />}
+      </div>
+    </section>
+  );
+}
+
 function ExternalIpsPanel({
   token,
   externalIpSources,
@@ -3314,9 +3514,11 @@ function SettingsPanel({ token, settings, act }: { token: string; settings: Syst
       fields: [
         { key: "access_token_ttl_seconds", label: "普通登录有效期", min: 3600, max: 31536000, hint: "秒" },
         { key: "access_token_remember_ttl_seconds", label: "记住登录有效期", min: 3600, max: 31536000, hint: "秒" },
+        { key: "login_lockout_enabled", label: "启用登录失败锁定", type: "toggle", hint: "连续失败后自动锁定登录" },
         { key: "login_max_failures", label: "最大失败次数", min: 1, max: 100, hint: "次" },
         { key: "login_failure_window_seconds", label: "失败统计窗口", min: 60, max: 86400, hint: "秒" },
-        { key: "login_lockout_seconds", label: "锁定时间", min: 60, max: 86400, hint: "秒" }
+        { key: "login_lockout_seconds", label: "锁定时间", min: 60, max: 86400, hint: "秒" },
+        { key: "cloudflare_access_enabled", label: "启用 Cloudflare Access", type: "toggle", hint: "开启后必须先通过 Cloudflare Access 才能登录后台" }
       ]
     }
   ];
@@ -3328,7 +3530,12 @@ function SettingsPanel({ token, settings, act }: { token: string; settings: Syst
   async function submit(event: FormEvent) {
     event.preventDefault();
     const payload = Object.fromEntries(
-      Object.entries(draft).map(([key, value]) => [key, key === "check_timeout_seconds" ? Number.parseFloat(value) : Number.parseInt(value, 10)])
+      sections
+        .flatMap((section) => section.fields)
+        .map((field) => [
+          field.key,
+          field.type === "toggle" ? (draft[field.key] === "1" ? 1 : 0) : field.key === "check_timeout_seconds" ? Number.parseFloat(draft[field.key]) : Number.parseInt(draft[field.key], 10)
+        ])
     );
     await act(
       () =>
@@ -3357,16 +3564,27 @@ function SettingsPanel({ token, settings, act }: { token: string; settings: Syst
               {section.fields.map((field) => (
                 <label key={field.key}>
                   {field.label}
-                  <input
-                    type="number"
-                    min={field.min}
-                    max={field.max}
-                    step={field.step || 1}
-                    value={draft[field.key]}
-                    onChange={(event) => updateField(field.key, event.target.value)}
-                    required
-                  />
-                  <span>{field.min} - {field.max}{field.hint ? ` ${field.hint}` : ""}</span>
+                  {field.type === "toggle" ? (
+                    <span className="settingToggleLine">
+                      <input
+                        type="checkbox"
+                        checked={draft[field.key] === "1"}
+                        onChange={(event) => updateField(field.key, event.target.checked ? "1" : "0")}
+                      />
+                      <strong>{draft[field.key] === "1" ? "已开启" : "已关闭"}</strong>
+                    </span>
+                  ) : (
+                    <input
+                      type="number"
+                      min={field.min}
+                      max={field.max}
+                      step={field.step || 1}
+                      value={draft[field.key]}
+                      onChange={(event) => updateField(field.key, event.target.value)}
+                      required
+                    />
+                  )}
+                  <span>{field.type === "toggle" ? field.hint : `${field.min} - ${field.max}${field.hint ? ` ${field.hint}` : ""}`}</span>
                 </label>
               ))}
             </div>
@@ -3384,6 +3602,9 @@ function SettingsPanel({ token, settings, act }: { token: string; settings: Syst
 }
 
 function AccountPanel({ token, onPasswordChanged }: { token: string; onPasswordChanged: () => void }) {
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [username, setUsername] = useState("");
+  const [usernamePassword, setUsernamePassword] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -3391,7 +3612,42 @@ function AccountPanel({ token, onPasswordChanged }: { token: string; onPasswordC
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  async function submit(event: FormEvent) {
+  useEffect(() => {
+    apiFetch<UserProfile>("/api/auth/me", token)
+      .then((user) => {
+        setProfile(user);
+        setUsername(user.username);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "无法读取账户信息"));
+  }, [token]);
+
+  async function submitUsername(event: FormEvent) {
+    event.preventDefault();
+    setMessage("");
+    setError("");
+    setBusy(true);
+    try {
+      const updated = await apiFetch<UserProfile>("/api/auth/username", token, {
+        method: "PATCH",
+        body: JSON.stringify({ username: username.trim(), current_password: usernamePassword })
+      });
+      setProfile(updated);
+      setUsername(updated.username);
+      setUsernamePassword("");
+      setMessage("账户名已修改");
+      try {
+        localStorage.setItem(rememberedUsernameStorageKey, updated.username);
+      } catch {
+        // Ignore private browsing or storage-disabled environments.
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "账户名修改失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitPassword(event: FormEvent) {
     event.preventDefault();
     setMessage("");
     setError("");
@@ -3420,12 +3676,28 @@ function AccountPanel({ token, onPasswordChanged }: { token: string; onPasswordC
   return (
     <section className="panel accountPanel">
       <div className="panelTitle">
-        <h2>修改登录密码</h2>
-        <p>输入当前密码和新密码。修改成功后会自动退出登录。</p>
+        <h2>账户</h2>
+        <p>当前账户：{profile ? profile.username : "读取中"}</p>
       </div>
-      {message && <div className="notice">{message}</div>}
+      {message && <div className="notice success">{message}</div>}
       {error && <div className="error">{error}</div>}
-      <form onSubmit={submit}>
+      <form onSubmit={submitUsername}>
+        <h3>修改账户名</h3>
+        <label>
+          新账户名
+          <input minLength={3} maxLength={80} value={username} onChange={(event) => setUsername(event.target.value)} required />
+        </label>
+        <label>
+          当前密码
+          <input type="password" value={usernamePassword} onChange={(event) => setUsernamePassword(event.target.value)} required />
+        </label>
+        <button disabled={busy}>
+          <Save size={16} />
+          <span>{busy ? "保存中" : "保存账户名"}</span>
+        </button>
+      </form>
+      <form onSubmit={submitPassword}>
+        <h3>修改登录密码</h3>
         <label>
           当前密码
           <input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required />
