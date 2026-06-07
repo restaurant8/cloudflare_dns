@@ -46,6 +46,7 @@ export type ProbeState = {
 export type Origin = {
   id: number;
   group_id: number;
+  global_origin_id: number | null;
   target: string;
   target_type: string;
   publish_mode: string;
@@ -88,6 +89,28 @@ export type FailoverHostname = {
   created_at: string;
 };
 
+export type FailoverGlobalOrigin = {
+  id: number;
+  collection_id: number;
+  target: string;
+  target_type: string;
+  publish_mode: string;
+  port: number;
+  priority: number;
+  remark: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type FailoverCollection = {
+  id: number;
+  name: string;
+  global_origins: FailoverGlobalOrigin[];
+  created_at: string;
+  updated_at: string;
+};
+
 export type ExternalIpSource = {
   id: number;
   name: string;
@@ -121,6 +144,7 @@ export type ExternalIpItem = {
 export type FailoverGroup = {
   id: number;
   zone_id: number;
+  collection_id: number | null;
   hostname: string;
   ttl: number;
   enabled: boolean;

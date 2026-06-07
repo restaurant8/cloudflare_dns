@@ -4,10 +4,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Agent, CloudflareCredential, FailoverGroup, Origin, ProbeState, User, Zone
+from app.models import Agent, CloudflareCredential, FailoverCollection, FailoverGroup, Origin, ProbeState, User, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, resolved_ips
-from app.routes.groups import add_group_hostname, create_group, delete_group_hostname, update_origin
-from app.schemas import FailoverGroupCreate, FailoverHostnameCreate, OriginOut, OriginUpdate
+from app.routes.groups import add_group_hostname, create_collection, create_global_origin, create_group, delete_group_hostname, update_global_origin, update_group, update_origin
+from app.schemas import FailoverCollectionCreate, FailoverGlobalOriginCreate, FailoverGlobalOriginUpdate, FailoverGroupCreate, FailoverGroupUpdate, FailoverHostnameCreate, OriginOut, OriginUpdate
 from app.security import encrypt_secret
 
 
@@ -188,6 +188,93 @@ def test_delete_group_hostname_keeps_at_least_one_hostname(monkeypatch):
         assert getattr(exc, "status_code", None) == 400
     else:
         raise AssertionError("Expected last hostname deletion to fail")
+
+
+def test_create_global_origin_syncs_to_all_collection_groups():
+    db = make_session()
+    zone, user = setup_zone(db)
+    collection = create_collection(FailoverCollectionCreate(name="业务 A"), user, db)
+    groups = [
+        FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="a.example.com"),
+        FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="b.example.com"),
+    ]
+    db.add_all(groups)
+    db.commit()
+
+    updated = create_global_origin(
+        collection.id,
+        FailoverGlobalOriginCreate(target="192.0.2.20", port=22, priority=30, remark="通用备用"),
+        user,
+        db,
+    )
+
+    assert len(updated.global_origins) == 1
+    for group in db.query(FailoverGroup).filter(FailoverGroup.collection_id == collection.id).all():
+        mirrors = [origin for origin in group.origins if origin.global_origin_id == updated.global_origins[0].id]
+        assert len(mirrors) == 1
+        assert mirrors[0].target == "192.0.2.20"
+        assert mirrors[0].priority == 30
+        assert mirrors[0].remark == "通用备用"
+
+
+def test_update_global_origin_updates_all_mirrored_origins():
+    db = make_session()
+    zone, user = setup_zone(db)
+    collection = create_collection(FailoverCollectionCreate(name="业务 B"), user, db)
+    group = FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="a.example.com")
+    db.add(group)
+    db.commit()
+    updated = create_global_origin(
+        collection.id,
+        FailoverGlobalOriginCreate(target="192.0.2.20", port=22, priority=30, remark="旧备用"),
+        user,
+        db,
+    )
+    global_origin = updated.global_origins[0]
+
+    update_global_origin(
+        global_origin.id,
+        FailoverGlobalOriginUpdate(target="2001:db8::20", port=443, priority=5, remark="新备用", enabled=False),
+        user,
+        db,
+    )
+
+    mirror = db.query(Origin).filter(Origin.global_origin_id == global_origin.id).one()
+    assert mirror.target == "2001:db8::20"
+    assert mirror.target_type == "ipv6"
+    assert mirror.port == 443
+    assert mirror.priority == 5
+    assert mirror.remark == "新备用"
+    assert mirror.enabled is False
+
+
+def test_update_group_collection_adds_and_removes_global_origin_mirrors():
+    db = make_session()
+    zone, user = setup_zone(db)
+    collection = create_collection(FailoverCollectionCreate(name="业务 C"), user, db)
+    create_global_origin(
+        collection.id,
+        FailoverGlobalOriginCreate(target="backup.example.net", port=22, priority=50),
+        user,
+        db,
+    )
+    group = FailoverGroup(zone_id=zone.id, hostname="a.example.com")
+    db.add(group)
+    db.commit()
+
+    update_group(group.id, FailoverGroupUpdate(collection_id=collection.id), user, db)
+
+    group = db.get(FailoverGroup, group.id)
+    assert group is not None
+    assert group.collection_id == collection.id
+    assert [origin.target for origin in group.origins if origin.global_origin_id] == ["backup.example.net"]
+
+    update_group(group.id, FailoverGroupUpdate(collection_id=None), user, db)
+
+    group = db.get(FailoverGroup, group.id)
+    assert group is not None
+    assert group.collection_id is None
+    assert [origin for origin in group.origins if origin.global_origin_id] == []
 
 
 def test_update_current_origin_publishes_new_dns_target(monkeypatch):

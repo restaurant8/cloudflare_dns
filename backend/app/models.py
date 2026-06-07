@@ -79,12 +79,27 @@ class DnsRecord(Base, TimestampMixin):
     zone: Mapped["Zone"] = relationship("Zone", back_populates="records")
 
 
+class FailoverCollection(Base, TimestampMixin):
+    __tablename__ = "failover_collections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False)
+
+    groups: Mapped[list["FailoverGroup"]] = relationship("FailoverGroup", back_populates="collection")
+    global_origins: Mapped[list["FailoverGlobalOrigin"]] = relationship(
+        "FailoverGlobalOrigin",
+        back_populates="collection",
+        cascade="all, delete-orphan",
+    )
+
+
 class FailoverGroup(Base, TimestampMixin):
     __tablename__ = "failover_groups"
     __table_args__ = (UniqueConstraint("zone_id", "hostname", name="uq_failover_group_zone_hostname"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     zone_id: Mapped[int] = mapped_column(ForeignKey("zones.id", ondelete="CASCADE"), nullable=False)
+    collection_id: Mapped[int | None] = mapped_column(ForeignKey("failover_collections.id", ondelete="SET NULL"))
     hostname: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
     ttl: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -96,6 +111,7 @@ class FailoverGroup(Base, TimestampMixin):
     no_healthy_notified_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     zone: Mapped["Zone"] = relationship("Zone", back_populates="groups")
+    collection: Mapped["FailoverCollection | None"] = relationship("FailoverCollection", back_populates="groups")
     origins: Mapped[list["Origin"]] = relationship("Origin", back_populates="group", cascade="all, delete-orphan")
     hostnames: Mapped[list["FailoverHostname"]] = relationship("FailoverHostname", back_populates="group", cascade="all, delete-orphan")
 
@@ -117,6 +133,7 @@ class Origin(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("failover_groups.id", ondelete="CASCADE"), nullable=False)
+    global_origin_id: Mapped[int | None] = mapped_column(ForeignKey("failover_global_origins.id", ondelete="SET NULL"))
     target: Mapped[str] = mapped_column(String(255), nullable=False)
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)
     publish_mode: Mapped[str] = mapped_column(String(20), default="direct", nullable=False)
@@ -134,6 +151,7 @@ class Origin(Base, TimestampMixin):
     published_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
 
     group: Mapped["FailoverGroup"] = relationship("FailoverGroup", back_populates="origins")
+    global_origin: Mapped["FailoverGlobalOrigin | None"] = relationship("FailoverGlobalOrigin", back_populates="mirrored_origins")
     probe_states: Mapped[list["ProbeState"]] = relationship("ProbeState", back_populates="origin", cascade="all, delete-orphan")
 
     @property
@@ -147,6 +165,24 @@ class Origin(Base, TimestampMixin):
     @property
     def published_ips(self) -> list[str]:
         return published_ips(self)
+
+
+class FailoverGlobalOrigin(Base, TimestampMixin):
+    __tablename__ = "failover_global_origins"
+    __table_args__ = (UniqueConstraint("collection_id", "target", "port", name="uq_failover_global_origin_target_port"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    collection_id: Mapped[int] = mapped_column(ForeignKey("failover_collections.id", ondelete="CASCADE"), nullable=False)
+    target: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    publish_mode: Mapped[str] = mapped_column(String(20), default="direct", nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    remark: Mapped[str | None] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    collection: Mapped["FailoverCollection"] = relationship("FailoverCollection", back_populates="global_origins")
+    mirrored_origins: Mapped[list["Origin"]] = relationship("Origin", back_populates="global_origin")
 
 
 class TargetPoolItem(Base, TimestampMixin):

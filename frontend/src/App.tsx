@@ -27,12 +27,14 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverGroup, Origin, Overview, ProbeState, SystemSettings, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
+import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, Overview, ProbeState, SystemSettings, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "agents" | "webhooks" | "settings" | "account" | "events";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
-type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean };
+type GlobalOriginDraft = OriginAddDraft;
+type CollectionDraft = { name: string };
+type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | "" };
 type HostnameAddDraft = { hostname: string; adopt_record_id: string };
 type DnsRecordType = "A" | "AAAA" | "CNAME";
 type DnsRecordEditDraft = { name: string; type: DnsRecordType; content: string; ttl: number; proxied: boolean };
@@ -304,6 +306,7 @@ export default function App() {
   const [zones, setZones] = useState<Zone[]>([]);
   const [selectedZoneId, setSelectedZoneId] = useState<number | "">("");
   const [records, setRecords] = useState<DnsRecord[]>([]);
+  const [failoverCollections, setFailoverCollections] = useState<FailoverCollection[]>([]);
   const [groups, setGroups] = useState<FailoverGroup[]>([]);
   const [targetPool, setTargetPool] = useState<TargetPoolItem[]>([]);
   const [externalIpSources, setExternalIpSources] = useState<ExternalIpSource[]>([]);
@@ -325,10 +328,11 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
+      apiFetch<FailoverCollection[]>("/api/groups/collections", activeToken),
       apiFetch<FailoverGroup[]>("/api/groups", activeToken),
       apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
@@ -342,6 +346,7 @@ export default function App() {
     setOverview(nextOverview);
     setCredentials(nextCredentials);
     setZones(nextZones);
+    setFailoverCollections(nextCollections);
     setGroups(nextGroups);
     setTargetPool(nextTargetPool);
     setExternalIpSources(nextExternalIpSources);
@@ -364,8 +369,9 @@ export default function App() {
 
   async function loadLiveStatus(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAgents, nextEvents] = await Promise.all([
+    const [nextOverview, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAgents, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
+      apiFetch<FailoverCollection[]>("/api/groups/collections", activeToken),
       apiFetch<FailoverGroup[]>("/api/groups", activeToken),
       apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
@@ -374,6 +380,7 @@ export default function App() {
       apiFetch<EventItem[]>("/api/events?limit=100", activeToken)
     ]);
     setOverview(nextOverview);
+    setFailoverCollections(nextCollections);
     setGroups(nextGroups);
     setTargetPool(nextTargetPool);
     setExternalIpSources(nextExternalIpSources);
@@ -625,7 +632,7 @@ export default function App() {
           />
         )}
         {section === "groups" && (
-          <GroupsPanel token={token} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} act={act} />
+          <GroupsPanel token={token} collections={failoverCollections} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} act={act} />
         )}
         {section === "targetPool" && (
           <TargetPoolPanel token={token} targetPool={targetPool} groups={groups} act={act} />
@@ -1556,17 +1563,26 @@ function TargetPoolPanel({ token, targetPool, groups, act }: { token: string; ta
 
 function GroupsPanel({
   token,
+  collections,
   groups,
   targetPool,
   externalIpItems,
   act
 }: {
   token: string;
+  collections: FailoverCollection[];
   groups: FailoverGroup[];
   targetPool: TargetPoolItem[];
   externalIpItems: ExternalIpItem[];
   act: ActionRunner;
 }) {
+  const [collectionDraft, setCollectionDraft] = useState<CollectionDraft>({ name: "" });
+  const [editingCollectionId, setEditingCollectionId] = useState<number | null>(null);
+  const [collectionEdits, setCollectionEdits] = useState<Record<number, CollectionDraft>>({});
+  const [addingGlobalCollectionId, setAddingGlobalCollectionId] = useState<number | null>(null);
+  const [globalOriginAdd, setGlobalOriginAdd] = useState<GlobalOriginDraft>(defaultOriginAddDraft);
+  const [editingGlobalOriginId, setEditingGlobalOriginId] = useState<number | null>(null);
+  const [globalOriginEdits, setGlobalOriginEdits] = useState<Record<number, GlobalOriginDraft>>({});
   const [addingGroupId, setAddingGroupId] = useState<number | null>(null);
   const [originAdd, setOriginAdd] = useState<OriginAddDraft>(defaultOriginAddDraft);
   const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
@@ -1576,13 +1592,141 @@ function GroupsPanel({
   const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
   const [originEdits, setOriginEdits] = useState<Record<number, OriginEditDraft>>({});
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<number>>(new Set());
+  const addingGlobalCollection = addingGlobalCollectionId ? collections.find((collection) => collection.id === addingGlobalCollectionId) : undefined;
   const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
   const addingHostnameGroup = addingHostnameGroupId ? groups.find((group) => group.id === addingHostnameGroupId) : undefined;
   const enabledPoolItems = targetPool.filter((item) => item.enabled);
   const healthyExternalItems = externalIpItems.filter((item) => item.status === "healthy");
   const addTargetType = inferDraftTargetType(originAdd.target);
+  const globalAddTargetType = inferDraftTargetType(globalOriginAdd.target);
   const selectedPoolItemId = enabledPoolItems.find((item) => item.target === originAdd.target && item.port === originAdd.port)?.id || "";
   const selectedExternalItemId = healthyExternalItems.find((item) => item.target === originAdd.target && item.port === originAdd.port)?.id || "";
+  const selectedGlobalPoolItemId = enabledPoolItems.find((item) => item.target === globalOriginAdd.target && item.port === globalOriginAdd.port)?.id || "";
+  const selectedGlobalExternalItemId = healthyExternalItems.find((item) => item.target === globalOriginAdd.target && item.port === globalOriginAdd.port)?.id || "";
+  const groupedSections = useMemo(() => {
+    const sortedCollections = [...collections].sort((left, right) => left.name.localeCompare(right.name) || left.id - right.id);
+    const sortedGroups = [...groups].sort((left, right) => left.hostname.localeCompare(right.hostname) || left.id - right.id);
+    const sections: { collection: FailoverCollection | null; groups: FailoverGroup[] }[] = sortedCollections.map((collection) => ({
+      collection,
+      groups: sortedGroups.filter((group) => group.collection_id === collection.id)
+    }));
+    const ungrouped = sortedGroups.filter((group) => !group.collection_id);
+    if (ungrouped.length > 0) {
+      sections.push({ collection: null, groups: ungrouped });
+    }
+    return sections;
+  }, [collections, groups]);
+
+  async function createCollection(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () => {
+        if (!collectionDraft.name.trim()) {
+          throw new Error("请填写业务分组名称");
+        }
+        return apiFetch("/api/groups/collections", token, {
+          method: "POST",
+          body: JSON.stringify({ name: collectionDraft.name.trim() })
+        });
+      },
+      "业务分组已创建",
+      () => setCollectionDraft({ name: "" })
+    );
+  }
+
+  function beginEditCollection(collection: FailoverCollection) {
+    setEditingCollectionId(collection.id);
+    setCollectionEdits((current) => ({ ...current, [collection.id]: { name: collection.name } }));
+  }
+
+  async function saveCollectionEdit(collectionId: number) {
+    const draft = collectionEdits[collectionId];
+    if (!draft) return;
+    await act(
+      () =>
+        apiFetch(`/api/groups/collections/${collectionId}`, token, {
+          method: "PATCH",
+          body: JSON.stringify({ name: draft.name.trim() })
+        }),
+      "业务分组已更新",
+      () => setEditingCollectionId(null)
+    );
+  }
+
+  function beginAddGlobalOrigin(collection: FailoverCollection) {
+    const maxPriority = collection.global_origins.reduce((value, origin) => Math.max(value, origin.priority), 0);
+    setAddingGlobalCollectionId(collection.id);
+    setGlobalOriginAdd({
+      target: "",
+      port: 22,
+      priority: maxPriority + 10,
+      publish_mode: "direct",
+      remark: "",
+      enabled: true
+    });
+  }
+
+  async function createGlobalOrigin() {
+    if (!addingGlobalCollection) return;
+    await act(
+      () => {
+        if (!globalOriginAdd.target.trim()) {
+          throw new Error("请填写全局备用目标");
+        }
+        return apiFetch(`/api/groups/collections/${addingGlobalCollection.id}/global-origins`, token, {
+          method: "POST",
+          body: JSON.stringify({
+            target: globalOriginAdd.target.trim(),
+            port: globalOriginAdd.port,
+            priority: globalOriginAdd.priority,
+            publish_mode: globalAddTargetType === "hostname" ? globalOriginAdd.publish_mode : "direct",
+            remark: globalOriginAdd.remark.trim() || null,
+            enabled: globalOriginAdd.enabled
+          })
+        });
+      },
+      "全局备用已同步到该业务分组",
+      () => {
+        setAddingGlobalCollectionId(null);
+        setGlobalOriginAdd(defaultOriginAddDraft);
+      }
+    );
+  }
+
+  function beginEditGlobalOrigin(origin: FailoverGlobalOrigin) {
+    setEditingGlobalOriginId(origin.id);
+    setGlobalOriginEdits((current) => ({
+      ...current,
+      [origin.id]: {
+        target: origin.target,
+        port: origin.port,
+        priority: origin.priority,
+        publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
+        remark: origin.remark || "",
+        enabled: origin.enabled
+      }
+    }));
+  }
+
+  async function saveGlobalOriginEdit(originId: number) {
+    const draft = globalOriginEdits[originId];
+    if (!draft) return;
+    const targetType = inferDraftTargetType(draft.target);
+    await act(
+      () =>
+        apiFetch(`/api/groups/global-origins/${originId}`, token, {
+          method: "PATCH",
+          body: JSON.stringify({
+            ...draft,
+            target: draft.target.trim(),
+            remark: draft.remark.trim() || null,
+            publish_mode: targetType === "hostname" ? draft.publish_mode : "direct"
+          })
+        }),
+      "全局备用已同步更新",
+      () => setEditingGlobalOriginId(null)
+    );
+  }
 
   function beginAddOrigin(group: FailoverGroup) {
     const maxPriority = group.origins.reduce((value, origin) => Math.max(value, origin.priority), 0);
@@ -1602,6 +1746,19 @@ function GroupsPanel({
     const item = targetPool.find((poolItem) => poolItem.id === itemId);
     if (!item) return;
     setOriginAdd((current) => ({
+      ...current,
+      target: item.target,
+      port: item.port || 22,
+      publish_mode: "direct",
+      remark: item.remark || "",
+      enabled: true
+    }));
+  }
+
+  function selectGlobalPoolItem(itemId: number) {
+    const item = targetPool.find((poolItem) => poolItem.id === itemId);
+    if (!item) return;
+    setGlobalOriginAdd((current) => ({
       ...current,
       target: item.target,
       port: item.port || 22,
@@ -1682,7 +1839,8 @@ function GroupsPanel({
       [group.id]: {
         ttl: group.ttl,
         min_switch_interval_seconds: group.min_switch_interval_seconds,
-        enabled: group.enabled
+        enabled: group.enabled,
+        collection_id: group.collection_id || ""
       }
     }));
   }
@@ -1694,7 +1852,10 @@ function GroupsPanel({
       () =>
         apiFetch(`/api/groups/${groupId}`, token, {
           method: "PATCH",
-          body: JSON.stringify(draft)
+          body: JSON.stringify({
+            ...draft,
+            collection_id: draft.collection_id === "" ? null : draft.collection_id
+          })
         }),
       "切换组已更新并应用",
       () => setEditingGroupId(null)
@@ -1745,6 +1906,19 @@ function GroupsPanel({
     }));
   }
 
+  function selectGlobalExternalIpItem(itemId: number) {
+    const item = externalIpItems.find((externalItem) => externalItem.id === itemId);
+    if (!item) return;
+    setGlobalOriginAdd((current) => ({
+      ...current,
+      target: item.target,
+      port: item.port || 22,
+      publish_mode: "direct",
+      remark: item.name || "",
+      enabled: true
+    }));
+  }
+
   function expandGroup(groupId: number) {
     setCollapsedGroupIds((current) => {
       if (!current.has(groupId)) return current;
@@ -1766,18 +1940,153 @@ function GroupsPanel({
     });
   }
 
+  function renderGlobalOrigin(origin: FailoverGlobalOrigin) {
+    const draft = globalOriginEdits[origin.id] || {
+      target: origin.target,
+      port: origin.port,
+      priority: origin.priority,
+      publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
+      remark: origin.remark || "",
+      enabled: origin.enabled
+    };
+    const editType = inferDraftTargetType(draft.target);
+    if (editingGlobalOriginId === origin.id) {
+      return (
+        <div className="globalOriginItem globalOriginEditing" key={origin.id}>
+          <label>
+            目标
+            <input value={draft.target} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, target: event.target.value } }))} />
+          </label>
+          <label>
+            端口
+            <input type="number" min={1} max={65535} value={draft.port} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, port: Number(event.target.value) } }))} />
+          </label>
+          <label>
+            优先级
+            <input type="number" min={0} value={draft.priority} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, priority: Number(event.target.value) } }))} />
+          </label>
+          <label>
+            备注
+            <input value={draft.remark} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, remark: event.target.value } }))} />
+          </label>
+          <label className="inlineCheck">
+            <input
+              type="checkbox"
+              disabled={editType !== "hostname"}
+              checked={editType === "hostname" && draft.publish_mode === "expanded"}
+              onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, publish_mode: event.target.checked ? "expanded" : "direct" } }))}
+            />
+            展开 IP 池
+          </label>
+          <label className="inlineCheck">
+            <input type="checkbox" checked={draft.enabled} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, enabled: event.target.checked } }))} />
+            启用
+          </label>
+          <div className="rowActions">
+            <button className="icon" title="保存并同步" onClick={() => saveGlobalOriginEdit(origin.id)}>
+              <Save size={15} />
+            </button>
+            <button className="icon secondaryIcon" title="取消" onClick={() => setEditingGlobalOriginId(null)}>
+              ×
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="globalOriginItem" key={origin.id}>
+        <div>
+          <strong title={`${origin.target}:${origin.port}`}>{displayTargetWithRemark(origin.target, origin.port, origin.remark)}</strong>
+          <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · 发布为 {recordTypeForTargetType(origin.target_type, origin.publish_mode)} · {origin.enabled ? "已启用" : "已停用"}</span>
+        </div>
+        <div className="rowActions">
+          <button className="icon secondaryIcon" title="修改全局备用" onClick={() => beginEditGlobalOrigin(origin)}>
+            <Pencil size={15} />
+          </button>
+          <button className="icon dangerBtn" title="删除全局备用" onClick={() => act(() => apiFetch(`/api/groups/global-origins/${origin.id}`, token, { method: "DELETE" }), "全局备用已删除并同步")}>
+            <Trash2 size={15} />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderCollectionHeader(collection: FailoverCollection | null, groupCount: number) {
+    if (!collection) {
+      return (
+        <div className="collectionHead ungrouped">
+          <div>
+            <strong>未分组</strong>
+            <span>{groupCount} 个切换组 · 移入业务分组后可使用全局备用</span>
+          </div>
+        </div>
+      );
+    }
+    const draft = collectionEdits[collection.id] || { name: collection.name };
+    return (
+      <div className="collectionHead">
+        <div className="collectionMain">
+          {editingCollectionId === collection.id ? (
+            <div className="collectionEditLine">
+              <input value={draft.name} onChange={(event) => setCollectionEdits((current) => ({ ...current, [collection.id]: { name: event.target.value } }))} />
+              <button className="icon" title="保存业务分组" onClick={() => saveCollectionEdit(collection.id)}>
+                <Save size={15} />
+              </button>
+              <button className="icon secondaryIcon" title="取消" onClick={() => setEditingCollectionId(null)}>
+                ×
+              </button>
+            </div>
+          ) : (
+            <div>
+              <strong>{collection.name}</strong>
+              <span>{groupCount} 个切换组 · 全局备用 {collection.global_origins.length} 个</span>
+            </div>
+          )}
+          {collection.global_origins.length > 0 && <div className="globalOriginList">{[...collection.global_origins].sort((left, right) => left.priority - right.priority || left.id - right.id).map(renderGlobalOrigin)}</div>}
+        </div>
+        <div className="rowActions">
+          <button className="secondary compactBtn" onClick={() => beginAddGlobalOrigin(collection)}>
+            <Plus size={15} />
+            <span>全局备用</span>
+          </button>
+          <button className="icon secondaryIcon" title="修改业务分组" onClick={() => beginEditCollection(collection)}>
+            <Pencil size={15} />
+          </button>
+          <button className="icon dangerBtn" title="删除业务分组" onClick={() => act(() => apiFetch(`/api/groups/collections/${collection.id}`, token, { method: "DELETE" }), "业务分组已删除")}>
+            <Trash2 size={15} />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <section className="stack">
       <div className="panelTitle groupsIntro">
         <h2>故障切换组</h2>
-        <p>从解析记录页点击管理即可接管主用解析；这里负责查看状态、修改源站和添加备用目标。</p>
+        <p>从解析记录页接管主用解析；业务分组里的全局备用会自动同步到该分组下所有切换组。</p>
       </div>
+      <form className="collectionCreateBar" onSubmit={createCollection}>
+        <label>
+          新建业务分组
+          <input placeholder="例如 香港线路、美国线路、游戏业务" value={collectionDraft.name} onChange={(event) => setCollectionDraft({ name: event.target.value })} />
+        </label>
+        <button type="submit">
+          <Plus size={16} />
+          <span>创建分组</span>
+        </button>
+      </form>
       <div className="groupGrid">
-        {groups.map((group) => {
+        {groupedSections.map((section) => (
+          <div className="failoverCollectionBlock" key={section.collection?.id || "ungrouped"}>
+            {renderCollectionHeader(section.collection, section.groups.length)}
+            <div className="collectionGroupGrid">
+        {section.groups.map((group) => {
           const groupEdit = groupEdits[group.id] || {
             ttl: group.ttl,
             min_switch_interval_seconds: group.min_switch_interval_seconds,
-            enabled: group.enabled
+            enabled: group.enabled,
+            collection_id: group.collection_id || ""
           };
           const sortedOrigins = [...group.origins].sort((left, right) => left.priority - right.priority || left.id - right.id);
           const primaryPriority = sortedOrigins[0]?.priority;
@@ -1855,6 +2164,17 @@ function GroupsPanel({
                         最小切换间隔（秒）
                         <input type="number" min={0} max={86400} value={groupEdit.min_switch_interval_seconds} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, min_switch_interval_seconds: Number(event.target.value) } }))} />
                       </label>
+                      <label>
+                        业务分组
+                        <select value={groupEdit.collection_id} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, collection_id: event.target.value ? Number(event.target.value) : "" } }))}>
+                          <option value="">未分组</option>
+                          {collections.map((collection) => (
+                            <option value={collection.id} key={collection.id}>
+                              {collection.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                       <label className="inlineCheck">
                         <input type="checkbox" checked={groupEdit.enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, enabled: event.target.checked } }))} />
                         启用这个切换组
@@ -1890,7 +2210,7 @@ function GroupsPanel({
                       const hiddenProbeCount = activeOriginProbeStates.length - visibleProbeStates.length;
                       return (
                         <div
-                          className={`origin ${editingOriginId === origin.id ? "originEditing" : ""} ${isCurrentOrigin ? "originCurrent" : ""} ${isPrimaryOrigin ? "originPrimary" : "originBackup"}`}
+                          className={`origin ${editingOriginId === origin.id ? "originEditing" : ""} ${isCurrentOrigin ? "originCurrent" : ""} ${isPrimaryOrigin ? "originPrimary" : "originBackup"} ${origin.global_origin_id ? "originGlobal" : ""}`}
                           key={origin.id}
                         >
                           <Server size={18} />
@@ -1949,6 +2269,7 @@ function GroupsPanel({
                                   <strong title={`${origin.target}:${origin.port}`}>{displayTargetWithRemark(origin.target, origin.port, origin.remark)}</strong>
                                   <div className="originBadges">
                                     {isCurrentOrigin && <span className="originBadge current">当前使用</span>}
+                                    {origin.global_origin_id && <span className="originBadge global">全局备用</span>}
                                     <span className={`originBadge ${isPrimaryOrigin ? "primary" : "backup"}`}>{isPrimaryOrigin ? "主用" : "备用"}</span>
                                     <span className="originBadge record">{recordTypeForTargetType(origin.target_type, origin.publish_mode)}</span>
                                   </div>
@@ -1981,12 +2302,16 @@ function GroupsPanel({
                               <button className="icon secondaryIcon" title="手动检测这个目标" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}/run`, token, { method: "POST" }), "目标检测已完成")}>
                                 <Play size={15} />
                               </button>
-                              <button className="icon secondaryIcon" title="修改源站" onClick={() => beginEditOrigin(origin)}>
-                                <Pencil size={15} />
-                              </button>
-                              <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}`, token, { method: "DELETE" }), "源站已删除")}>
-                                <Trash2 size={15} />
-                              </button>
+                              {!origin.global_origin_id && (
+                                <>
+                                  <button className="icon secondaryIcon" title="修改源站" onClick={() => beginEditOrigin(origin)}>
+                                    <Pencil size={15} />
+                                  </button>
+                                  <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}`, token, { method: "DELETE" }), "源站已删除")}>
+                                    <Trash2 size={15} />
+                                  </button>
+                                </>
+                              )}
                             </>
                           )}
                         </div>
@@ -1998,13 +2323,98 @@ function GroupsPanel({
             </article>
           );
         })}
-        {groups.length === 0 && (
+              {section.groups.length === 0 && section.collection && (
+                <div className="panel emptyGroupPanel">
+                  <h2>这个业务分组还没有切换组</h2>
+                  <p>编辑切换组时选择这个业务分组后，全局备用会自动同步进去。</p>
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+        {groups.length === 0 && collections.length === 0 && (
           <div className="panel emptyGroupPanel">
             <h2>还没有故障切换组</h2>
             <p>请先到解析记录页，选择一条 DNS-only A/AAAA/CNAME 记录，点击管理并确认接管。</p>
           </div>
         )}
       </div>
+      {addingGlobalCollection && (
+        <div className="modalBackdrop" role="dialog" aria-modal="true">
+          <div className="modalPanel">
+            <div className="panelTitle">
+              <h2>添加全局备用</h2>
+              <p>{addingGlobalCollection.name} · 会同步到这个业务分组下所有切换组</p>
+            </div>
+            <label>
+              从目标池选择
+              <select value={selectedGlobalPoolItemId} onChange={(event) => selectGlobalPoolItem(Number(event.target.value))} disabled={enabledPoolItems.length === 0}>
+                <option value="">{enabledPoolItems.length > 0 ? "选择一个池子目标，或在下方手动输入" : "目标池暂无可用目标"}</option>
+                {enabledPoolItems.map((item) => (
+                  <option value={item.id} key={item.id}>
+                    {displayTargetWithRemark(item.target, item.port, item.remark)} · {targetTypeText(item.target_type)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              从外部 IP 选择
+              <select value={selectedGlobalExternalItemId} onChange={(event) => selectGlobalExternalIpItem(Number(event.target.value))} disabled={healthyExternalItems.length === 0}>
+                <option value="">{healthyExternalItems.length > 0 ? "选择一个已同步 IP" : "暂无外部 IP"}</option>
+                {healthyExternalItems.map((item) => (
+                  <option value={item.id} key={item.id}>
+                    {externalIpLabel(item)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              全局备用 IP / IPv6 / 域名
+              <input placeholder="例如 192.0.2.10 或 backup.example.com" value={globalOriginAdd.target} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, target: event.target.value }))} />
+            </label>
+            <label>
+              备注
+              <input placeholder="例如 全局香港备用、通用回源" value={globalOriginAdd.remark} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, remark: event.target.value }))} />
+            </label>
+            <div className="modalFormGrid">
+              <label>
+                检查端口
+                <input type="number" min={1} max={65535} value={globalOriginAdd.port} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, port: Number(event.target.value) }))} />
+              </label>
+              <label>
+                优先级
+                <input type="number" min={0} value={globalOriginAdd.priority} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, priority: Number(event.target.value) }))} />
+              </label>
+            </div>
+            <label className="inlineCheck">
+              <input type="checkbox" checked={globalOriginAdd.enabled} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, enabled: event.target.checked }))} />
+              启用这个全局备用
+            </label>
+            {globalAddTargetType === "hostname" && (
+              <label className="inlineCheck">
+                <input
+                  type="checkbox"
+                  checked={globalOriginAdd.publish_mode === "expanded"}
+                  onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, publish_mode: event.target.checked ? "expanded" : "direct" }))}
+                />
+                展开解析为 IP 池，只发布健康 A/AAAA
+              </label>
+            )}
+            {globalOriginAdd.target.trim() && (
+              <div className="originHint">
+                当前输入识别为 {targetTypeText(globalAddTargetType)}，同步到各切换组后会发布为 {recordTypeForTargetType(globalAddTargetType, globalOriginAdd.publish_mode)}。
+              </div>
+            )}
+            <div className="modalActions">
+              <button type="button" className="secondary" onClick={() => setAddingGlobalCollectionId(null)}>取消</button>
+              <button type="button" onClick={createGlobalOrigin}>
+                <Plus size={16} />
+                <span>添加全局备用</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {addingHostnameGroup && (
         <div className="modalBackdrop" role="dialog" aria-modal="true">
           <div className="modalPanel">

@@ -114,6 +114,7 @@ class DnsRecordUpdate(DnsRecordCreate):
 
 class FailoverGroupCreate(BaseModel):
     zone_id: int
+    collection_id: int | None = None
     hostname: str = Field(min_length=1, max_length=255)
     ttl: int = Field(default=60, ge=30, le=86400)
     primary_port: int = Field(default=22, ge=1, le=65535)
@@ -123,9 +124,18 @@ class FailoverGroupCreate(BaseModel):
 
 
 class FailoverGroupUpdate(BaseModel):
+    collection_id: int | None = None
     ttl: int | None = Field(default=None, ge=30, le=86400)
     enabled: bool | None = None
     min_switch_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
+
+
+class FailoverCollectionCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class FailoverCollectionUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 class FailoverHostnameCreate(BaseModel):
@@ -187,6 +197,7 @@ def _enabled_probe_states(probe_states: list[ProbeStateOut]) -> list[ProbeStateO
 class OriginOut(BaseModel):
     id: int
     group_id: int
+    global_origin_id: int | None
     target: str
     target_type: str
     publish_mode: str
@@ -209,6 +220,40 @@ class OriginOut(BaseModel):
     def hide_disabled_agent_probe_states(self):
         self.probe_states = _enabled_probe_states(self.probe_states)
         return self
+
+
+class FailoverGlobalOriginCreate(OriginCreate):
+    pass
+
+
+class FailoverGlobalOriginUpdate(OriginUpdate):
+    pass
+
+
+class FailoverGlobalOriginOut(BaseModel):
+    id: int
+    collection_id: int
+    target: str
+    target_type: str
+    publish_mode: str
+    port: int
+    priority: int
+    remark: str | None
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FailoverCollectionOut(BaseModel):
+    id: int
+    name: str
+    global_origins: list[FailoverGlobalOriginOut] = []
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TargetPoolCreate(BaseModel):
@@ -350,6 +395,7 @@ class ExternalIpSourceOut(BaseModel):
 class FailoverGroupOut(BaseModel):
     id: int
     zone_id: int
+    collection_id: int | None
     hostname: str
     ttl: int
     enabled: bool

@@ -57,6 +57,8 @@ def _migrate_existing_schema() -> None:
 
         if "failover_groups" in table_names:
             existing_columns = {column["name"]: column for column in inspector.get_columns("failover_groups")}
+            if "collection_id" not in existing_columns:
+                connection.execute(text(_failover_group_collection_migration_statement(dialect)))
             if "no_healthy_notified_at" not in existing_columns:
                 connection.execute(text(_failover_group_no_healthy_migration_statement(dialect)))
             current_record_id = existing_columns.get("current_record_id")
@@ -91,6 +93,7 @@ def _migrate_existing_schema() -> None:
 def _origin_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":
         return {
+            "global_origin_id": "ALTER TABLE origins ADD COLUMN global_origin_id INT NULL",
             "publish_mode": "ALTER TABLE origins ADD COLUMN publish_mode VARCHAR(20) NOT NULL DEFAULT 'direct'",
             "remark": "ALTER TABLE origins ADD COLUMN remark TEXT NULL",
             "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NULL",
@@ -98,6 +101,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
             "published_ips_json": "ALTER TABLE origins ADD COLUMN published_ips_json TEXT NULL",
         }
     return {
+        "global_origin_id": "ALTER TABLE origins ADD COLUMN global_origin_id INTEGER",
         "publish_mode": "ALTER TABLE origins ADD COLUMN publish_mode VARCHAR(20) NOT NULL DEFAULT 'direct'",
         "remark": "ALTER TABLE origins ADD COLUMN remark TEXT",
         "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NOT NULL DEFAULT '[]'",
@@ -148,6 +152,12 @@ def _failover_group_no_healthy_migration_statement(dialect: str) -> str:
     if dialect == "postgresql":
         return "ALTER TABLE failover_groups ADD COLUMN no_healthy_notified_at TIMESTAMP NULL"
     return "ALTER TABLE failover_groups ADD COLUMN no_healthy_notified_at DATETIME NULL"
+
+
+def _failover_group_collection_migration_statement(dialect: str) -> str:
+    if dialect == "mysql":
+        return "ALTER TABLE failover_groups ADD COLUMN collection_id INT NULL"
+    return "ALTER TABLE failover_groups ADD COLUMN collection_id INTEGER"
 
 
 def get_db():
