@@ -5,7 +5,18 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Agent, CloudflareCredential, FailoverGroup, Origin, ProbeResult, ProbeState, TargetPoolItem, Zone
+from app.models import (
+    Agent,
+    CloudflareCredential,
+    FailoverCollection,
+    FailoverGlobalOrigin,
+    FailoverGroup,
+    Origin,
+    ProbeResult,
+    ProbeState,
+    TargetPoolItem,
+    Zone,
+)
 from app.routes.agents import agent_results, agent_tasks, update_agent
 from app.schemas import AgentResultIn, AgentResultsIn, AgentUpdate
 from app.security import encrypt_secret
@@ -52,6 +63,56 @@ def test_agent_tasks_reuses_duplicate_targets():
     assert response.tasks[0].origin_id == current.id
     assert response.tasks[0].target == current.target
     assert response.tasks[0].port == current.port == backup.port
+
+
+def test_agent_tasks_prefers_global_origin_over_matching_backup():
+    db = make_session()
+    credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
+    collection = FailoverCollection(name="production")
+    db.add_all([credential, collection])
+    db.flush()
+    zone = Zone(credential_id=credential.id, cf_zone_id="zone-1", name="example.com")
+    db.add(zone)
+    db.flush()
+    primary_group = FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="a.example.com")
+    secondary_group = FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="b.example.com")
+    db.add_all([primary_group, secondary_group])
+    db.flush()
+    matching_backup = Origin(
+        group_id=secondary_group.id,
+        target="198.51.100.10",
+        target_type="ipv4",
+        port=22,
+        priority=5,
+    )
+    global_origin_template = FailoverGlobalOrigin(
+        collection_id=collection.id,
+        target=matching_backup.target,
+        target_type="ipv4",
+        port=22,
+        priority=1,
+    )
+    db.add_all([matching_backup, global_origin_template])
+    db.flush()
+    global_origin = Origin(
+        group_id=primary_group.id,
+        global_origin_id=global_origin_template.id,
+        target=global_origin_template.target,
+        target_type="ipv4",
+        port=22,
+        priority=1,
+    )
+    agent = Agent(name="china", region="china", token_hash="hash", status="online", last_seen_at=datetime.utcnow())
+    db.add_all([global_origin, agent])
+    db.commit()
+    db.refresh(global_origin)
+    db.refresh(agent)
+
+    response = agent_tasks(request(), agent=agent, db=db)
+
+    assert len(response.tasks) == 1
+    assert response.tasks[0].origin_id == global_origin.id
+    assert response.tasks[0].target == matching_backup.target
 
 
 def test_update_agent_renames_probe():

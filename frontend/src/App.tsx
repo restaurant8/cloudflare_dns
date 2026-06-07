@@ -6,6 +6,7 @@ import {
   Cloud,
   Copy,
   DatabaseZap,
+  FileCode2,
   Globe2,
   KeyRound,
   Link2,
@@ -27,9 +28,9 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, Overview, ProbeState, SystemSettings, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
+import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, Overview, ProbeState, SavedSnippet, SystemSettings, TargetPoolItem, TelegramNotification, Webhook, Zone } from "./types";
 
-type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "agents" | "webhooks" | "settings" | "account" | "events";
+type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "snippets" | "agents" | "webhooks" | "settings" | "account" | "events";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
 type GlobalOriginDraft = OriginAddDraft;
@@ -40,6 +41,7 @@ type DnsRecordType = "A" | "AAAA" | "CNAME";
 type DnsRecordEditDraft = { name: string; type: DnsRecordType; content: string; ttl: number; proxied: boolean };
 type TargetPoolDraft = { target: string; port: number; remark: string; check_interval_seconds: number; enabled: boolean };
 type ExternalIpSourceDraft = { name: string; base_url: string; token: string; default_port: number; sync_interval_seconds: number; enabled: boolean };
+type SnippetDraft = { title: string; category: string; address: string; username: string; port: string; tags: string; content: string; code: string };
 type AgentEditDraft = { name: string };
 type SystemSettingsDraft = { [K in keyof SystemSettings]: string };
 type SystemSettingField = { key: keyof SystemSettings; label: string; min: number; max: number; step?: number; hint?: string };
@@ -53,6 +55,7 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "groups", label: "故障切换", icon: ListRestart },
   { id: "targetPool", label: "IP 池子", icon: Server },
   { id: "externalIps", label: "外部 IP", icon: Globe2 },
+  { id: "snippets", label: "命令库", icon: FileCode2 },
   { id: "agents", label: "探针", icon: RadioTower },
   { id: "webhooks", label: "通知", icon: WebhookIcon },
   { id: "settings", label: "设置", icon: SlidersHorizontal },
@@ -265,6 +268,7 @@ const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
+const defaultSnippetDraft: SnippetDraft = { title: "", category: "command", address: "", username: "", port: "22", tags: "", content: "", code: "" };
 const liveRefreshIntervalMs = 3000;
 const accessTokenStorageKey = "accessToken";
 const rememberedUsernameStorageKey = "cloudflareDnsRememberedUsername";
@@ -311,6 +315,7 @@ export default function App() {
   const [targetPool, setTargetPool] = useState<TargetPoolItem[]>([]);
   const [externalIpSources, setExternalIpSources] = useState<ExternalIpSource[]>([]);
   const [externalIpItems, setExternalIpItems] = useState<ExternalIpItem[]>([]);
+  const [snippets, setSnippets] = useState<SavedSnippet[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [telegramNotifications, setTelegramNotifications] = useState<TelegramNotification[]>([]);
   const [webhooks, setWebhooks] = useState<Webhook[]>([]);
@@ -328,7 +333,7 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
@@ -337,6 +342,7 @@ export default function App() {
       apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
       apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken),
+      apiFetch<SavedSnippet[]>("/api/snippets", activeToken),
       apiFetch<Agent[]>("/api/agents", activeToken),
       apiFetch<TelegramNotification[]>("/api/telegram", activeToken),
       apiFetch<Webhook[]>("/api/webhooks", activeToken),
@@ -351,6 +357,7 @@ export default function App() {
     setTargetPool(nextTargetPool);
     setExternalIpSources(nextExternalIpSources);
     setExternalIpItems(nextExternalIpItems);
+    setSnippets(nextSnippets);
     setAgents(nextAgents);
     setTelegramNotifications(nextTelegram);
     setWebhooks(nextWebhooks);
@@ -369,13 +376,14 @@ export default function App() {
 
   async function loadLiveStatus(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAgents, nextEvents] = await Promise.all([
+    const [nextOverview, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextSnippets, nextAgents, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<FailoverCollection[]>("/api/groups/collections", activeToken),
       apiFetch<FailoverGroup[]>("/api/groups", activeToken),
       apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
       apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken),
+      apiFetch<SavedSnippet[]>("/api/snippets", activeToken),
       apiFetch<Agent[]>("/api/agents", activeToken),
       apiFetch<EventItem[]>("/api/events?limit=100", activeToken)
     ]);
@@ -385,6 +393,7 @@ export default function App() {
     setTargetPool(nextTargetPool);
     setExternalIpSources(nextExternalIpSources);
     setExternalIpItems(nextExternalIpItems);
+    setSnippets(nextSnippets);
     setAgents(nextAgents);
     setEvents(nextEvents);
     setLiveUpdatedAt(new Date().toISOString());
@@ -640,6 +649,7 @@ export default function App() {
         {section === "externalIps" && (
           <ExternalIpsPanel token={token} externalIpSources={externalIpSources} externalIpItems={externalIpItems} act={act} />
         )}
+        {section === "snippets" && <SnippetsPanel token={token} snippets={snippets} act={act} />}
         {section === "agents" && (
           <AgentsPanel token={token} agents={agents} agentToken={agentToken} setAgentToken={setAgentToken} act={act} />
         )}
@@ -2553,6 +2563,263 @@ function GroupsPanel({
           </div>
         </div>
       )}
+    </section>
+  );
+}
+
+function snippetCategoryText(value: string): string {
+  const labels: Record<string, string> = {
+    ssh: "SSH",
+    command: "命令",
+    address: "地址",
+    note: "备注"
+  };
+  return labels[value] || value;
+}
+
+function sshCommandForSnippet(snippet: SavedSnippet | SnippetDraft): string {
+  const address = (snippet.address || "").trim();
+  if (!address) return "";
+  const username = (snippet.username || "").trim();
+  const portValue = typeof snippet.port === "number" ? snippet.port : Number(snippet.port || 22);
+  const host = username ? `${username}@${address}` : address;
+  return portValue && portValue !== 22 ? `ssh -p ${portValue} ${host}` : `ssh ${host}`;
+}
+
+function fencedCodeParts(value: string): { type: "text" | "code"; value: string; lang?: string }[] {
+  const parts: { type: "text" | "code"; value: string; lang?: string }[] = [];
+  const pattern = /```([\w-]*)\n?([\s\S]*?)```/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(value)) !== null) {
+    if (match.index > cursor) {
+      parts.push({ type: "text", value: value.slice(cursor, match.index) });
+    }
+    parts.push({ type: "code", lang: match[1] || undefined, value: match[2].trim() });
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < value.length) {
+    parts.push({ type: "text", value: value.slice(cursor) });
+  }
+  return parts.filter((part) => part.value.trim());
+}
+
+function SnippetsPanel({ token, snippets, act }: { token: string; snippets: SavedSnippet[]; act: ActionRunner }) {
+  const [draft, setDraft] = useState<SnippetDraft>(defaultSnippetDraft);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [query, setQuery] = useState("");
+  const [copiedKey, setCopiedKey] = useState("");
+  const filtered = useMemo(() => {
+    const text = query.trim().toLowerCase();
+    if (!text) return snippets;
+    return snippets.filter((snippet) =>
+      [
+        snippet.title,
+        snippet.category,
+        snippet.address || "",
+        snippet.username || "",
+        snippet.tags || "",
+        snippet.content || "",
+        snippet.code || ""
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(text)
+    );
+  }, [query, snippets]);
+
+  function resetDraft() {
+    setDraft(defaultSnippetDraft);
+    setEditingId(null);
+  }
+
+  function beginEdit(snippet: SavedSnippet) {
+    setEditingId(snippet.id);
+    setDraft({
+      title: snippet.title,
+      category: snippet.category,
+      address: snippet.address || "",
+      username: snippet.username || "",
+      port: String(snippet.port || 22),
+      tags: snippet.tags || "",
+      content: snippet.content || "",
+      code: snippet.code || ""
+    });
+  }
+
+  async function copyText(key: string, value: string) {
+    await navigator.clipboard.writeText(value);
+    setCopiedKey(key);
+    window.setTimeout(() => setCopiedKey((current) => (current === key ? "" : current)), 1200);
+  }
+
+  function payloadFromDraft() {
+    const portValue = Number(draft.port || 0);
+    return {
+      title: draft.title.trim(),
+      category: draft.category,
+      address: draft.address.trim() || null,
+      username: draft.username.trim() || null,
+      port: portValue > 0 ? portValue : null,
+      tags: draft.tags.trim() || null,
+      content: draft.content.trim() || null,
+      code: draft.code.trim() || null
+    };
+  }
+
+  async function saveSnippet(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () => {
+        if (!draft.title.trim()) throw new Error("请填写标题");
+        const payload = payloadFromDraft();
+        return apiFetch(editingId ? `/api/snippets/${editingId}` : "/api/snippets", token, {
+          method: editingId ? "PATCH" : "POST",
+          body: JSON.stringify(payload)
+        });
+      },
+      editingId ? "资料已更新" : "资料已保存",
+      resetDraft
+    );
+  }
+
+  function renderCodeBlock(key: string, value: string, lang?: string) {
+    return (
+      <div className="snippetCodeBlock" key={key}>
+        <div className="snippetCodeHead">
+          <span>{lang || "代码块"}</span>
+          <button className="icon secondaryIcon" title="复制代码块" onClick={() => copyText(key, value)}>
+            <Copy size={14} />
+          </button>
+        </div>
+        <pre><code>{value}</code></pre>
+      </div>
+    );
+  }
+
+  return (
+    <section className="snippetPanel">
+      <form className="panel snippetForm" onSubmit={saveSnippet}>
+        <div className="panelTitle">
+          <h2>{editingId ? "修改资料" : "保存命令 / 地址"}</h2>
+          <p>用于保存 SSH 地址、常用命令和说明；不要在这里保存密码或私钥。</p>
+        </div>
+        <div className="snippetFormGrid">
+          <label>
+            标题
+            <input value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} placeholder="例如 香港服务器 SSH" />
+          </label>
+          <label>
+            类型
+            <select value={draft.category} onChange={(event) => setDraft((current) => ({ ...current, category: event.target.value }))}>
+              <option value="command">命令</option>
+              <option value="ssh">SSH</option>
+              <option value="address">地址</option>
+              <option value="note">备注</option>
+            </select>
+          </label>
+          <label>
+            地址 / 主机
+            <input value={draft.address} onChange={(event) => setDraft((current) => ({ ...current, address: event.target.value }))} placeholder="例如 1.2.3.4 或 example.com" />
+          </label>
+          <label>
+            用户名
+            <input value={draft.username} onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))} placeholder="例如 root" />
+          </label>
+          <label>
+            端口
+            <input type="number" min={1} max={65535} value={draft.port} onChange={(event) => setDraft((current) => ({ ...current, port: event.target.value }))} />
+          </label>
+          <label>
+            标签
+            <input value={draft.tags} onChange={(event) => setDraft((current) => ({ ...current, tags: event.target.value }))} placeholder="例如 香港, 宝塔, 生产" />
+          </label>
+        </div>
+        <label>
+          说明
+          <textarea value={draft.content} onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))} placeholder={"支持代码块，例如：\n```bash\nsystemctl status nginx\n```"} />
+        </label>
+        <label>
+          代码块 / 常用命令
+          <textarea value={draft.code} onChange={(event) => setDraft((current) => ({ ...current, code: event.target.value }))} placeholder="例如 ssh -p 22 root@1.2.3.4" />
+        </label>
+        {sshCommandForSnippet(draft) && (
+          <div className="snippetPreviewCommand">
+            <code>{sshCommandForSnippet(draft)}</code>
+            <button type="button" className="icon secondaryIcon" title="复制 SSH 命令" onClick={() => copyText("draft-ssh", sshCommandForSnippet(draft))}>
+              <Copy size={14} />
+            </button>
+          </div>
+        )}
+        <div className="modalActions">
+          {editingId && <button type="button" className="secondary" onClick={resetDraft}>取消修改</button>}
+          <button type="submit">
+            <Save size={16} />
+            <span>{editingId ? "保存修改" : "保存资料"}</span>
+          </button>
+        </div>
+      </form>
+      <div className="panel snippetListPanel">
+        <div className="panelTitle">
+          <h2>命令库</h2>
+          <p>点击复制按钮即可复制地址、SSH 命令或代码块。</p>
+        </div>
+        <input className="searchInput" placeholder="搜索标题、标签、地址或内容" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <div className="snippetList">
+          {filtered.map((snippet) => {
+            const sshCommand = sshCommandForSnippet(snippet);
+            return (
+              <article className="snippetCard" key={snippet.id}>
+                <div className="snippetHead">
+                  <div>
+                    <h3>{snippet.title}</h3>
+                    <span>{snippetCategoryText(snippet.category)} · 更新 {fmtDate(snippet.updated_at)}</span>
+                  </div>
+                  <div className="rowActions">
+                    <button className="icon secondaryIcon" title="修改" onClick={() => beginEdit(snippet)}>
+                      <Pencil size={15} />
+                    </button>
+                    <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/snippets/${snippet.id}`, token, { method: "DELETE" }), "资料已删除")}>
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                </div>
+                {snippet.tags && <div className="snippetTags">{snippet.tags.split(/[,\s，]+/).filter(Boolean).map((tag) => <span key={tag}>{tag}</span>)}</div>}
+                {snippet.address && (
+                  <div className="snippetCopyLine">
+                    <span>地址</span>
+                    <code>{snippet.address}</code>
+                    <button className="icon secondaryIcon" title="复制地址" onClick={() => copyText(`address-${snippet.id}`, snippet.address || "")}>
+                      <Copy size={14} />
+                    </button>
+                  </div>
+                )}
+                {sshCommand && (
+                  <div className="snippetCopyLine">
+                    <span>SSH</span>
+                    <code>{sshCommand}</code>
+                    <button className="icon secondaryIcon" title="复制 SSH 命令" onClick={() => copyText(`ssh-${snippet.id}`, sshCommand)}>
+                      <Copy size={14} />
+                    </button>
+                  </div>
+                )}
+                {snippet.content && (
+                  <div className="snippetContent">
+                    {fencedCodeParts(snippet.content).map((part, index) =>
+                      part.type === "code"
+                        ? renderCodeBlock(`content-code-${snippet.id}-${index}`, part.value, part.lang)
+                        : <p key={`content-text-${snippet.id}-${index}`}>{part.value.trim()}</p>
+                    )}
+                  </div>
+                )}
+                {snippet.code && renderCodeBlock(`code-${snippet.id}`, snippet.code)}
+                {copiedKey && copiedKey.includes(String(snippet.id)) && <small className="successText">已复制</small>}
+              </article>
+            );
+          })}
+          {filtered.length === 0 && <div className="emptyGroupPanel"><h2>还没有保存资料</h2><p>左侧添加 SSH 地址、命令或代码块后会显示在这里。</p></div>}
+        </div>
+      </div>
     </section>
   );
 }

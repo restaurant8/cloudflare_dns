@@ -6,7 +6,17 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.health import LOCAL_SOURCE, mark_stale_agents, recalculate_origin_status, run_local_checks
-from app.models import Agent, CloudflareCredential, FailoverGroup, Origin, ProbeState, Zone
+from app.models import (
+    Agent,
+    CloudflareCredential,
+    FailoverCollection,
+    FailoverGlobalOrigin,
+    FailoverGroup,
+    Origin,
+    ProbeResult,
+    ProbeState,
+    Zone,
+)
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, healthy_ips
 from app.security import encrypt_secret
 
@@ -318,6 +328,73 @@ def test_run_local_checks_reuses_duplicate_target_results(monkeypatch):
 
     assert checked == 1
     assert checked_targets == [(current.target, current.port)]
+
+
+def test_run_local_checks_prefers_global_origin_and_syncs_matching_backups(monkeypatch):
+    db = make_session()
+    credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
+    collection = FailoverCollection(name="production")
+    db.add_all([credential, collection])
+    db.flush()
+    zone = Zone(credential_id=credential.id, cf_zone_id="zone-1", name="example.com")
+    db.add(zone)
+    db.flush()
+    primary_group = FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="a.example.com")
+    secondary_group = FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="b.example.com")
+    db.add_all([primary_group, secondary_group])
+    db.flush()
+    global_origin_template = FailoverGlobalOrigin(
+        collection_id=collection.id,
+        target="198.51.100.10",
+        target_type="ipv4",
+        port=22,
+        priority=1,
+    )
+    db.add(global_origin_template)
+    db.flush()
+    global_origin = Origin(
+        group_id=primary_group.id,
+        global_origin_id=global_origin_template.id,
+        target=global_origin_template.target,
+        target_type="ipv4",
+        port=22,
+        priority=1,
+    )
+    matching_backup = Origin(
+        group_id=secondary_group.id,
+        target=global_origin_template.target,
+        target_type="ipv4",
+        port=22,
+        priority=5,
+    )
+    standalone_backup = Origin(
+        group_id=secondary_group.id,
+        target="198.51.100.20",
+        target_type="ipv4",
+        port=22,
+        priority=10,
+    )
+    db.add_all([global_origin, matching_backup, standalone_backup])
+    db.commit()
+    checked_targets = []
+
+    def fake_tcp_check(target, port, timeout):
+        checked_targets.append((target, port))
+        return SimpleNamespace(success=True, rtt_ms=1.0, error=None)
+
+    monkeypatch.setattr("app.health.tcp_check", fake_tcp_check)
+
+    checked = run_local_checks(db)
+
+    assert checked == 2
+    assert checked_targets == [(global_origin.target, 22), (standalone_backup.target, 22)]
+    assert db.query(ProbeResult).filter(ProbeResult.origin_id == matching_backup.id).count() == 0
+
+    global_state = db.query(ProbeState).filter_by(origin_id=global_origin.id, source_key=LOCAL_SOURCE).one()
+    backup_state = db.query(ProbeState).filter_by(origin_id=matching_backup.id, source_key=LOCAL_SOURCE).one()
+
+    assert backup_state.success_count == global_state.success_count == 1
+    assert backup_state.last_checked_at == global_state.last_checked_at
 
 
 def test_expanded_hostname_checks_each_resolved_ip_and_keeps_healthy_pool(monkeypatch):

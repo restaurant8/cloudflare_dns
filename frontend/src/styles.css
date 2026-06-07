@@ -737,6 +737,155 @@ form.panel {
   grid-template-columns: minmax(320px, 460px) minmax(0, 1fr);
 }
 
+.snippetPanel {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(320px, 460px) minmax(0, 1fr);
+}
+
+.snippetForm,
+.snippetListPanel {
+  align-content: start;
+}
+
+.snippetFormGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 130px;
+}
+
+.snippetFormGrid label:nth-child(3),
+.snippetFormGrid label:nth-child(6) {
+  grid-column: 1 / -1;
+}
+
+.snippetForm textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.snippetPreviewCommand,
+.snippetCopyLine {
+  align-items: center;
+  background: #f6f9fc;
+  border: 1px solid #dce7ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 8px 10px;
+}
+
+.snippetPreviewCommand {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.snippetPreviewCommand code,
+.snippetCopyLine code {
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.snippetCopyLine > span {
+  color: #667789;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.snippetList {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.snippetCard {
+  background: #ffffff;
+  border: 1px solid #dfe6ee;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.snippetHead {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.snippetHead h3 {
+  font-size: 16px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.snippetHead span,
+.snippetContent p {
+  color: #667789;
+  font-size: 12px;
+}
+
+.snippetTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.snippetTags span {
+  background: #e0f2fe;
+  border-radius: 999px;
+  color: #075985;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 4px 8px;
+}
+
+.snippetContent {
+  display: grid;
+  gap: 8px;
+}
+
+.snippetContent p {
+  line-height: 1.5;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.snippetCodeBlock {
+  background: #0f172a;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.snippetCodeHead {
+  align-items: center;
+  background: #1e293b;
+  color: #cbd5e1;
+  display: flex;
+  font-size: 12px;
+  font-weight: 800;
+  justify-content: space-between;
+  padding: 7px 8px;
+}
+
+.snippetCodeBlock pre {
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  overflow-x: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
+.successText {
+  color: #166534;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .targetPoolForm,
 .poolListPanel,
 .externalSourceForm,
@@ -1683,6 +1832,7 @@ form.panel {
   .gridTwo,
   .targetPoolPanel,
   .externalIpPanel,
+  .snippetPanel,
   .metrics {
     grid-template-columns: 1fr;
   }
@@ -1709,6 +1859,7 @@ form.panel {
   .collectionEditLine,
   .globalOriginItem,
   .globalOriginEditing,
+  .snippetFormGrid,
   .groupSettingsEdit,
   .origin.originEditing,
   .originEditGrid,

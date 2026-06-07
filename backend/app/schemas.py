@@ -57,6 +57,44 @@ class SystemSettingsUpdate(BaseModel):
     login_lockout_seconds: int | None = Field(default=None, ge=60, le=86400)
 
 
+class SavedSnippetCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    category: Literal["ssh", "command", "address", "note"] = "command"
+    address: str | None = Field(default=None, max_length=255)
+    username: str | None = Field(default=None, max_length=120)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    tags: str | None = Field(default=None, max_length=255)
+    content: str | None = Field(default=None, max_length=10000)
+    code: str | None = Field(default=None, max_length=20000)
+
+
+class SavedSnippetUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    category: Literal["ssh", "command", "address", "note"] | None = None
+    address: str | None = Field(default=None, max_length=255)
+    username: str | None = Field(default=None, max_length=120)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    tags: str | None = Field(default=None, max_length=255)
+    content: str | None = Field(default=None, max_length=10000)
+    code: str | None = Field(default=None, max_length=20000)
+
+
+class SavedSnippetOut(BaseModel):
+    id: int
+    title: str
+    category: str
+    address: str | None
+    username: str | None
+    port: int | None
+    tags: str | None
+    content: str | None
+    code: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class CloudflareCredentialCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     token: str = Field(min_length=10)

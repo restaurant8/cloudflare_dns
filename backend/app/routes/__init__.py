@@ -1,4 +1,4 @@
-from . import agents, auth, credentials, events, external_ips, groups, overview, settings, target_pool, telegram, webhooks, zones
+from . import agents, auth, credentials, events, external_ips, groups, overview, settings, snippets, target_pool, telegram, webhooks, zones
 
 routers = [
     auth.router,
@@ -8,6 +8,7 @@ routers = [
     agents.router,
     target_pool.router,
     external_ips.router,
+    snippets.router,
     settings.router,
     telegram.router,
     webhooks.router,

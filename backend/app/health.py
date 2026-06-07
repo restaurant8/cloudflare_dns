@@ -37,6 +37,36 @@ def origin_needs_probe(origin: Origin, include_all: bool = False) -> bool:
     return True
 
 
+def _normalized_probe_target(target: str) -> str:
+    return target.strip().rstrip(".").lower()
+
+
+def origin_probe_key(origin: Origin) -> tuple[str, str, int]:
+    mode = EXPANDED_PUBLISH_MODE if is_expanded_origin(origin) else "direct"
+    return mode, _normalized_probe_target(origin.target), int(origin.port)
+
+
+def prioritize_global_origin_checks(origins: list[Origin]) -> tuple[list[Origin], set[int]]:
+    global_by_key: dict[tuple[str, str, int], Origin] = {}
+    for origin in origins:
+        if not origin.global_origin_id:
+            continue
+        key = origin_probe_key(origin)
+        current = global_by_key.get(key)
+        if current is None or (origin.priority, origin.id) < (current.priority, current.id):
+            global_by_key[key] = origin
+
+    global_origin_ids = {origin.id for origin in global_by_key.values()}
+    covered_keys = set(global_by_key)
+    global_origins = sorted(global_by_key.values(), key=lambda item: (item.priority, item.id))
+    standalone_origins = [
+        origin
+        for origin in origins
+        if origin.id not in global_origin_ids and origin_probe_key(origin) not in covered_keys
+    ]
+    return [*global_origins, *standalone_origins], global_origin_ids
+
+
 def _probe_state(db: Session, origin: Origin, source_key: str, agent: Agent | None) -> ProbeState:
     state = (
         db.query(ProbeState)
@@ -48,6 +78,55 @@ def _probe_state(db: Session, origin: Origin, source_key: str, agent: Agent | No
         db.add(state)
         db.flush()
     return state
+
+
+def sync_probe_states_from_origin(db: Session, source: Origin, origins: list[Origin]) -> int:
+    source_key = origin_probe_key(source)
+    targets = [
+        origin
+        for origin in origins
+        if origin.id != source.id
+        and origin.enabled
+        and origin.group
+        and origin.group.enabled
+        and origin_probe_key(origin) == source_key
+    ]
+    if not targets:
+        return 0
+
+    source_states = db.query(ProbeState).filter(ProbeState.origin_id == source.id).all()
+    source_state_keys = {state.source_key for state in source_states}
+    synced = 0
+    for target in targets:
+        if is_expanded_origin(source):
+            set_resolved_ips(target, resolved_ips(source))
+            set_healthy_ips(target, healthy_ips(source))
+        target.status = source.status
+        target.last_checked_at = source.last_checked_at
+        target.last_error = source.last_error
+        target.last_rtt_ms = source.last_rtt_ms
+
+        target_states = db.query(ProbeState).filter(ProbeState.origin_id == target.id).all()
+        target_states_by_key = {state.source_key: state for state in target_states}
+        for stale_state in target_states:
+            if stale_state.source_key not in source_state_keys:
+                db.delete(stale_state)
+        for source_state in source_states:
+            target_state = target_states_by_key.get(source_state.source_key)
+            if target_state is None:
+                target_state = ProbeState(origin_id=target.id, source_key=source_state.source_key)
+                db.add(target_state)
+            target_state.agent_id = source_state.agent_id
+            target_state.status = source_state.status
+            target_state.success_count = source_state.success_count
+            target_state.fail_count = source_state.fail_count
+            target_state.last_checked_at = source_state.last_checked_at
+            target_state.last_error = source_state.last_error
+            target_state.last_rtt_ms = source_state.last_rtt_ms
+        db.flush()
+        recalculate_origin_status(db, target)
+        synced += 1
+    return synced
 
 
 def _target_pool_probe_state(db: Session, item: TargetPoolItem, source_key: str, agent: Agent | None) -> TargetPoolProbeState:
@@ -568,6 +647,7 @@ def run_local_checks(
         for origin in origins
         if origin.group.enabled and origin_needs_probe(origin, include_all=include_all)
     ]
+    origins_to_probe, global_origin_ids = prioritize_global_origin_checks(origins_to_check)
     checked = 0
     if check_cache is None:
         check_cache = {}
@@ -580,7 +660,11 @@ def run_local_checks(
             checked += 1
         return check_cache[key]
 
-    for origin in origins_to_check:
+    def sync_if_global(origin: Origin) -> None:
+        if origin.id in global_origin_ids:
+            sync_probe_states_from_origin(db, origin, origins_to_check)
+
+    for origin in origins_to_probe:
         if is_expanded_origin(origin):
             try:
                 ips = refresh_expanded_origin_ips(origin)
@@ -589,6 +673,7 @@ def run_local_checks(
                 set_healthy_ips(origin, [])
                 origin.status = "unhealthy"
                 origin.last_error = f"展开域名解析失败: {exc}"
+                sync_if_global(origin)
                 continue
             for ip in ips:
                 result = check_once(ip, origin.port)
@@ -604,6 +689,7 @@ def run_local_checks(
                 )
             if not ips:
                 recalculate_origin_status(db, origin)
+            sync_if_global(origin)
             continue
         result = check_once(origin.target, origin.port)
         apply_probe_result(
@@ -616,6 +702,7 @@ def run_local_checks(
             target=origin.target,
             port=origin.port,
         )
+        sync_if_global(origin)
     return checked
 
 

@@ -8,7 +8,16 @@ from sqlalchemy.orm import Session, selectinload
 from ..agent_installer import build_install_script
 from ..database import get_db
 from ..deps import get_agent, get_current_user
-from ..health import active_agents, agent_region, apply_probe_result, mark_agent_online, origin_needs_probe, refresh_expanded_origin_ips
+from ..health import (
+    active_agents,
+    agent_region,
+    apply_probe_result,
+    mark_agent_online,
+    origin_needs_probe,
+    prioritize_global_origin_checks,
+    refresh_expanded_origin_ips,
+    sync_probe_states_from_origin,
+)
 from ..models import Agent, FailoverGroup, Origin, User
 from ..origin_expansion import expanded_source_key, is_expanded_origin, resolved_ips
 from ..request_utils import client_ip_from_request
@@ -172,9 +181,14 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
         task_keys.add(key)
         tasks.append(AgentTask(origin_id=origin_id, target=target, port=port, timeout_seconds=settings.check_timeout_seconds))
 
-    for origin in origins:
-        if not origin.group.enabled or not origin_needs_probe(origin):
-            continue
+    origin_candidates = [
+        origin
+        for origin in origins
+        if origin.group.enabled and origin_needs_probe(origin)
+    ]
+    origins_to_probe, _ = prioritize_global_origin_checks(origin_candidates)
+
+    for origin in origins_to_probe:
         if is_expanded_origin(origin):
             try:
                 ips = refresh_expanded_origin_ips(origin)
@@ -206,7 +220,8 @@ def agent_results(payload: AgentResultsIn, request: Request, agent: Agent = Depe
         if key in processed_keys:
             continue
         processed_keys.add(key)
-        for origin in _matching_origins_for_probe(origins, item.target, item.port):
+        matched_origins = _matching_origins_for_probe(origins, item.target, item.port)
+        for origin in matched_origins:
             source_key = f"agent:{agent.id}"
             if is_expanded_origin(origin):
                 source_key = expanded_source_key(source_key, item.target)
@@ -221,5 +236,8 @@ def agent_results(payload: AgentResultsIn, request: Request, agent: Agent = Depe
                 target=item.target,
                 port=item.port,
             )
+        for origin in matched_origins:
+            if origin.global_origin_id:
+                sync_probe_states_from_origin(db, origin, origins)
     db.commit()
     return Message(message="探测结果已接收")

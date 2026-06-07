@@ -31,6 +31,20 @@ class AppSetting(Base, TimestampMixin):
     value: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class SavedSnippet(Base, TimestampMixin):
+    __tablename__ = "saved_snippets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    category: Mapped[str] = mapped_column(String(40), default="command", nullable=False)
+    address: Mapped[str | None] = mapped_column(String(255))
+    username: Mapped[str | None] = mapped_column(String(120))
+    port: Mapped[int | None] = mapped_column(Integer)
+    tags: Mapped[str | None] = mapped_column(String(255))
+    content: Mapped[str | None] = mapped_column(Text)
+    code: Mapped[str | None] = mapped_column(Text)
+
+
 class CloudflareCredential(Base, TimestampMixin):
     __tablename__ = "cloudflare_credentials"
 

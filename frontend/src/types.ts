@@ -187,6 +187,20 @@ export type TelegramNotification = {
   last_error: string | null;
 };
 
+export type SavedSnippet = {
+  id: number;
+  title: string;
+  category: string;
+  address: string | null;
+  username: string | null;
+  port: number | null;
+  tags: string | null;
+  content: string | null;
+  code: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type EventItem = {
   id: number;
   type: string;
