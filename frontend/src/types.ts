@@ -233,14 +233,10 @@ export type SystemSettings = {
 
 export type SshSettings = {
   enabled: boolean;
+  external_url: string;
   upstream_url: string;
   session_ttl_seconds: number;
   entry_path: string;
-};
-
-export type SshSession = {
-  entry_url: string;
-  expires_in: number;
 };
 
 export type Overview = {

@@ -31,6 +31,7 @@ def test_ssh_settings_default_to_disabled_local_upstream():
     settings = read_ssh_settings(user, db)
 
     assert settings.enabled is False
+    assert settings.external_url == ""
     assert settings.upstream_url == "http://127.0.0.1:8182"
     assert settings.entry_path == "/api/ssh/proxy/"
 
@@ -44,6 +45,19 @@ def test_ssh_settings_reject_non_local_upstream():
 
     with pytest.raises(ValidationError):
         update_ssh_settings(SshSettingsUpdate(enabled=True, upstream_url="http://example.com:8182"), user, db)
+
+    with pytest.raises(ValidationError):
+        SshSettingsUpdate(external_url="http://ssh.example.com")
+
+
+def test_ssh_settings_save_external_https_entry():
+    db = make_session()
+    user = make_user(db)
+
+    settings = update_ssh_settings(SshSettingsUpdate(enabled=True, external_url="https://ssh.example.com/"), user, db)
+
+    assert settings.enabled is True
+    assert settings.external_url == "https://ssh.example.com"
 
 
 def test_ssh_session_requires_enabled_settings_and_sets_cookie():

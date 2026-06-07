@@ -29,7 +29,7 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, Overview, ProbeState, SavedSnippet, SshSession, SshSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, Zone } from "./types";
+import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, Zone } from "./types";
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
@@ -43,7 +43,7 @@ type DnsRecordEditDraft = { name: string; type: DnsRecordType; content: string; 
 type TargetPoolDraft = { target: string; port: number; remark: string; check_interval_seconds: number; enabled: boolean };
 type ExternalIpSourceDraft = { name: string; base_url: string; token: string; default_port: number; sync_interval_seconds: number; enabled: boolean };
 type SnippetDraft = { title: string; category: string; address: string; username: string; port: string; tags: string; content: string; code: string };
-type SshSettingsDraft = { enabled: boolean; upstream_url: string; session_ttl_seconds: string };
+type SshSettingsDraft = { enabled: boolean; external_url: string };
 type AgentEditDraft = { name: string };
 type SystemSettingsDraft = { [K in keyof SystemSettings]: string };
 type SystemSettingField = { key: keyof SystemSettings; label: string; min?: number; max?: number; step?: number; hint?: string; type?: "number" | "toggle" };
@@ -2835,24 +2835,21 @@ function SnippetsPanel({ token, snippets, act }: { token: string; snippets: Save
 function SshPanel({ token, settings, act }: { token: string; settings: SshSettings; act: ActionRunner }) {
   const [draft, setDraft] = useState<SshSettingsDraft>({
     enabled: settings.enabled,
-    upstream_url: settings.upstream_url,
-    session_ttl_seconds: String(settings.session_ttl_seconds)
+    external_url: settings.external_url
   });
-  const [frameUrl, setFrameUrl] = useState("");
   const [copiedKey, setCopiedKey] = useState("");
 
   useEffect(() => {
     setDraft({
       enabled: settings.enabled,
-      upstream_url: settings.upstream_url,
-      session_ttl_seconds: String(settings.session_ttl_seconds)
+      external_url: settings.external_url
     });
   }, [settings]);
 
   const dockerInstall = `mkdir -p /www/server/sshwifty
 cat > /www/server/sshwifty/sshwifty.conf.json <<'JSON'
 {
-  "HostName": "127.0.0.1",
+  "HostName": "",
   "SharedKey": "CHANGE_THIS_STRONG_PASSWORD",
   "DialTimeout": 10,
   "Servers": [
@@ -2881,9 +2878,10 @@ docker run --detach \\
   --name sshwifty \\
   niruix/sshwifty:latest`;
 
-  const nginxSnippet = `# 放在普通 /api/ location 前面，保证 SSH WebSocket 可以升级
-location /api/ssh/proxy/ {
-    proxy_pass http://127.0.0.1:8000/api/ssh/proxy/;
+  const nginxSnippet = `# 单独给 Sshwifty 建一个站点，例如 ssh.dns.jiyeai.com
+# aaPanel 里建站并申请证书后，把下面 location 放进该站点配置。
+location / {
+    proxy_pass http://127.0.0.1:8182;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
@@ -2909,32 +2907,16 @@ location /api/ssh/proxy/ {
           method: "PATCH",
           body: JSON.stringify({
             enabled: draft.enabled,
-            upstream_url: draft.upstream_url.trim(),
-            session_ttl_seconds: Number.parseInt(draft.session_ttl_seconds, 10)
+            external_url: draft.external_url.trim()
           })
         }),
       "SSH 设置已保存"
     );
   }
 
-  async function openSsh() {
-    await act(
-      async () => {
-        const session = await apiFetch<SshSession>("/api/ssh/session", token, { method: "POST" });
-        setFrameUrl(`${session.entry_url}?t=${Date.now()}`);
-      },
-      "SSH 会话已打开"
-    );
-  }
-
-  async function closeSsh() {
-    await act(
-      async () => {
-        await apiFetch("/api/ssh/session", token, { method: "DELETE" });
-        setFrameUrl("");
-      },
-      "SSH 会话已关闭"
-    );
+  function openSsh() {
+    if (!settings.external_url) return;
+    window.open(settings.external_url, "_blank", "noopener,noreferrer");
   }
 
   function renderCopyBlock(key: string, title: string, value: string) {
@@ -2957,12 +2939,11 @@ location /api/ssh/proxy/ {
       <form className="panel sshSettingsPanel" onSubmit={saveSettings}>
         <div className="panelTitle">
           <h2>SSH 接入</h2>
-          <p>使用 Sshwifty 作为独立 SSH 子服务；本项目只负责登录后的临时入口和本机代理，不接管你的服务器密码。</p>
+          <p>把 Sshwifty 单独部署成 HTTPS 站点，本项目只保存入口地址并提供打开按钮。</p>
         </div>
         <div className="sshStatusLine">
           <span className={settings.enabled ? "pill healthy" : "pill muted"}>{settings.enabled ? "已启用" : "未启用"}</span>
-          <span>入口：{settings.entry_path}</span>
-          <span>上游：{settings.upstream_url}</span>
+          <span>入口：{settings.external_url || "未设置"}</span>
         </div>
         <div className="settingsGrid">
           <label className="checkboxLabel">
@@ -2970,14 +2951,9 @@ location /api/ssh/proxy/ {
             启用 SSH 菜单入口
           </label>
           <label>
-            Sshwifty 本机地址
-            <input value={draft.upstream_url} onChange={(event) => setDraft((current) => ({ ...current, upstream_url: event.target.value }))} placeholder="http://127.0.0.1:8182" />
-            <span>只允许 localhost / 127.0.0.1 / ::1，避免暴露任意代理。</span>
-          </label>
-          <label>
-            临时会话有效期
-            <input type="number" min={60} max={3600} value={draft.session_ttl_seconds} onChange={(event) => setDraft((current) => ({ ...current, session_ttl_seconds: event.target.value }))} />
-            <span>60 - 3600 秒，到期后需要重新点击打开。</span>
+            Sshwifty HTTPS 入口
+            <input value={draft.external_url} onChange={(event) => setDraft((current) => ({ ...current, external_url: event.target.value }))} placeholder="https://ssh.dns.jiyeai.com" />
+            <span>必须是 HTTPS。建议用 Cloudflare Access 保护这个子域名。</span>
           </label>
         </div>
         <div className="formActions">
@@ -2990,38 +2966,31 @@ location /api/ssh/proxy/ {
 
       <div className="panel sshFramePanel">
         <div className="panelTitle">
-          <h2>SSH 窗口</h2>
-          <p>先确认 Sshwifty 已在服务器本机运行，再点击打开。会话到期后需要重新打开。</p>
+          <h2>SSH 入口</h2>
+          <p>点击后会打开你配置的 Sshwifty HTTPS 站点。连接和登录由 Sshwifty 自己处理。</p>
         </div>
         <div className="formActions">
-          <button type="button" disabled={!settings.enabled} onClick={openSsh}>
+          <button type="button" disabled={!settings.enabled || !settings.external_url} onClick={openSsh}>
             <SquareTerminal size={16} />
             <span>打开 SSH</span>
           </button>
-          {frameUrl && (
-            <button type="button" className="secondary" onClick={closeSsh}>
-              <PowerOff size={16} />
-              <span>关闭会话</span>
-            </button>
-          )}
         </div>
-        {!settings.enabled && <div className="emptyGroupPanel"><h2>SSH 尚未启用</h2><p>先保存启用设置，并确认 Sshwifty 已在服务器本机运行。</p></div>}
-        {settings.enabled && !frameUrl && (
+        {(!settings.enabled || !settings.external_url) && <div className="emptyGroupPanel"><h2>SSH 入口尚未可用</h2><p>先启用 SSH 菜单，并填写 Sshwifty 的 HTTPS 地址。</p></div>}
+        {settings.enabled && settings.external_url && (
           <div className="sshPlaceholder">
-            <strong>点击“打开 SSH”后，终端会在这里显示。</strong>
-            <span>如果提示 Sshwifty 未连接，请先确认服务器上容器正在运行，并监听 127.0.0.1:8182。</span>
+            <strong>{settings.external_url}</strong>
+            <span>推荐在 Cloudflare 上给这个子域名开启 Access，再把 8182 端口保持为仅本机监听。</span>
           </div>
         )}
-        {settings.enabled && frameUrl && <iframe className="sshFrame" src={frameUrl} title="SSH" />}
       </div>
 
       <details className="panel sshGuidePanel">
         <summary>
-          <span>部署命令和 Nginx 配置</span>
+          <span>部署 Sshwifty HTTPS 子站</span>
           <small>只在首次安装或排错时展开</small>
         </summary>
         <div className="sshGuideIntro">
-          容器只绑定 <code>127.0.0.1:8182</code>，不要把 8182 端口开放到公网。Sshwifty 的 SharedKey 请改成强密码。
+          容器只绑定 <code>127.0.0.1:8182</code>，Nginx 单独建一个 HTTPS 子域名反代过去。不要把 8182 端口开放到公网。
         </div>
         <div className="sshGuideGrid">
           {renderCopyBlock("ssh-docker", "服务器安装命令", dockerInstall)}

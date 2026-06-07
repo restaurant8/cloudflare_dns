@@ -18,6 +18,7 @@ router = APIRouter(prefix="/ssh", tags=["ssh"])
 SSH_COOKIE_NAME = "cf_dns_ssh_session"
 SSH_ENTRY_PATH = "/api/ssh/proxy/"
 SSH_SETTING_ENABLED = "ssh.enabled"
+SSH_SETTING_EXTERNAL_URL = "ssh.external_url"
 SSH_SETTING_UPSTREAM_URL = "ssh.upstream_url"
 SSH_SETTING_SESSION_TTL = "ssh.session_ttl_seconds"
 DEFAULT_UPSTREAM_URL = "http://127.0.0.1:8182"
@@ -61,6 +62,7 @@ def _ssh_settings(db: Session) -> SshSettingsOut:
         session_ttl = DEFAULT_SESSION_TTL_SECONDS
     return SshSettingsOut(
         enabled=_bool_setting(_setting_value(db, SSH_SETTING_ENABLED, "false")),
+        external_url=_setting_value(db, SSH_SETTING_EXTERNAL_URL, "").rstrip("/"),
         upstream_url=_setting_value(db, SSH_SETTING_UPSTREAM_URL, DEFAULT_UPSTREAM_URL).rstrip("/"),
         session_ttl_seconds=session_ttl,
         entry_path=SSH_ENTRY_PATH,
@@ -141,6 +143,8 @@ def read_ssh_settings(_: User = Depends(get_current_user), db: Session = Depends
 @router.patch("/settings", response_model=SshSettingsOut)
 def update_ssh_settings(payload: SshSettingsUpdate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
     updates = payload.model_dump(exclude_unset=True)
+    if "external_url" in updates and updates["external_url"] is not None:
+        _set_setting_value(db, SSH_SETTING_EXTERNAL_URL, updates["external_url"].rstrip("/"))
     if "upstream_url" in updates and updates["upstream_url"] is not None:
         _require_local_upstream(updates["upstream_url"])
         _set_setting_value(db, SSH_SETTING_UPSTREAM_URL, updates["upstream_url"].rstrip("/"))

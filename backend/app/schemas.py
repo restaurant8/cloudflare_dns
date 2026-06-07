@@ -75,6 +75,7 @@ class SystemSettingsUpdate(BaseModel):
 
 class SshSettingsOut(BaseModel):
     enabled: bool = False
+    external_url: str = ""
     upstream_url: str = "http://127.0.0.1:8182"
     session_ttl_seconds: int = 300
     entry_path: str = "/api/ssh/proxy/"
@@ -82,8 +83,24 @@ class SshSettingsOut(BaseModel):
 
 class SshSettingsUpdate(BaseModel):
     enabled: bool | None = None
+    external_url: str | None = Field(default=None, max_length=255)
     upstream_url: str | None = Field(default=None, max_length=255)
     session_ttl_seconds: int | None = Field(default=None, ge=60, le=3600)
+
+    @field_validator("external_url")
+    @classmethod
+    def validate_external_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        cleaned = value.strip().rstrip("/")
+        if not cleaned:
+            return ""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(cleaned)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("SSH entry URL must be an HTTPS URL")
+        return cleaned
 
     @field_validator("upstream_url")
     @classmethod
