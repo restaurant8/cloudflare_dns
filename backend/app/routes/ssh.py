@@ -102,6 +102,37 @@ def _proxy_headers(request: Request) -> dict[str, str]:
     return headers
 
 
+def _ssh_error_response(status_code: int, title: str, detail: str) -> Response:
+    html = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body {{
+      background: #0f172a;
+      color: #dbeafe;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 24px;
+    }}
+    h1 {{ color: #ffffff; font-size: 20px; margin: 0 0 10px; }}
+    p {{ color: #bfdbfe; line-height: 1.7; margin: 0; }}
+    code {{
+      background: rgba(255,255,255,0.08);
+      border-radius: 6px;
+      color: #ffffff;
+      padding: 2px 6px;
+    }}
+  </style>
+</head>
+<body>
+  <h1>{title}</h1>
+  <p>{detail}</p>
+</body>
+</html>"""
+    return Response(content=html, status_code=status_code, media_type="text/html; charset=utf-8")
+
+
 @router.get("/settings", response_model=SshSettingsOut)
 def read_ssh_settings(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return _ssh_settings(db)
@@ -160,12 +191,19 @@ async def ssh_http_proxy(path: str = "", request: Request = None, db: Session = 
     require_cloudflare_access(request, db)
     _require_ssh_session(request, db)
     target_url = _target_url(settings.upstream_url, path, request.url.query.encode("utf-8"))
-    async with httpx.AsyncClient(follow_redirects=False, timeout=60.0) as client:
-        upstream = await client.request(
-            request.method,
-            target_url,
-            headers=_proxy_headers(request),
-            content=await request.body(),
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=60.0) as client:
+            upstream = await client.request(
+                request.method,
+                target_url,
+                headers=_proxy_headers(request),
+                content=await request.body(),
+            )
+    except httpx.RequestError as exc:
+        return _ssh_error_response(
+            502,
+            "Sshwifty 未连接",
+            f"后端无法连接 <code>{settings.upstream_url}</code>。请确认 Sshwifty 容器已经启动，并且只监听本机地址 127.0.0.1:8182。错误：{exc}",
         )
     response_headers = {
         key: value

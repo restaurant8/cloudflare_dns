@@ -2988,21 +2988,10 @@ location /api/ssh/proxy/ {
         </div>
       </form>
 
-      <div className="panel sshGuidePanel">
-        <div className="panelTitle">
-          <h2>部署 Sshwifty</h2>
-          <p>容器只绑定 127.0.0.1:8182，不要把 8182 端口开放到公网。Sshwifty 的 SharedKey 请改成强密码。</p>
-        </div>
-        <div className="sshGuideGrid">
-          {renderCopyBlock("ssh-docker", "服务器安装命令", dockerInstall)}
-          {renderCopyBlock("ssh-nginx", "Nginx WebSocket 反代补充", nginxSnippet)}
-        </div>
-      </div>
-
       <div className="panel sshFramePanel">
         <div className="panelTitle">
           <h2>SSH 窗口</h2>
-          <p>点击打开后会创建一个短期 HttpOnly 会话 cookie；没有这个 cookie，后端代理会拒绝访问。</p>
+          <p>先确认 Sshwifty 已在服务器本机运行，再点击打开。会话到期后需要重新打开。</p>
         </div>
         <div className="formActions">
           <button type="button" disabled={!settings.enabled} onClick={openSsh}>
@@ -3017,9 +3006,28 @@ location /api/ssh/proxy/ {
           )}
         </div>
         {!settings.enabled && <div className="emptyGroupPanel"><h2>SSH 尚未启用</h2><p>先保存启用设置，并确认 Sshwifty 已在服务器本机运行。</p></div>}
-        {settings.enabled && !frameUrl && <div className="sshPlaceholder">点击“打开 SSH”后，终端会在这里显示。</div>}
+        {settings.enabled && !frameUrl && (
+          <div className="sshPlaceholder">
+            <strong>点击“打开 SSH”后，终端会在这里显示。</strong>
+            <span>如果提示 Sshwifty 未连接，请先确认服务器上容器正在运行，并监听 127.0.0.1:8182。</span>
+          </div>
+        )}
         {settings.enabled && frameUrl && <iframe className="sshFrame" src={frameUrl} title="SSH" />}
       </div>
+
+      <details className="panel sshGuidePanel">
+        <summary>
+          <span>部署命令和 Nginx 配置</span>
+          <small>只在首次安装或排错时展开</small>
+        </summary>
+        <div className="sshGuideIntro">
+          容器只绑定 <code>127.0.0.1:8182</code>，不要把 8182 端口开放到公网。Sshwifty 的 SharedKey 请改成强密码。
+        </div>
+        <div className="sshGuideGrid">
+          {renderCopyBlock("ssh-docker", "服务器安装命令", dockerInstall)}
+          {renderCopyBlock("ssh-nginx", "Nginx WebSocket 反代补充", nginxSnippet)}
+        </div>
+      </details>
     </section>
   );
 }
