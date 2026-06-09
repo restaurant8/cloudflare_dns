@@ -282,6 +282,35 @@ class AzPanelResource(Base, TimestampMixin):
     jobs: Mapped[list["IpChangeJob"]] = relationship("IpChangeJob", back_populates="azpanel_resource")
 
 
+class AzPanelRemoteResource(Base, TimestampMixin):
+    __tablename__ = "azpanel_remote_resources"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "account_id",
+            "region",
+            "resource_id",
+            "ip_version",
+            name="uq_azpanel_remote_resource_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(512), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    account_id: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    region: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    ip_version: Mapped[str] = mapped_column(String(10), default="ipv4", nullable=False)
+    current_ip: Mapped[str | None] = mapped_column(String(120))
+    status: Mapped[str | None] = mapped_column(String(40))
+    remark: Mapped[str | None] = mapped_column(Text)
+    port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime)
+    source_json: Mapped[str | None] = mapped_column(Text)
+
+
 class XboardNodeBinding(Base, TimestampMixin):
     __tablename__ = "xboard_node_bindings"
 

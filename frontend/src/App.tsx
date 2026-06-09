@@ -29,9 +29,9 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, AzPanelResource, AzPanelSettings, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
+import type { Agent, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
 
-type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "azpanel" | "xboard" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
+type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; remark: string; enabled: boolean };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; remark: string; enabled: boolean };
@@ -63,7 +63,6 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "targetPool", label: "IP 池子", icon: Server },
   { id: "externalIps", label: "外部 IP", icon: Globe2 },
   { id: "azpanel", label: "自动换 IP", icon: RefreshCw },
-  { id: "xboard", label: "Xboard 节点", icon: Link2 },
   { id: "snippets", label: "命令库", icon: FileCode2 },
   { id: "ssh", label: "SSH", icon: SquareTerminal },
   { id: "agents", label: "探针", icon: RadioTower },
@@ -404,8 +403,6 @@ export default function App() {
   const [sshSettings, setSshSettings] = useState<SshSettings | null>(null);
   const [azPanelSettings, setAzPanelSettings] = useState<AzPanelSettings | null>(null);
   const [azPanelResources, setAzPanelResources] = useState<AzPanelResource[]>([]);
-  const [xboardSettings, setXboardSettings] = useState<XboardSettings | null>(null);
-  const [xboardNodes, setXboardNodes] = useState<XboardNodeBinding[]>([]);
   const [ipChangeJobs, setIpChangeJobs] = useState<IpChangeJob[]>([]);
   const [events, setEvents] = useState<EventItem[]>([]);
   const [agentToken, setAgentToken] = useState("");
@@ -416,11 +413,9 @@ export default function App() {
       ? "Sshwifty 通过本项目临时会话访问"
       : section === "azpanel"
         ? "源站被墙后调用 azpanel 更换公网 IP"
-        : section === "xboard"
-          ? "绑定 Xboard 节点到 azpanel 资源，换 IP 后等待节点自动上报"
-          : selectedZone
-            ? selectedZone.name
-            : "尚未选择域名区域";
+        : selectedZone
+          ? selectedZone.name
+          : "尚未选择域名区域";
 
   async function loadSetup() {
     setBootError("");
@@ -430,7 +425,7 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelSettings, nextAzPanelResources, nextXboardSettings, nextXboardNodes, nextIpChangeJobs, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelSettings, nextAzPanelResources, nextIpChangeJobs, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
@@ -441,8 +436,6 @@ export default function App() {
       apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken),
       apiFetch<AzPanelSettings>("/api/integrations/azpanel/settings", activeToken),
       apiFetch<AzPanelResource[]>("/api/integrations/azpanel/resources", activeToken),
-      apiFetch<XboardSettings>("/api/integrations/xboard/settings", activeToken),
-      apiFetch<XboardNodeBinding[]>("/api/integrations/xboard/nodes", activeToken),
       apiFetch<IpChangeJob[]>("/api/integrations/ip-change-jobs", activeToken),
       apiFetch<SavedSnippet[]>("/api/snippets", activeToken),
       apiFetch<Agent[]>("/api/agents", activeToken),
@@ -462,8 +455,6 @@ export default function App() {
     setExternalIpItems(nextExternalIpItems);
     setAzPanelSettings(nextAzPanelSettings);
     setAzPanelResources(nextAzPanelResources);
-    setXboardSettings(nextXboardSettings);
-    setXboardNodes(nextXboardNodes);
     setIpChangeJobs(nextIpChangeJobs);
     setSnippets(nextSnippets);
     setAgents(nextAgents);
@@ -485,7 +476,7 @@ export default function App() {
 
   async function loadLiveStatus(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelResources, nextXboardNodes, nextIpChangeJobs, nextSnippets, nextAgents, nextEvents] = await Promise.all([
+    const [nextOverview, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelResources, nextIpChangeJobs, nextSnippets, nextAgents, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<FailoverCollection[]>("/api/groups/collections", activeToken),
       apiFetch<FailoverGroup[]>("/api/groups", activeToken),
@@ -493,7 +484,6 @@ export default function App() {
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
       apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken),
       apiFetch<AzPanelResource[]>("/api/integrations/azpanel/resources", activeToken),
-      apiFetch<XboardNodeBinding[]>("/api/integrations/xboard/nodes", activeToken),
       apiFetch<IpChangeJob[]>("/api/integrations/ip-change-jobs", activeToken),
       apiFetch<SavedSnippet[]>("/api/snippets", activeToken),
       apiFetch<Agent[]>("/api/agents", activeToken),
@@ -506,7 +496,6 @@ export default function App() {
     setExternalIpSources(nextExternalIpSources);
     setExternalIpItems(nextExternalIpItems);
     setAzPanelResources(nextAzPanelResources);
-    setXboardNodes(nextXboardNodes);
     setIpChangeJobs(nextIpChangeJobs);
     setSnippets(nextSnippets);
     setAgents(nextAgents);
@@ -766,9 +755,6 @@ export default function App() {
         )}
         {section === "azpanel" && azPanelSettings && (
           <AzPanelPanel token={token} settings={azPanelSettings} resources={azPanelResources} groups={groups} jobs={ipChangeJobs} act={act} />
-        )}
-        {section === "xboard" && xboardSettings && (
-          <XboardPanel token={token} settings={xboardSettings} nodes={xboardNodes} resources={azPanelResources} groups={groups} jobs={ipChangeJobs} act={act} />
         )}
         {section === "snippets" && <SnippetsPanel token={token} snippets={snippets} act={act} />}
         {section === "ssh" && sshSettings && <SshPanel token={token} settings={sshSettings} act={act} />}
@@ -3468,6 +3454,14 @@ function AzPanelPanel({
   });
   const [resourceDraft, setResourceDraft] = useState<AzPanelResourceDraft>(emptyDraft);
   const origins = originOptions(groups);
+  const [remoteProvider, setRemoteProvider] = useState("azure");
+  const [remoteResources, setRemoteResources] = useState<AzPanelRemoteResource[]>([]);
+  const [selectedRemoteKey, setSelectedRemoteKey] = useState("");
+
+  useEffect(() => {
+    setRemoteResources([]);
+    setSelectedRemoteKey("");
+  }, [remoteProvider]);
 
   useEffect(() => {
     setSettingsDraft({
@@ -3498,6 +3492,50 @@ function AzPanelPanel({
     };
   }
 
+  function remoteResourceLabel(resource: AzPanelRemoteResource): string {
+    const ip = resource.current_ip ? ` · ${resource.current_ip}` : "";
+    const region = resource.region ? ` · ${resource.region}` : "";
+    const version = resource.ip_version === "ipv6" ? "IPv6" : "IPv4";
+    const source = resource.cached ? ` · 本地缓存 ${fmtDate(resource.last_seen_at)}` : "";
+    return `${resource.name}${region} · ${version}${ip}${source}`;
+  }
+
+  function applyRemoteResource(resource: AzPanelRemoteResource) {
+    setSelectedRemoteKey(resource.key);
+    setResourceDraft((current) => ({
+      ...current,
+      name: resource.name || current.name,
+      provider: resource.provider,
+      resource_id: resource.resource_id,
+      account_id: resource.account_id || "",
+      region: resource.region || "",
+      ip_version: resource.ip_version,
+      current_ip: resource.current_ip || "",
+      port: resource.port || current.port || 22,
+      remark: current.remark || resource.remark || resource.status || ""
+    }));
+  }
+
+  async function refreshRemoteResources() {
+    let fetched: AzPanelRemoteResource[] = [];
+    const ok = await act(
+      async () => {
+        fetched = await apiFetch<AzPanelRemoteResource[]>(`/api/integrations/azpanel/remote-resources?provider=${encodeURIComponent(remoteProvider)}`, token);
+      },
+      "远端资源已刷新",
+      () => {
+        setRemoteResources(fetched);
+        if (fetched.length > 0) {
+          applyRemoteResource(fetched[0]);
+        }
+      }
+    );
+    if (!ok) {
+      setRemoteResources([]);
+      setSelectedRemoteKey("");
+    }
+  }
+
   async function saveSettings(event: FormEvent) {
     event.preventDefault();
     const payload: Record<string, string | number | boolean> = {
@@ -3515,6 +3553,12 @@ function AzPanelPanel({
 
   async function saveResource(event: FormEvent) {
     event.preventDefault();
+    if (!resourceDraft.resource_id.trim()) {
+      await act(async () => {
+        throw new Error("请先刷新并选择 azpanel 资源");
+      });
+      return;
+    }
     const method = editingId ? "PATCH" : "POST";
     const path = editingId ? `/api/integrations/azpanel/resources/${editingId}` : "/api/integrations/azpanel/resources";
     await act(
@@ -3523,12 +3567,15 @@ function AzPanelPanel({
       () => {
         setEditingId(null);
         setResourceDraft(emptyDraft());
+        setSelectedRemoteKey("");
       }
     );
   }
 
   function editResource(resource: AzPanelResource) {
     setEditingId(resource.id);
+    setSelectedRemoteKey("");
+    setRemoteProvider(resource.provider === "aws" ? "aws" : "azure");
     setResourceDraft({
       name: resource.name,
       provider: resource.provider,
@@ -3585,38 +3632,63 @@ function AzPanelPanel({
       <form className="panel" onSubmit={saveResource}>
         <div className="panelTitle">
           <h2>{editingId ? "修改云资源" : "添加云资源"}</h2>
-          <p>绑定到故障源站后，当前源站被判定疑似被墙会自动调用 azpanel 换 IP。</p>
+          <p>先从 azpanel 获取资源再选择，AWS 加载过的机器会保存到本地缓存。</p>
         </div>
         <div className="settingsGrid">
+          <label>
+            来源云厂商
+            <select value={remoteProvider} onChange={(event) => setRemoteProvider(event.target.value)}>
+              <option value="azure">Azure</option>
+              <option value="aws">AWS</option>
+            </select>
+          </label>
+          <div className="settingsGridActions">
+            <button type="button" className="secondary" onClick={refreshRemoteResources}>
+              <RefreshCw size={16} />
+              <span>刷新资源</span>
+            </button>
+            <small>从 azpanel 拉取可用资源；拉取过的 AWS 机器会保留在本地表。</small>
+          </div>
+          <label className="wideField">
+            azpanel 资源
+            <select
+              value={selectedRemoteKey}
+              onChange={(event) => {
+                const value = event.target.value;
+                setSelectedRemoteKey(value);
+                const resource = remoteResources.find((item) => item.key === value);
+                if (resource) applyRemoteResource(resource);
+              }}
+            >
+              <option value="">{remoteResources.length ? "请选择资源" : "先点击刷新资源"}</option>
+              {remoteResources.map((resource) => (
+                <option key={resource.key} value={resource.key}>{remoteResourceLabel(resource)}</option>
+              ))}
+            </select>
+          </label>
           <label>
             名称
             <input value={resourceDraft.name} onChange={(event) => setResourceDraft((current) => ({ ...current, name: event.target.value }))} required />
           </label>
           <label>
             云厂商
-            <select value={resourceDraft.provider} onChange={(event) => setResourceDraft((current) => ({ ...current, provider: event.target.value }))}>
-              <option value="azure">Azure</option>
-              <option value="aws">AWS</option>
-            </select>
+            <input value={resourceDraft.provider ? resourceDraft.provider.toUpperCase() : ""} readOnly />
           </label>
           <label>
             资源 ID
-            <input placeholder="Azure vm_id / AWS instance_id" value={resourceDraft.resource_id} onChange={(event) => setResourceDraft((current) => ({ ...current, resource_id: event.target.value }))} required />
+            <input placeholder="从 azpanel 资源自动带入" value={resourceDraft.resource_id} readOnly required />
           </label>
           <label>
             账户 ID
-            <input value={resourceDraft.account_id} onChange={(event) => setResourceDraft((current) => ({ ...current, account_id: event.target.value }))} />
+            <input value={resourceDraft.account_id || "未提供"} readOnly />
           </label>
           <label>
             区域
-            <input placeholder="例如 eastasia / ap-east-1" value={resourceDraft.region} onChange={(event) => setResourceDraft((current) => ({ ...current, region: event.target.value }))} />
+            <input value={resourceDraft.region || "未提供"} readOnly />
           </label>
           <label>
             IP 类型
-            <select value={resourceDraft.ip_version} onChange={(event) => setResourceDraft((current) => ({ ...current, ip_version: event.target.value }))}>
-              <option value="ipv4">IPv4</option>
-              <option value="ipv6">IPv6</option>
-            </select>
+            <input value={resourceDraft.ip_version === "ipv6" ? "IPv6" : "IPv4"} readOnly />
           </label>
           <label>
             绑定源站
@@ -3627,7 +3699,7 @@ function AzPanelPanel({
           </label>
           <label>
             当前 IP
-            <input value={resourceDraft.current_ip} onChange={(event) => setResourceDraft((current) => ({ ...current, current_ip: event.target.value }))} />
+            <input value={resourceDraft.current_ip || "未记录"} readOnly />
           </label>
           <label>
             检查端口
@@ -3659,7 +3731,7 @@ function AzPanelPanel({
             <Save size={16} />
             <span>{editingId ? "保存资源" : "添加资源"}</span>
           </button>
-          {editingId && <button type="button" className="secondary" onClick={() => { setEditingId(null); setResourceDraft(emptyDraft()); }}>取消编辑</button>}
+          {editingId && <button type="button" className="secondary" onClick={() => { setEditingId(null); setResourceDraft(emptyDraft()); setSelectedRemoteKey(""); }}>取消编辑</button>}
         </div>
       </form>
 

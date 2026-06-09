@@ -527,6 +527,22 @@ class AzPanelResourceOut(AzPanelResourceBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class AzPanelRemoteResourceOut(BaseModel):
+    key: str
+    name: str
+    provider: Literal["azure", "aws"]
+    resource_id: str
+    account_id: str | None = None
+    region: str | None = None
+    ip_version: Literal["ipv4", "ipv6"] = "ipv4"
+    current_ip: str | None = None
+    status: str | None = None
+    remark: str | None = None
+    port: int = Field(default=22, ge=1, le=65535)
+    cached: bool = False
+    last_seen_at: datetime | None = None
+
+
 class XboardSettingsOut(BaseModel):
     enabled: bool = False
     base_url: str = ""

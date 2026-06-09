@@ -5,10 +5,11 @@ from app.database import Base
 from app.integrations import (
     azpanel_settings,
     change_resource_ip,
+    list_azpanel_remote_resources,
     trigger_ip_change_for_origin,
     update_azpanel_settings,
 )
-from app.models import AzPanelResource, CloudflareCredential, FailoverGroup, Origin, User, XboardNodeBinding, Zone
+from app.models import AzPanelRemoteResource, AzPanelResource, CloudflareCredential, FailoverGroup, Origin, User, XboardNodeBinding, Zone
 from app.security import encrypt_secret
 
 
@@ -62,6 +63,57 @@ def test_azpanel_settings_do_not_expose_token():
     assert settings["api_token_configured"] is True
     assert "api_token" not in settings
     assert azpanel_settings(db)["api_token_configured"] is True
+
+
+def test_list_azpanel_remote_resources_caches_loaded_aws_instances(monkeypatch):
+    db = make_session()
+    update_azpanel_settings(db, {"base_url": "https://az.example.com", "api_token": "secret-token"})
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "resources": [
+                    {
+                        "provider": "aws",
+                        "name": "tokyo-node",
+                        "resource_id": "i-123",
+                        "account_id": "aws-main",
+                        "region": "ap-northeast-1",
+                        "ip_version": "ipv4",
+                        "current_ip": "203.0.113.10",
+                        "status": "running",
+                    }
+                ]
+            }
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        assert url == "https://az.example.com/api/internal/cloudflare-dns/resources"
+        assert params == {"provider": "aws"}
+        return Response()
+
+    monkeypatch.setattr("app.integrations.httpx.get", fake_get)
+
+    resources = list_azpanel_remote_resources(db, "aws")
+    db.commit()
+
+    assert resources[0]["resource_id"] == "i-123"
+    assert resources[0]["cached"] is False
+    cached_row = db.query(AzPanelRemoteResource).one()
+    assert cached_row.provider == "aws"
+    assert cached_row.current_ip == "203.0.113.10"
+
+    def failing_get(*args, **kwargs):
+        raise RuntimeError("azpanel unavailable")
+
+    monkeypatch.setattr("app.integrations.httpx.get", failing_get)
+
+    cached = list_azpanel_remote_resources(db, "aws")
+
+    assert cached[0]["resource_id"] == "i-123"
+    assert cached[0]["cached"] is True
 
 
 def test_change_resource_ip_updates_resource_and_xboard_binding_without_xboard_api(monkeypatch):

@@ -272,6 +272,22 @@ export type AzPanelResource = {
   updated_at: string;
 };
 
+export type AzPanelRemoteResource = {
+  key: string;
+  name: string;
+  provider: string;
+  resource_id: string;
+  account_id: string | null;
+  region: string | null;
+  ip_version: string;
+  current_ip: string | null;
+  status: string | null;
+  remark: string | null;
+  port: number;
+  cached: boolean;
+  last_seen_at: string | null;
+};
+
 export type XboardSettings = {
   enabled: boolean;
   base_url: string;

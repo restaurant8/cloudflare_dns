@@ -463,6 +463,23 @@ button.zonePill.active {
   grid-template-columns: repeat(2, minmax(220px, 1fr));
 }
 
+.settingsGrid .wideField {
+  grid-column: 1 / -1;
+}
+
+.settingsGridActions {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.settingsGridActions small {
+  color: #667789;
+  font-size: 12px;
+}
+
 .settingsGrid label span {
   color: #667789;
   font-size: 12px;

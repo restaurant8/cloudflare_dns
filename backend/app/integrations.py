@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from .dns_utils import parse_target
 from .events import add_event
-from .models import AppSetting, AzPanelResource, IpChangeJob, Origin, XboardNodeBinding
+from .models import AppSetting, AzPanelRemoteResource, AzPanelResource, IpChangeJob, Origin, XboardNodeBinding
 from .notifier import send_webhooks
 from .security import decrypt_secret, encrypt_secret, json_dumps
 
@@ -172,6 +172,179 @@ def call_azpanel_change_ip(db: Session, resource: AzPanelResource, reason: str |
         raise RuntimeError("azpanel did not return a new IP")
     data["new_ip"] = new_ip
     return data
+
+
+def _remote_resource_key(item: dict[str, Any]) -> str:
+    provider = str(item.get("provider") or "").strip().lower()
+    resource_id = str(item.get("resource_id") or item.get("instance_id") or item.get("vm_id") or "").strip()
+    account_id = str(item.get("account_id") or "").strip()
+    region = str(item.get("region") or item.get("location") or "").strip()
+    ip_version = str(item.get("ip_version") or "ipv4").strip().lower()
+    return "|".join([provider, account_id, region, resource_id, ip_version])
+
+
+def _remote_resource_identity(item: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    provider = str(item.get("provider") or "").strip().lower()
+    account_id = str(item.get("account_id") or "").strip()
+    region = str(item.get("region") or item.get("location") or "").strip()
+    resource_id = str(item.get("resource_id") or item.get("instance_id") or item.get("vm_id") or "").strip()
+    ip_version = str(item.get("ip_version") or "ipv4").strip().lower()
+    return provider, account_id, region, resource_id, ip_version
+
+
+def _normalize_remote_resource(item: dict[str, Any]) -> dict[str, Any] | None:
+    provider = str(item.get("provider") or "").strip().lower()
+    if provider not in {"azure", "aws"}:
+        return None
+    resource_id = str(item.get("resource_id") or item.get("instance_id") or item.get("vm_id") or "").strip()
+    if not resource_id:
+        return None
+    ip_version = str(item.get("ip_version") or "ipv4").strip().lower()
+    if ip_version not in {"ipv4", "ipv6"}:
+        ip_version = "ipv4"
+    current_ip = str(item.get("current_ip") or item.get("ip") or item.get("public_ip") or "").strip() or None
+    name = str(item.get("name") or item.get("label") or resource_id).strip()
+    account_id = str(item.get("account_id") or "").strip() or None
+    region = str(item.get("region") or item.get("location") or "").strip() or None
+    try:
+        port = int(item.get("port") or 22)
+    except (TypeError, ValueError):
+        port = 22
+    normalized = {
+        "key": str(item.get("key") or _remote_resource_key(item)),
+        "name": name,
+        "provider": provider,
+        "resource_id": resource_id,
+        "account_id": account_id,
+        "region": region,
+        "ip_version": ip_version,
+        "current_ip": current_ip,
+        "status": str(item.get("status") or "").strip() or None,
+        "remark": str(item.get("remark") or "").strip() or None,
+        "port": max(1, min(65535, port)),
+        "cached": False,
+        "last_seen_at": None,
+    }
+    if not normalized["key"]:
+        normalized["key"] = _remote_resource_key(normalized)
+    return normalized
+
+
+def _remote_resource_from_cache(row: AzPanelRemoteResource) -> dict[str, Any]:
+    return {
+        "key": row.key,
+        "name": row.name,
+        "provider": row.provider,
+        "resource_id": row.resource_id,
+        "account_id": row.account_id or None,
+        "region": row.region or None,
+        "ip_version": row.ip_version,
+        "current_ip": row.current_ip,
+        "status": row.status,
+        "remark": row.remark,
+        "port": row.port,
+        "cached": True,
+        "last_seen_at": row.last_seen_at,
+    }
+
+
+def _list_cached_remote_resources(db: Session, provider: str | None = None) -> list[dict[str, Any]]:
+    query = db.query(AzPanelRemoteResource)
+    if provider:
+        query = query.filter(AzPanelRemoteResource.provider == provider)
+    rows = query.order_by(
+        AzPanelRemoteResource.provider.asc(),
+        AzPanelRemoteResource.region.asc(),
+        AzPanelRemoteResource.name.asc(),
+        AzPanelRemoteResource.resource_id.asc(),
+        AzPanelRemoteResource.ip_version.asc(),
+    ).all()
+    return [_remote_resource_from_cache(row) for row in rows]
+
+
+def _cache_remote_resources(db: Session, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    now = datetime.utcnow()
+    saved: list[dict[str, Any]] = []
+    for item in items:
+        provider, account_id, region, resource_id, ip_version = _remote_resource_identity(item)
+        if not provider or not resource_id:
+            continue
+        row = (
+            db.query(AzPanelRemoteResource)
+            .filter(
+                AzPanelRemoteResource.provider == provider,
+                AzPanelRemoteResource.account_id == account_id,
+                AzPanelRemoteResource.region == region,
+                AzPanelRemoteResource.resource_id == resource_id,
+                AzPanelRemoteResource.ip_version == ip_version,
+            )
+            .one_or_none()
+        )
+        if row is None:
+            row = AzPanelRemoteResource(
+                provider=provider,
+                account_id=account_id,
+                region=region,
+                resource_id=resource_id,
+                ip_version=ip_version,
+            )
+            db.add(row)
+        row.key = str(item.get("key") or _remote_resource_key(item))
+        row.name = str(item.get("name") or resource_id).strip() or resource_id
+        row.current_ip = str(item.get("current_ip") or "").strip() or None
+        row.status = str(item.get("status") or "").strip() or None
+        row.remark = str(item.get("remark") or "").strip() or None
+        row.port = int(item.get("port") or 22)
+        row.last_seen_at = now
+        row.source_json = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        saved_item = dict(item)
+        saved_item["cached"] = False
+        saved_item["last_seen_at"] = now
+        saved.append(saved_item)
+    db.flush()
+    return saved
+
+
+def list_azpanel_remote_resources(db: Session, provider: str | None = None) -> list[dict[str, Any]]:
+    settings = azpanel_settings(db)
+    if not settings["base_url"]:
+        raise RuntimeError("azpanel base URL is not configured")
+    token = _azpanel_token(db)
+    if not token:
+        raise RuntimeError("azpanel API token is not configured")
+    cached_items = _list_cached_remote_resources(db, provider)
+    params = {}
+    if provider and provider in {"azure", "aws"}:
+        params["provider"] = provider
+    try:
+        response = httpx.get(
+            f"{settings['base_url']}/api/internal/cloudflare-dns/resources",
+            params=params,
+            headers={"Authorization": f"Bearer {token}", "X-Cloudflare-Dns-Token": token},
+            timeout=settings["timeout_seconds"],
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        if cached_items:
+            return cached_items
+        raise
+    data = _extract_payload(payload)
+    raw_items = data.get("resources") or data.get("items") or data.get("data")
+    if raw_items is None and isinstance(payload, list):
+        raw_items = payload
+    if isinstance(raw_items, dict):
+        raw_items = list(raw_items.values())
+    if not isinstance(raw_items, list):
+        return cached_items
+    normalized = [_normalize_remote_resource(item) for item in raw_items if isinstance(item, dict)]
+    remote_items = _cache_remote_resources(db, [item for item in normalized if item is not None])
+    merged = {_remote_resource_identity(item): item for item in cached_items}
+    merged.update({_remote_resource_identity(item): item for item in remote_items})
+    return sorted(
+        list(merged.values()),
+        key=lambda item: (item["provider"], item.get("region") or "", item["name"], item["resource_id"], item["ip_version"]),
+    )
 
 
 def call_xboard_update_node_ip(db: Session, node: XboardNodeBinding, new_ip: str, reason: str | None = None) -> dict[str, Any]:

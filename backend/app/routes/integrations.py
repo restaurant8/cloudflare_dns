@@ -6,6 +6,7 @@ from ..deps import get_current_user
 from ..integrations import (
     azpanel_settings,
     change_resource_ip,
+    list_azpanel_remote_resources,
     update_azpanel_settings,
     update_xboard_settings,
     xboard_settings,
@@ -15,6 +16,7 @@ from ..schemas import (
     AzPanelResourceCreate,
     AzPanelResourceOut,
     AzPanelResourceUpdate,
+    AzPanelRemoteResourceOut,
     AzPanelSettingsOut,
     AzPanelSettingsUpdate,
     IpChangeJobOut,
@@ -67,6 +69,19 @@ def save_azpanel_settings(payload: AzPanelSettingsUpdate, _: User = Depends(get_
 @router.get("/azpanel/resources", response_model=list[AzPanelResourceOut])
 def list_azpanel_resources(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(AzPanelResource).order_by(AzPanelResource.created_at.desc()).all()
+
+
+@router.get("/azpanel/remote-resources", response_model=list[AzPanelRemoteResourceOut])
+def list_remote_azpanel_resources(provider: str | None = None, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if provider not in {None, "", "azure", "aws"}:
+        raise HTTPException(status_code=400, detail="provider must be azure or aws")
+    try:
+        resources = list_azpanel_remote_resources(db, provider or None)
+        db.commit()
+        return resources
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/azpanel/resources", response_model=AzPanelResourceOut)
