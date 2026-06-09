@@ -6,14 +6,15 @@ from .cloudflare import CloudflareClient, CloudflareError
 from .dns_utils import record_type_for_target_type
 from .events import add_event
 from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, run_local_checks
+from .integrations import trigger_ip_change_for_origin
 from .models import DnsRecord, FailoverGroup, FailoverHostname, Origin
 from .notifier import send_webhooks
 from .origin_expansion import (
     DIRECT_PUBLISH_MODE,
-    healthy_ips,
     is_expanded_origin,
     published_ips,
     record_type_for_ip,
+    selected_healthy_ip,
     set_published_ips,
 )
 from .runtime_settings import get_runtime_settings
@@ -258,8 +259,8 @@ def publish_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
 def publish_expanded_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
     if origin.target_type != "hostname":
         raise ValueError("只有域名目标可以展开发布为 IP 池")
-    ips = healthy_ips(origin)
-    if not ips:
+    selected_ip = selected_healthy_ip(origin)
+    if not selected_ip:
         raise ValueError("展开域名当前没有健康 IP，无法发布")
 
     credential = group.zone.credential
@@ -275,30 +276,28 @@ def publish_expanded_origin(db: Session, group: FailoverGroup, origin: Origin) -
     for hostname_entry, managed_records in managed_by_hostname:
         for record in managed_records:
             client.delete_dns_record(group.zone.cf_zone_id, record["id"])
-        hostname_records = []
-        for ip in ips:
-            hostname_records.append(
-                client.create_dns_record(
-                    group.zone.cf_zone_id,
-                    {
-                        "type": record_type_for_ip(ip),
-                        "name": hostname_entry.hostname,
-                        "content": ip,
-                        "ttl": group.ttl,
-                        "proxied": False,
-                        "comment": f"{MANAGED_RECORD_COMMENT_PREFIX} expanded from {origin.target}",
-                    },
-                )
+        hostname_records = [
+            client.create_dns_record(
+                group.zone.cf_zone_id,
+                {
+                    "type": record_type_for_ip(selected_ip),
+                    "name": hostname_entry.hostname,
+                    "content": selected_ip,
+                    "ttl": group.ttl,
+                    "proxied": False,
+                    "comment": f"{MANAGED_RECORD_COMMENT_PREFIX} expanded from {origin.target}",
+                },
             )
+        ]
         created_records.extend(hostname_records)
         _store_record_ids(group, hostname_entry, [record["id"] for record in hostname_records])
 
-    set_published_ips(origin, ips)
+    set_published_ips(origin, [selected_ip])
     sync_zone_records(db, credential, group.zone, client=client)
     return {
         "id": ",".join(record["id"] for record in created_records),
-        "type": "A/AAAA",
-        "content": ", ".join(ips),
+        "type": record_type_for_ip(selected_ip),
+        "content": selected_ip,
         "hostnames": sorted({str(record.get("name")) for record in created_records}),
     }
 
@@ -321,6 +320,10 @@ def evaluate_failover_groups(db: Session) -> int:
         if _should_probe_group_before_switch(group):
             run_local_checks(db, group_id=group.id, include_all=False)
 
+        current = _current_origin(group)
+        if current is not None and current.status == "blocked":
+            trigger_ip_change_for_origin(db, current, f"{group.hostname} current origin is blocked")
+
         desired = choose_desired_origin(group.origins, group.current_origin_id)
         if desired is None:
             if _has_pending_origin_checks(group):
@@ -337,7 +340,8 @@ def evaluate_failover_groups(db: Session) -> int:
         if group.last_error in RECOVERABLE_GROUP_ERRORS:
             group.last_error = None
         if desired.id == group.current_origin_id and not group.last_error:
-            if is_expanded_origin(desired) and sorted(healthy_ips(desired)) != sorted(published_ips(desired)):
+            desired_expanded_ip = selected_healthy_ip(desired)
+            if is_expanded_origin(desired) and published_ips(desired) != ([desired_expanded_ip] if desired_expanded_ip else []):
                 try:
                     record = publish_origin(db, group, desired)
                 except Exception as exc:

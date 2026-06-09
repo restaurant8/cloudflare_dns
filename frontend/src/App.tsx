@@ -29,11 +29,12 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, Zone } from "./types";
+import type { Agent, AzPanelResource, AzPanelSettings, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
 
-type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
-type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
-type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; remark: string; enabled: boolean };
+type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "azpanel" | "xboard" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
+type ExpandedIpPriorityMap = Record<string, number>;
+type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; remark: string; enabled: boolean };
+type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; remark: string; enabled: boolean };
 type GlobalOriginDraft = OriginAddDraft;
 type CollectionDraft = { name: string };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | "" };
@@ -44,6 +45,10 @@ type TargetPoolDraft = { target: string; port: number; remark: string; check_int
 type ExternalIpSourceDraft = { name: string; base_url: string; token: string; default_port: number; sync_interval_seconds: number; enabled: boolean };
 type SnippetDraft = { title: string; category: string; address: string; username: string; port: string; tags: string; content: string; code: string };
 type SshSettingsDraft = { enabled: boolean; external_url: string };
+type AzPanelSettingsDraft = { enabled: boolean; base_url: string; api_token: string; timeout_seconds: number; default_cooldown_seconds: number };
+type AzPanelResourceDraft = { name: string; provider: string; resource_id: string; account_id: string; region: string; ip_version: string; origin_id: number | ""; current_ip: string; port: number; enabled: boolean; auto_change_on_blocked: boolean; auto_update_origin: boolean; cooldown_seconds: number; remark: string };
+type XboardSettingsDraft = { enabled: boolean; base_url: string; api_token: string; timeout_seconds: number };
+type XboardNodeDraft = { name: string; xboard_node_id: number; node_type: string; host: string; port: number | ""; origin_id: number | ""; azpanel_resource_id: number | ""; enabled: boolean; auto_update_after_change: boolean; remark: string };
 type AgentEditDraft = { name: string };
 type SystemSettingsDraft = { [K in keyof SystemSettings]: string };
 type SystemSettingField = { key: keyof SystemSettings; label: string; min?: number; max?: number; step?: number; hint?: string; type?: "number" | "toggle" };
@@ -57,6 +62,8 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "groups", label: "故障切换", icon: ListRestart },
   { id: "targetPool", label: "IP 池子", icon: Server },
   { id: "externalIps", label: "外部 IP", icon: Globe2 },
+  { id: "azpanel", label: "自动换 IP", icon: RefreshCw },
+  { id: "xboard", label: "Xboard 节点", icon: Link2 },
   { id: "snippets", label: "命令库", icon: FileCode2 },
   { id: "ssh", label: "SSH", icon: SquareTerminal },
   { id: "agents", label: "探针", icon: RadioTower },
@@ -67,6 +74,7 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
 ];
 
 const sectionStorageKey = "cloudflareDnsActiveSection";
+const defaultExpandedIpPriority = 100;
 
 const statusLabels: Record<string, string> = {
   ok: "正常",
@@ -82,7 +90,11 @@ const statusLabels: Record<string, string> = {
   online: "在线",
   offline: "离线",
   warning: "警告",
-  info: "信息"
+  info: "信息",
+  running: "执行中",
+  success: "成功",
+  failed: "失败",
+  skipped: "已跳过"
 };
 
 const targetTypeLabels: Record<string, string> = {
@@ -103,7 +115,10 @@ const eventTypeLabels: Record<string, string> = {
   "dns.switched": "DNS 已切换",
   "webhook.failed": "Webhook 发送失败",
   "telegram.failed": "Telegram 发送失败",
-  "telegram.test": "Telegram 测试"
+  "telegram.test": "Telegram 测试",
+  "azpanel.ip_changed": "AzPanel IP 已更换",
+  "azpanel.ip_change_failed": "AzPanel IP 更换失败",
+  "xboard.node_update_failed": "Xboard 节点更新失败"
 };
 
 const telegramNotifyLevelLabels: Record<string, string> = {
@@ -164,6 +179,15 @@ function displayTargetWithRemark(target: string, port: number, remark?: string |
   return remark?.trim() || `${target}:${port}`;
 }
 
+function originOptions(groups: FailoverGroup[]) {
+  return groups.flatMap((group) =>
+    group.origins.map((origin) => ({
+      id: origin.id,
+      label: `${group.hostname} · ${displayTargetWithRemark(origin.target, origin.port, origin.remark)}`
+    }))
+  );
+}
+
 function externalIpFamilyText(item: ExternalIpItem): string {
   if (item.target_type === "ipv4") return "IPv4";
   if (item.target_type === "ipv6") return "IPv6";
@@ -202,6 +226,60 @@ function IpList({ label, values, empty = "暂无" }: { label: string; values: st
       </div>
     </div>
   );
+}
+
+function setExpandedIpPriority(map: ExpandedIpPriorityMap, ip: string, priority: number): ExpandedIpPriorityMap {
+  return { ...map, [ip]: Math.max(0, Math.min(100000, Math.trunc(priority || 0))) };
+}
+
+function ExpandedIpPriorityEditor({
+  origin,
+  draft,
+  onChange
+}: {
+  origin: Origin;
+  draft: OriginEditDraft;
+  onChange: (next: OriginEditDraft) => void;
+}) {
+  const ips = origin.resolved_ips;
+  if (ips.length === 0) return null;
+  const healthy = new Set(origin.healthy_ips);
+  const published = new Set(origin.published_ips);
+  return (
+    <div className="expandedIpPriorityEditor">
+      <div className="expandedIpPriorityHead">
+        <strong>展开 IP 优先级</strong>
+        <span>数字越小越优先，只发布一个健康 IP。</span>
+      </div>
+      {ips.map((ip) => (
+        <label className="expandedIpPriorityItem" key={ip}>
+          <span>
+            <code>{ip}</code>
+            {healthy.has(ip) && <em>健康</em>}
+            {published.has(ip) && <em>已发布</em>}
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={100000}
+            value={draft.expanded_ip_priorities[ip] ?? defaultExpandedIpPriority}
+            onChange={(event) =>
+              onChange({
+                ...draft,
+                expanded_ip_priorities: setExpandedIpPriority(draft.expanded_ip_priorities, ip, Number(event.target.value))
+              })
+            }
+          />
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function ExpandedIpPrioritySummary({ origin }: { origin: Origin }) {
+  const priorities = origin.expanded_ip_priorities || {};
+  const values = origin.resolved_ips.map((ip) => `${ip} #${priorities[ip] ?? defaultExpandedIpPriority}`);
+  return <IpList label="优先级" values={values} empty="默认同级" />;
 }
 
 function inferDraftTargetType(value: string): string {
@@ -267,7 +345,7 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", remark: "", enabled: true };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, remark: "", enabled: true };
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
@@ -324,11 +402,25 @@ export default function App() {
   const [webhooks, setWebhooks] = useState<Webhook[]>([]);
   const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
   const [sshSettings, setSshSettings] = useState<SshSettings | null>(null);
+  const [azPanelSettings, setAzPanelSettings] = useState<AzPanelSettings | null>(null);
+  const [azPanelResources, setAzPanelResources] = useState<AzPanelResource[]>([]);
+  const [xboardSettings, setXboardSettings] = useState<XboardSettings | null>(null);
+  const [xboardNodes, setXboardNodes] = useState<XboardNodeBinding[]>([]);
+  const [ipChangeJobs, setIpChangeJobs] = useState<IpChangeJob[]>([]);
   const [events, setEvents] = useState<EventItem[]>([]);
   const [agentToken, setAgentToken] = useState("");
 
   const selectedZone = useMemo(() => zones.find((zone) => zone.id === selectedZoneId), [selectedZoneId, zones]);
-  const sectionSubtitle = section === "ssh" ? "Sshwifty 通过本项目临时会话访问" : selectedZone ? selectedZone.name : "尚未选择域名区域";
+  const sectionSubtitle =
+    section === "ssh"
+      ? "Sshwifty 通过本项目临时会话访问"
+      : section === "azpanel"
+        ? "源站被墙后调用 azpanel 更换公网 IP"
+        : section === "xboard"
+          ? "绑定 Xboard 节点到 azpanel 资源，换 IP 后等待节点自动上报"
+          : selectedZone
+            ? selectedZone.name
+            : "尚未选择域名区域";
 
   async function loadSetup() {
     setBootError("");
@@ -338,7 +430,7 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelSettings, nextAzPanelResources, nextXboardSettings, nextXboardNodes, nextIpChangeJobs, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
@@ -347,6 +439,11 @@ export default function App() {
       apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
       apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken),
+      apiFetch<AzPanelSettings>("/api/integrations/azpanel/settings", activeToken),
+      apiFetch<AzPanelResource[]>("/api/integrations/azpanel/resources", activeToken),
+      apiFetch<XboardSettings>("/api/integrations/xboard/settings", activeToken),
+      apiFetch<XboardNodeBinding[]>("/api/integrations/xboard/nodes", activeToken),
+      apiFetch<IpChangeJob[]>("/api/integrations/ip-change-jobs", activeToken),
       apiFetch<SavedSnippet[]>("/api/snippets", activeToken),
       apiFetch<Agent[]>("/api/agents", activeToken),
       apiFetch<TelegramNotification[]>("/api/telegram", activeToken),
@@ -363,6 +460,11 @@ export default function App() {
     setTargetPool(nextTargetPool);
     setExternalIpSources(nextExternalIpSources);
     setExternalIpItems(nextExternalIpItems);
+    setAzPanelSettings(nextAzPanelSettings);
+    setAzPanelResources(nextAzPanelResources);
+    setXboardSettings(nextXboardSettings);
+    setXboardNodes(nextXboardNodes);
+    setIpChangeJobs(nextIpChangeJobs);
     setSnippets(nextSnippets);
     setAgents(nextAgents);
     setTelegramNotifications(nextTelegram);
@@ -383,13 +485,16 @@ export default function App() {
 
   async function loadLiveStatus(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextSnippets, nextAgents, nextEvents] = await Promise.all([
+    const [nextOverview, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelResources, nextXboardNodes, nextIpChangeJobs, nextSnippets, nextAgents, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<FailoverCollection[]>("/api/groups/collections", activeToken),
       apiFetch<FailoverGroup[]>("/api/groups", activeToken),
       apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
       apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken),
+      apiFetch<AzPanelResource[]>("/api/integrations/azpanel/resources", activeToken),
+      apiFetch<XboardNodeBinding[]>("/api/integrations/xboard/nodes", activeToken),
+      apiFetch<IpChangeJob[]>("/api/integrations/ip-change-jobs", activeToken),
       apiFetch<SavedSnippet[]>("/api/snippets", activeToken),
       apiFetch<Agent[]>("/api/agents", activeToken),
       apiFetch<EventItem[]>("/api/events?limit=100", activeToken)
@@ -400,6 +505,9 @@ export default function App() {
     setTargetPool(nextTargetPool);
     setExternalIpSources(nextExternalIpSources);
     setExternalIpItems(nextExternalIpItems);
+    setAzPanelResources(nextAzPanelResources);
+    setXboardNodes(nextXboardNodes);
+    setIpChangeJobs(nextIpChangeJobs);
     setSnippets(nextSnippets);
     setAgents(nextAgents);
     setEvents(nextEvents);
@@ -655,6 +763,12 @@ export default function App() {
         )}
         {section === "externalIps" && (
           <ExternalIpsPanel token={token} externalIpSources={externalIpSources} externalIpItems={externalIpItems} act={act} />
+        )}
+        {section === "azpanel" && azPanelSettings && (
+          <AzPanelPanel token={token} settings={azPanelSettings} resources={azPanelResources} groups={groups} jobs={ipChangeJobs} act={act} />
+        )}
+        {section === "xboard" && xboardSettings && (
+          <XboardPanel token={token} settings={xboardSettings} nodes={xboardNodes} resources={azPanelResources} groups={groups} jobs={ipChangeJobs} act={act} />
         )}
         {section === "snippets" && <SnippetsPanel token={token} snippets={snippets} act={act} />}
         {section === "ssh" && sshSettings && <SshPanel token={token} settings={sshSettings} act={act} />}
@@ -1680,6 +1794,7 @@ function GroupsPanel({
       port: 22,
       priority: maxPriority + 10,
       publish_mode: "direct",
+      expanded_ip_priorities: {},
       remark: "",
       enabled: true
     });
@@ -1699,6 +1814,7 @@ function GroupsPanel({
             port: globalOriginAdd.port,
             priority: globalOriginAdd.priority,
             publish_mode: globalAddTargetType === "hostname" ? globalOriginAdd.publish_mode : "direct",
+            expanded_ip_priorities: globalAddTargetType === "hostname" ? globalOriginAdd.expanded_ip_priorities : {},
             remark: globalOriginAdd.remark.trim() || null,
             enabled: globalOriginAdd.enabled
           })
@@ -1721,6 +1837,7 @@ function GroupsPanel({
         port: origin.port,
         priority: origin.priority,
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
+        expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
         remark: origin.remark || "",
         enabled: origin.enabled
       }
@@ -1756,6 +1873,7 @@ function GroupsPanel({
       port: 22,
       priority: maxPriority + 10,
       publish_mode: "direct",
+      expanded_ip_priorities: {},
       remark: "",
       enabled: true
     });
@@ -1769,6 +1887,7 @@ function GroupsPanel({
       target: item.target,
       port: item.port || 22,
       publish_mode: "direct",
+      expanded_ip_priorities: {},
       remark: item.remark || "",
       enabled: true
     }));
@@ -1782,6 +1901,7 @@ function GroupsPanel({
       target: item.target,
       port: item.port || 22,
       publish_mode: "direct",
+      expanded_ip_priorities: {},
       remark: item.remark || "",
       enabled: true
     }));
@@ -1801,6 +1921,7 @@ function GroupsPanel({
             port: originAdd.port,
             priority: originAdd.priority,
             publish_mode: addTargetType === "hostname" ? originAdd.publish_mode : "direct",
+            expanded_ip_priorities: addTargetType === "hostname" ? originAdd.expanded_ip_priorities : {},
             remark: originAdd.remark.trim() || null,
             enabled: originAdd.enabled
           })
@@ -1890,6 +2011,7 @@ function GroupsPanel({
         port: origin.port,
         priority: origin.priority,
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
+        expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
         remark: origin.remark || "",
         enabled: origin.enabled
       }
@@ -1920,6 +2042,7 @@ function GroupsPanel({
       target: item.target,
       port: item.port || 22,
       publish_mode: "direct",
+      expanded_ip_priorities: {},
       remark: item.name || "",
       enabled: true
     }));
@@ -1933,6 +2056,7 @@ function GroupsPanel({
       target: item.target,
       port: item.port || 22,
       publish_mode: "direct",
+      expanded_ip_priorities: {},
       remark: item.name || "",
       enabled: true
     }));
@@ -1982,6 +2106,7 @@ function GroupsPanel({
       port: origin.port,
       priority: origin.priority,
       publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
+      expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
       remark: origin.remark || "",
       enabled: origin.enabled
     };
@@ -2250,6 +2375,7 @@ function GroupsPanel({
                         port: origin.port,
                         priority: origin.priority,
                         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
+                        expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
                         remark: origin.remark || "",
                         enabled: origin.enabled
                       };
@@ -2306,6 +2432,13 @@ function GroupsPanel({
                                 </label>
                                 <span className="originEditHint">当前会识别为 {targetTypeText(editType)}，发布为 {recordTypeForTargetType(editType, originEdit.publish_mode)}。</span>
                               </div>
+                              {editType === "hostname" && originEdit.publish_mode === "expanded" && (
+                                <ExpandedIpPriorityEditor
+                                  origin={origin}
+                                  draft={originEdit}
+                                  onChange={(next) => setOriginEdits((current) => ({ ...current, [origin.id]: next }))}
+                                />
+                              )}
                               <div className="rowActions">
                                 <button className="icon" title="保存并应用" onClick={() => saveOriginEdit(origin.id)}>
                                   <Save size={15} />
@@ -2333,6 +2466,7 @@ function GroupsPanel({
                                     <IpList label="解析 IP" values={origin.resolved_ips} empty="尚未解析，点击手动检测或等待下个周期" />
                                     <IpList label="健康 IP" values={origin.healthy_ips} />
                                     <IpList label="已发布" values={origin.published_ips} empty="当前未发布该目标" />
+                                    <ExpandedIpPrioritySummary origin={origin} />
                                   </div>
                                 )}
                                 {origin.enabled && origin.last_error && <small className="danger">{origin.last_error}</small>}
@@ -3290,6 +3424,537 @@ function ExternalIpsPanel({
         </div>
       </div>
     </section>
+  );
+}
+
+function AzPanelPanel({
+  token,
+  settings,
+  resources,
+  groups,
+  jobs,
+  act
+}: {
+  token: string;
+  settings: AzPanelSettings;
+  resources: AzPanelResource[];
+  groups: FailoverGroup[];
+  jobs: IpChangeJob[];
+  act: ActionRunner;
+}) {
+  const [settingsDraft, setSettingsDraft] = useState<AzPanelSettingsDraft>({
+    enabled: settings.enabled,
+    base_url: settings.base_url,
+    api_token: "",
+    timeout_seconds: settings.timeout_seconds,
+    default_cooldown_seconds: settings.default_cooldown_seconds
+  });
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const emptyDraft = (): AzPanelResourceDraft => ({
+    name: "",
+    provider: "azure",
+    resource_id: "",
+    account_id: "",
+    region: "",
+    ip_version: "ipv4",
+    origin_id: "",
+    current_ip: "",
+    port: 22,
+    enabled: true,
+    auto_change_on_blocked: true,
+    auto_update_origin: true,
+    cooldown_seconds: settings.default_cooldown_seconds || 1800,
+    remark: ""
+  });
+  const [resourceDraft, setResourceDraft] = useState<AzPanelResourceDraft>(emptyDraft);
+  const origins = originOptions(groups);
+
+  useEffect(() => {
+    setSettingsDraft({
+      enabled: settings.enabled,
+      base_url: settings.base_url,
+      api_token: "",
+      timeout_seconds: settings.timeout_seconds,
+      default_cooldown_seconds: settings.default_cooldown_seconds
+    });
+  }, [settings]);
+
+  function resourcePayload() {
+    return {
+      name: resourceDraft.name.trim(),
+      provider: resourceDraft.provider,
+      resource_id: resourceDraft.resource_id.trim(),
+      account_id: resourceDraft.account_id.trim() || null,
+      region: resourceDraft.region.trim() || null,
+      ip_version: resourceDraft.ip_version,
+      origin_id: resourceDraft.origin_id === "" ? null : Number(resourceDraft.origin_id),
+      current_ip: resourceDraft.current_ip.trim() || null,
+      port: resourceDraft.port,
+      enabled: resourceDraft.enabled,
+      auto_change_on_blocked: resourceDraft.auto_change_on_blocked,
+      auto_update_origin: resourceDraft.auto_update_origin,
+      cooldown_seconds: resourceDraft.cooldown_seconds,
+      remark: resourceDraft.remark.trim() || null
+    };
+  }
+
+  async function saveSettings(event: FormEvent) {
+    event.preventDefault();
+    const payload: Record<string, string | number | boolean> = {
+      enabled: settingsDraft.enabled,
+      base_url: settingsDraft.base_url.trim(),
+      timeout_seconds: settingsDraft.timeout_seconds,
+      default_cooldown_seconds: settingsDraft.default_cooldown_seconds
+    };
+    if (settingsDraft.api_token.trim()) payload.api_token = settingsDraft.api_token.trim();
+    await act(
+      () => apiFetch("/api/integrations/azpanel/settings", token, { method: "PATCH", body: JSON.stringify(payload) }),
+      "azpanel 设置已保存"
+    );
+  }
+
+  async function saveResource(event: FormEvent) {
+    event.preventDefault();
+    const method = editingId ? "PATCH" : "POST";
+    const path = editingId ? `/api/integrations/azpanel/resources/${editingId}` : "/api/integrations/azpanel/resources";
+    await act(
+      () => apiFetch(path, token, { method, body: JSON.stringify(resourcePayload()) }),
+      editingId ? "资源已更新" : "资源已添加",
+      () => {
+        setEditingId(null);
+        setResourceDraft(emptyDraft());
+      }
+    );
+  }
+
+  function editResource(resource: AzPanelResource) {
+    setEditingId(resource.id);
+    setResourceDraft({
+      name: resource.name,
+      provider: resource.provider,
+      resource_id: resource.resource_id,
+      account_id: resource.account_id || "",
+      region: resource.region || "",
+      ip_version: resource.ip_version,
+      origin_id: resource.origin_id || "",
+      current_ip: resource.current_ip || "",
+      port: resource.port,
+      enabled: resource.enabled,
+      auto_change_on_blocked: resource.auto_change_on_blocked,
+      auto_update_origin: resource.auto_update_origin,
+      cooldown_seconds: resource.cooldown_seconds,
+      remark: resource.remark || ""
+    });
+  }
+
+  return (
+    <section className="stack">
+      <form className="panel" onSubmit={saveSettings}>
+        <div className="panelTitle">
+          <h2>azpanel 连接</h2>
+          <p>需要 azpanel 提供内部接口：<code>/api/internal/cloudflare-dns/change-ip</code>。Token 会加密保存。</p>
+        </div>
+        <div className="settingsGrid">
+          <label className="inlineCheck">
+            <input type="checkbox" checked={settingsDraft.enabled} onChange={(event) => setSettingsDraft((current) => ({ ...current, enabled: event.target.checked }))} />
+            启用自动换 IP
+          </label>
+          <label>
+            azpanel 地址
+            <input placeholder="https://az.example.com" value={settingsDraft.base_url} onChange={(event) => setSettingsDraft((current) => ({ ...current, base_url: event.target.value }))} />
+          </label>
+          <label>
+            API Token
+            <input type="password" placeholder={settings.api_token_configured ? "已保存，留空不修改" : "填写内部 API Token"} value={settingsDraft.api_token} onChange={(event) => setSettingsDraft((current) => ({ ...current, api_token: event.target.value }))} />
+          </label>
+          <label>
+            请求超时（秒）
+            <input type="number" min={5} max={300} value={settingsDraft.timeout_seconds} onChange={(event) => setSettingsDraft((current) => ({ ...current, timeout_seconds: Number(event.target.value) }))} />
+          </label>
+          <label>
+            默认冷却（秒）
+            <input type="number" min={60} max={86400} value={settingsDraft.default_cooldown_seconds} onChange={(event) => setSettingsDraft((current) => ({ ...current, default_cooldown_seconds: Number(event.target.value) }))} />
+          </label>
+        </div>
+        <button>
+          <Save size={16} />
+          <span>保存 azpanel 设置</span>
+        </button>
+      </form>
+
+      <form className="panel" onSubmit={saveResource}>
+        <div className="panelTitle">
+          <h2>{editingId ? "修改云资源" : "添加云资源"}</h2>
+          <p>绑定到故障源站后，当前源站被判定疑似被墙会自动调用 azpanel 换 IP。</p>
+        </div>
+        <div className="settingsGrid">
+          <label>
+            名称
+            <input value={resourceDraft.name} onChange={(event) => setResourceDraft((current) => ({ ...current, name: event.target.value }))} required />
+          </label>
+          <label>
+            云厂商
+            <select value={resourceDraft.provider} onChange={(event) => setResourceDraft((current) => ({ ...current, provider: event.target.value }))}>
+              <option value="azure">Azure</option>
+              <option value="aws">AWS</option>
+            </select>
+          </label>
+          <label>
+            资源 ID
+            <input placeholder="Azure vm_id / AWS instance_id" value={resourceDraft.resource_id} onChange={(event) => setResourceDraft((current) => ({ ...current, resource_id: event.target.value }))} required />
+          </label>
+          <label>
+            账户 ID
+            <input value={resourceDraft.account_id} onChange={(event) => setResourceDraft((current) => ({ ...current, account_id: event.target.value }))} />
+          </label>
+          <label>
+            区域
+            <input placeholder="例如 eastasia / ap-east-1" value={resourceDraft.region} onChange={(event) => setResourceDraft((current) => ({ ...current, region: event.target.value }))} />
+          </label>
+          <label>
+            IP 类型
+            <select value={resourceDraft.ip_version} onChange={(event) => setResourceDraft((current) => ({ ...current, ip_version: event.target.value }))}>
+              <option value="ipv4">IPv4</option>
+              <option value="ipv6">IPv6</option>
+            </select>
+          </label>
+          <label>
+            绑定源站
+            <select value={resourceDraft.origin_id} onChange={(event) => setResourceDraft((current) => ({ ...current, origin_id: event.target.value ? Number(event.target.value) : "" }))}>
+              <option value="">不绑定</option>
+              {origins.map((origin) => <option key={origin.id} value={origin.id}>{origin.label}</option>)}
+            </select>
+          </label>
+          <label>
+            当前 IP
+            <input value={resourceDraft.current_ip} onChange={(event) => setResourceDraft((current) => ({ ...current, current_ip: event.target.value }))} />
+          </label>
+          <label>
+            检查端口
+            <input type="number" min={1} max={65535} value={resourceDraft.port} onChange={(event) => setResourceDraft((current) => ({ ...current, port: Number(event.target.value) }))} />
+          </label>
+          <label>
+            冷却（秒）
+            <input type="number" min={60} max={86400} value={resourceDraft.cooldown_seconds} onChange={(event) => setResourceDraft((current) => ({ ...current, cooldown_seconds: Number(event.target.value) }))} />
+          </label>
+          <label>
+            备注
+            <input value={resourceDraft.remark} onChange={(event) => setResourceDraft((current) => ({ ...current, remark: event.target.value }))} />
+          </label>
+          <label className="inlineCheck">
+            <input type="checkbox" checked={resourceDraft.enabled} onChange={(event) => setResourceDraft((current) => ({ ...current, enabled: event.target.checked }))} />
+            启用
+          </label>
+          <label className="inlineCheck">
+            <input type="checkbox" checked={resourceDraft.auto_change_on_blocked} onChange={(event) => setResourceDraft((current) => ({ ...current, auto_change_on_blocked: event.target.checked }))} />
+            被墙自动换 IP
+          </label>
+          <label className="inlineCheck">
+            <input type="checkbox" checked={resourceDraft.auto_update_origin} onChange={(event) => setResourceDraft((current) => ({ ...current, auto_update_origin: event.target.checked }))} />
+            成功后更新源站
+          </label>
+        </div>
+        <div className="rowActions">
+          <button>
+            <Save size={16} />
+            <span>{editingId ? "保存资源" : "添加资源"}</span>
+          </button>
+          {editingId && <button type="button" className="secondary" onClick={() => { setEditingId(null); setResourceDraft(emptyDraft()); }}>取消编辑</button>}
+        </div>
+      </form>
+
+      <div className="panel">
+        <div className="panelTitle">
+          <h2>云资源</h2>
+          <p>手动换 IP 会立即调用 azpanel；自动换 IP 只在绑定的当前源站疑似被墙时触发。</p>
+        </div>
+        <div className="poolList">
+          {resources.map((resource) => (
+            <div className="poolItem" key={resource.id}>
+              <div className="poolItemMain">
+                <strong>{resource.name}</strong>
+                <span>{resource.provider} · {resource.resource_id} · {resource.current_ip || "未记录 IP"}:{resource.port} · 尝试 {fmtDate(resource.last_attempt_at)} · 成功 {fmtDate(resource.last_change_at)}</span>
+                {resource.last_error && <small className="danger">{resource.last_error}</small>}
+              </div>
+              <div className="rowActions">
+                <Status value={resource.enabled ? "enabled" : "disabled"} />
+                <button className="icon secondaryIcon" title="手动更换 IP" onClick={() => act(() => apiFetch(`/api/integrations/azpanel/resources/${resource.id}/change-ip`, token, { method: "POST", body: JSON.stringify({ reason: "manual from panel" }) }), "换 IP 任务已执行")}>
+                  <RefreshCw size={15} />
+                </button>
+                <button className="icon secondaryIcon" title="编辑" onClick={() => editResource(resource)}>
+                  <Pencil size={15} />
+                </button>
+                <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/integrations/azpanel/resources/${resource.id}`, token, { method: "DELETE" }), "云资源已删除")}>
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            </div>
+          ))}
+          {resources.length === 0 && <div className="emptyCell">还没有绑定云资源</div>}
+        </div>
+      </div>
+
+      <IpChangeJobsPanel jobs={jobs} />
+    </section>
+  );
+}
+
+function XboardPanel({
+  token,
+  settings,
+  nodes,
+  resources,
+  groups,
+  jobs,
+  act
+}: {
+  token: string;
+  settings: XboardSettings;
+  nodes: XboardNodeBinding[];
+  resources: AzPanelResource[];
+  groups: FailoverGroup[];
+  jobs: IpChangeJob[];
+  act: ActionRunner;
+}) {
+  const [settingsDraft, setSettingsDraft] = useState<XboardSettingsDraft>({
+    enabled: settings.enabled,
+    base_url: settings.base_url,
+    api_token: "",
+    timeout_seconds: settings.timeout_seconds
+  });
+  const emptyDraft = (): XboardNodeDraft => ({
+    name: "",
+    xboard_node_id: 1,
+    node_type: "",
+    host: "",
+    port: "",
+    origin_id: "",
+    azpanel_resource_id: "",
+    enabled: true,
+    auto_update_after_change: true,
+    remark: ""
+  });
+  const [nodeDraft, setNodeDraft] = useState<XboardNodeDraft>(emptyDraft);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const origins = originOptions(groups);
+
+  useEffect(() => {
+    setSettingsDraft({ enabled: settings.enabled, base_url: settings.base_url, api_token: "", timeout_seconds: settings.timeout_seconds });
+  }, [settings]);
+
+  async function saveSettings(event: FormEvent) {
+    event.preventDefault();
+    const payload: Record<string, string | number | boolean> = {
+      enabled: settingsDraft.enabled,
+      base_url: settingsDraft.base_url.trim(),
+      timeout_seconds: settingsDraft.timeout_seconds
+    };
+    if (settingsDraft.api_token.trim()) payload.api_token = settingsDraft.api_token.trim();
+    await act(
+      () => apiFetch("/api/integrations/xboard/settings", token, { method: "PATCH", body: JSON.stringify(payload) }),
+      "Xboard 设置已保存"
+    );
+  }
+
+  function nodePayload() {
+    return {
+      name: nodeDraft.name.trim(),
+      xboard_node_id: nodeDraft.xboard_node_id,
+      node_type: nodeDraft.node_type.trim() || null,
+      host: nodeDraft.host.trim() || null,
+      port: nodeDraft.port === "" ? null : Number(nodeDraft.port),
+      origin_id: nodeDraft.origin_id === "" ? null : Number(nodeDraft.origin_id),
+      azpanel_resource_id: nodeDraft.azpanel_resource_id === "" ? null : Number(nodeDraft.azpanel_resource_id),
+      enabled: nodeDraft.enabled,
+      auto_update_after_change: nodeDraft.auto_update_after_change,
+      remark: nodeDraft.remark.trim() || null
+    };
+  }
+
+  async function saveNode(event: FormEvent) {
+    event.preventDefault();
+    const method = editingId ? "PATCH" : "POST";
+    const path = editingId ? `/api/integrations/xboard/nodes/${editingId}` : "/api/integrations/xboard/nodes";
+    await act(
+      () => apiFetch(path, token, { method, body: JSON.stringify(nodePayload()) }),
+      editingId ? "节点绑定已更新" : "节点绑定已添加",
+      () => {
+        setEditingId(null);
+        setNodeDraft(emptyDraft());
+      }
+    );
+  }
+
+  function editNode(node: XboardNodeBinding) {
+    setEditingId(node.id);
+    setNodeDraft({
+      name: node.name,
+      xboard_node_id: node.xboard_node_id,
+      node_type: node.node_type || "",
+      host: node.host || "",
+      port: node.port || "",
+      origin_id: node.origin_id || "",
+      azpanel_resource_id: node.azpanel_resource_id || "",
+      enabled: node.enabled,
+      auto_update_after_change: node.auto_update_after_change,
+      remark: node.remark || ""
+    });
+  }
+
+  return (
+    <section className="stack">
+      <form className="panel" onSubmit={saveSettings}>
+        <div className="panelTitle">
+          <h2>Xboard 联动</h2>
+          <p>默认不需要改 Xboard。这里主要保存节点和云资源绑定；换 IP 后 Xboard 后端会自行上报并同步解析。</p>
+        </div>
+        <div className="settingsGrid">
+          <label className="inlineCheck">
+            <input type="checkbox" checked={settingsDraft.enabled} onChange={(event) => setSettingsDraft((current) => ({ ...current, enabled: event.target.checked }))} />
+            主动通知 Xboard API
+          </label>
+          <label>
+            Xboard 地址
+            <input placeholder="https://xboard.example.com" value={settingsDraft.base_url} onChange={(event) => setSettingsDraft((current) => ({ ...current, base_url: event.target.value }))} />
+          </label>
+          <label>
+            API Token
+            <input type="password" placeholder={settings.api_token_configured ? "已保存，留空不修改" : "可选"} value={settingsDraft.api_token} onChange={(event) => setSettingsDraft((current) => ({ ...current, api_token: event.target.value }))} />
+          </label>
+          <label>
+            请求超时（秒）
+            <input type="number" min={5} max={120} value={settingsDraft.timeout_seconds} onChange={(event) => setSettingsDraft((current) => ({ ...current, timeout_seconds: Number(event.target.value) }))} />
+          </label>
+        </div>
+        <button>
+          <Save size={16} />
+          <span>保存 Xboard 设置</span>
+        </button>
+      </form>
+
+      <form className="panel" onSubmit={saveNode}>
+        <div className="panelTitle">
+          <h2>{editingId ? "修改节点绑定" : "添加节点绑定"}</h2>
+          <p>把 Xboard 节点绑定到 azpanel 云资源，点击换 IP 时只触发 azpanel。</p>
+        </div>
+        <div className="settingsGrid">
+          <label>
+            节点名称
+            <input value={nodeDraft.name} onChange={(event) => setNodeDraft((current) => ({ ...current, name: event.target.value }))} required />
+          </label>
+          <label>
+            Xboard 节点 ID
+            <input type="number" min={1} value={nodeDraft.xboard_node_id} onChange={(event) => setNodeDraft((current) => ({ ...current, xboard_node_id: Number(event.target.value) }))} />
+          </label>
+          <label>
+            节点类型
+            <input placeholder="vless / trojan / shadowsocks" value={nodeDraft.node_type} onChange={(event) => setNodeDraft((current) => ({ ...current, node_type: event.target.value }))} />
+          </label>
+          <label>
+            当前 Host/IP
+            <input value={nodeDraft.host} onChange={(event) => setNodeDraft((current) => ({ ...current, host: event.target.value }))} />
+          </label>
+          <label>
+            节点端口
+            <input type="number" min={1} max={65535} value={nodeDraft.port} onChange={(event) => setNodeDraft((current) => ({ ...current, port: event.target.value ? Number(event.target.value) : "" }))} />
+          </label>
+          <label>
+            绑定 azpanel 资源
+            <select value={nodeDraft.azpanel_resource_id} onChange={(event) => setNodeDraft((current) => ({ ...current, azpanel_resource_id: event.target.value ? Number(event.target.value) : "" }))}>
+              <option value="">不绑定</option>
+              {resources.map((resource) => <option key={resource.id} value={resource.id}>{resource.name} · {resource.current_ip || resource.resource_id}</option>)}
+            </select>
+          </label>
+          <label>
+            关联故障源站
+            <select value={nodeDraft.origin_id} onChange={(event) => setNodeDraft((current) => ({ ...current, origin_id: event.target.value ? Number(event.target.value) : "" }))}>
+              <option value="">不关联</option>
+              {origins.map((origin) => <option key={origin.id} value={origin.id}>{origin.label}</option>)}
+            </select>
+          </label>
+          <label>
+            备注
+            <input value={nodeDraft.remark} onChange={(event) => setNodeDraft((current) => ({ ...current, remark: event.target.value }))} />
+          </label>
+          <label className="inlineCheck">
+            <input type="checkbox" checked={nodeDraft.enabled} onChange={(event) => setNodeDraft((current) => ({ ...current, enabled: event.target.checked }))} />
+            启用
+          </label>
+          <label className="inlineCheck">
+            <input type="checkbox" checked={nodeDraft.auto_update_after_change} onChange={(event) => setNodeDraft((current) => ({ ...current, auto_update_after_change: event.target.checked }))} />
+            换 IP 后更新绑定记录
+          </label>
+        </div>
+        <div className="rowActions">
+          <button>
+            <Save size={16} />
+            <span>{editingId ? "保存节点" : "添加节点"}</span>
+          </button>
+          {editingId && <button type="button" className="secondary" onClick={() => { setEditingId(null); setNodeDraft(emptyDraft()); }}>取消编辑</button>}
+        </div>
+      </form>
+
+      <div className="panel">
+        <div className="panelTitle">
+          <h2>节点列表</h2>
+          <p>手动换 IP 会调用绑定的 azpanel 资源。Xboard 后端恢复上报后会自己同步解析。</p>
+        </div>
+        <div className="poolList">
+          {nodes.map((node) => {
+            const resource = resources.find((item) => item.id === node.azpanel_resource_id);
+            return (
+              <div className="poolItem" key={node.id}>
+                <div className="poolItemMain">
+                  <strong>{node.name}</strong>
+                  <span>节点 {node.xboard_node_id} · {node.node_type || "未知类型"} · {node.host || "未记录 Host"}{node.port ? `:${node.port}` : ""}</span>
+                  <small>{resource ? `绑定资源：${resource.name}` : "未绑定 azpanel 资源"} · 最近同步 {fmtDate(node.last_sync_at)}</small>
+                  {node.last_error && <small className="danger">{node.last_error}</small>}
+                </div>
+                <div className="rowActions">
+                  <Status value={node.enabled ? "enabled" : "disabled"} />
+                  <button className="icon secondaryIcon" title="更换节点 IP" disabled={!node.azpanel_resource_id} onClick={() => act(() => apiFetch(`/api/integrations/xboard/nodes/${node.id}/change-ip`, token, { method: "POST", body: JSON.stringify({ reason: "Xboard node manual change" }) }), "节点换 IP 已执行")}>
+                    <RefreshCw size={15} />
+                  </button>
+                  <button className="icon secondaryIcon" title="编辑" onClick={() => editNode(node)}>
+                    <Pencil size={15} />
+                  </button>
+                  <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/integrations/xboard/nodes/${node.id}`, token, { method: "DELETE" }), "节点绑定已删除")}>
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {nodes.length === 0 && <div className="emptyCell">还没有 Xboard 节点绑定</div>}
+        </div>
+      </div>
+
+      <IpChangeJobsPanel jobs={jobs} />
+    </section>
+  );
+}
+
+function IpChangeJobsPanel({ jobs }: { jobs: IpChangeJob[] }) {
+  return (
+    <div className="panel">
+      <div className="panelTitle">
+        <h2>最近换 IP 记录</h2>
+        <p>用于判断自动换 IP 是否真的触发，以及 azpanel 返回了什么状态。</p>
+      </div>
+      <div className="eventList">
+        {jobs.slice(0, 12).map((job) => (
+          <div className="eventItem" key={job.id}>
+            <div>
+              <strong>#{job.id} · {statusText(job.status)}</strong>
+              <p>{job.provider || "-"} · {job.old_ip || "-"} → {job.new_ip || "-"} · {job.trigger_type}</p>
+              {job.error && <small className="danger">{job.error}</small>}
+            </div>
+            <time>{fmtDate(job.finished_at || job.started_at)}</time>
+          </div>
+        ))}
+        {jobs.length === 0 && <div className="emptyCell">暂无换 IP 记录</div>}
+      </div>
+    </div>
   );
 }
 

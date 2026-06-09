@@ -261,6 +261,7 @@ class OriginCreate(BaseModel):
     port: int = Field(ge=1, le=65535)
     priority: int = Field(default=10, ge=0, le=100000)
     publish_mode: Literal["direct", "expanded"] = "direct"
+    expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool = True
 
@@ -274,6 +275,7 @@ class OriginUpdate(BaseModel):
     port: int | None = Field(default=None, ge=1, le=65535)
     priority: int | None = Field(default=None, ge=0, le=100000)
     publish_mode: Literal["direct", "expanded"] | None = None
+    expanded_ip_priorities: dict[str, int] | None = None
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool | None = None
 
@@ -315,6 +317,7 @@ class OriginOut(BaseModel):
     resolved_ips: list[str] = []
     healthy_ips: list[str] = []
     published_ips: list[str] = []
+    expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
     probe_states: list[ProbeStateOut] = []
 
     model_config = ConfigDict(from_attributes=True)
@@ -341,6 +344,7 @@ class FailoverGlobalOriginOut(BaseModel):
     publish_mode: str
     port: int
     priority: int
+    expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
     remark: str | None
     enabled: bool
     created_at: datetime
@@ -441,6 +445,178 @@ class TargetPoolOut(BaseModel):
     def hide_disabled_agent_probe_states(self):
         self.probe_states = _enabled_probe_states(self.probe_states)
         return self
+
+
+class AzPanelSettingsOut(BaseModel):
+    enabled: bool = False
+    base_url: str = ""
+    api_token_configured: bool = False
+    timeout_seconds: int = 60
+    default_cooldown_seconds: int = 1800
+
+
+class AzPanelSettingsUpdate(BaseModel):
+    enabled: bool | None = None
+    base_url: str | None = Field(default=None, max_length=255)
+    api_token: str | None = Field(default=None, max_length=500)
+    timeout_seconds: int | None = Field(default=None, ge=5, le=300)
+    default_cooldown_seconds: int | None = Field(default=None, ge=60, le=86400)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        cleaned = value.strip().rstrip("/")
+        if not cleaned:
+            return ""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(cleaned)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("azpanel address must be a valid HTTP/HTTPS URL")
+        return cleaned
+
+
+class AzPanelResourceBase(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    provider: Literal["azure", "aws"] = "azure"
+    resource_id: str = Field(min_length=1, max_length=255)
+    account_id: str | None = Field(default=None, max_length=120)
+    region: str | None = Field(default=None, max_length=120)
+    ip_version: Literal["ipv4", "ipv6"] = "ipv4"
+    origin_id: int | None = None
+    current_ip: str | None = Field(default=None, max_length=120)
+    port: int = Field(default=22, ge=1, le=65535)
+    enabled: bool = True
+    auto_change_on_blocked: bool = True
+    auto_update_origin: bool = True
+    cooldown_seconds: int = Field(default=1800, ge=60, le=86400)
+    remark: str | None = Field(default=None, max_length=500)
+
+
+class AzPanelResourceCreate(AzPanelResourceBase):
+    pass
+
+
+class AzPanelResourceUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    provider: Literal["azure", "aws"] | None = None
+    resource_id: str | None = Field(default=None, min_length=1, max_length=255)
+    account_id: str | None = Field(default=None, max_length=120)
+    region: str | None = Field(default=None, max_length=120)
+    ip_version: Literal["ipv4", "ipv6"] | None = None
+    origin_id: int | None = None
+    current_ip: str | None = Field(default=None, max_length=120)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    enabled: bool | None = None
+    auto_change_on_blocked: bool | None = None
+    auto_update_origin: bool | None = None
+    cooldown_seconds: int | None = Field(default=None, ge=60, le=86400)
+    remark: str | None = Field(default=None, max_length=500)
+
+
+class AzPanelResourceOut(AzPanelResourceBase):
+    id: int
+    last_attempt_at: datetime | None
+    last_change_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class XboardSettingsOut(BaseModel):
+    enabled: bool = False
+    base_url: str = ""
+    api_token_configured: bool = False
+    timeout_seconds: int = 30
+
+
+class XboardSettingsUpdate(BaseModel):
+    enabled: bool | None = None
+    base_url: str | None = Field(default=None, max_length=255)
+    api_token: str | None = Field(default=None, max_length=500)
+    timeout_seconds: int | None = Field(default=None, ge=5, le=120)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        cleaned = value.strip().rstrip("/")
+        if not cleaned:
+            return ""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(cleaned)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Xboard address must be a valid HTTP/HTTPS URL")
+        return cleaned
+
+
+class XboardNodeBindingBase(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    xboard_node_id: int = Field(ge=1)
+    node_type: str | None = Field(default=None, max_length=40)
+    host: str | None = Field(default=None, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    origin_id: int | None = None
+    azpanel_resource_id: int | None = None
+    enabled: bool = True
+    auto_update_after_change: bool = True
+    remark: str | None = Field(default=None, max_length=500)
+
+
+class XboardNodeBindingCreate(XboardNodeBindingBase):
+    pass
+
+
+class XboardNodeBindingUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    xboard_node_id: int | None = Field(default=None, ge=1)
+    node_type: str | None = Field(default=None, max_length=40)
+    host: str | None = Field(default=None, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    origin_id: int | None = None
+    azpanel_resource_id: int | None = None
+    enabled: bool | None = None
+    auto_update_after_change: bool | None = None
+    remark: str | None = Field(default=None, max_length=500)
+
+
+class XboardNodeBindingOut(XboardNodeBindingBase):
+    id: int
+    last_sync_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class IpChangeRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class IpChangeJobOut(BaseModel):
+    id: int
+    trigger_type: str
+    status: str
+    reason: str | None
+    provider: str | None
+    azpanel_resource_id: int | None
+    xboard_node_id: int | None
+    origin_id: int | None
+    old_ip: str | None
+    new_ip: str | None
+    error: str | None
+    started_at: datetime
+    finished_at: datetime | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ExternalIpSourceCreate(BaseModel):

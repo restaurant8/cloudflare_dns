@@ -7,7 +7,7 @@ from app.database import Base
 from app.dns_utils import parse_target
 from app.failover import choose_desired_origin, evaluate_failover_groups, publish_origin, validate_group_hostname_records
 from app.models import CloudflareCredential, FailoverGroup, FailoverHostname, Origin, Zone
-from app.origin_expansion import EXPANDED_PUBLISH_MODE, set_healthy_ips
+from app.origin_expansion import EXPANDED_PUBLISH_MODE, set_expanded_ip_priorities, set_healthy_ips
 from app.security import encrypt_secret
 
 
@@ -135,7 +135,7 @@ def test_publish_origin_creates_cname_for_hostname(monkeypatch):
     assert group.current_record_id == "new-record"
 
 
-def test_publish_expanded_hostname_creates_healthy_a_and_aaaa_records(monkeypatch):
+def test_publish_expanded_hostname_creates_selected_healthy_record_by_priority(monkeypatch):
     class ExpandedClient:
         records = [{"id": "record-1", "name": "www.example.com", "type": "CNAME", "content": "backup.example.net", "ttl": 60, "proxied": False}]
         created = 0
@@ -163,15 +163,14 @@ def test_publish_expanded_hostname_creates_healthy_a_and_aaaa_records(monkeypatc
     group, origin_model = setup_group(db, "backup.example.net")
     origin_model.publish_mode = EXPANDED_PUBLISH_MODE
     set_healthy_ips(origin_model, ["192.0.2.10", "2001:db8::10"])
+    set_expanded_ip_priorities(origin_model, {"192.0.2.10": 50, "2001:db8::10": 5})
 
     record = publish_origin(db, group, origin_model)
 
-    assert record["type"] == "A/AAAA"
-    assert set(group.current_record_id.split(",")) == {"new-record-1", "new-record-2"}
-    assert {(item["type"], item["content"]) for item in ExpandedClient.records} == {
-        ("A", "192.0.2.10"),
-        ("AAAA", "2001:db8::10"),
-    }
+    assert record["type"] == "AAAA"
+    assert record["content"] == "2001:db8::10"
+    assert group.current_record_id == "new-record-1"
+    assert [(item["type"], item["content"]) for item in ExpandedClient.records] == [("AAAA", "2001:db8::10")]
 
 
 def test_publish_origin_reclaims_orphaned_app_managed_records(monkeypatch):

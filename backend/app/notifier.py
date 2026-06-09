@@ -19,6 +19,9 @@ EVENT_NAMES = {
     "dns.publish_failed": "DNS 发布失败",
     "cloudflare.sync_failed": "Cloudflare 同步失败",
     "cloudflare.synced": "Cloudflare 已同步",
+    "azpanel.ip_changed": "AzPanel IP 已更换",
+    "azpanel.ip_change_failed": "AzPanel IP 更换失败",
+    "xboard.node_update_failed": "Xboard 节点更新失败",
 }
 
 
@@ -57,6 +60,9 @@ TELEGRAM_EVENT_PRIORITIES = {
     "dns.publish_failed": 30,
     "failover.no_healthy_origin": 30,
     "cloudflare.sync_failed": 30,
+    "azpanel.ip_changed": 30,
+    "azpanel.ip_change_failed": 30,
+    "xboard.node_update_failed": 20,
 }
 
 

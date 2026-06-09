@@ -11,7 +11,15 @@ from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, 
 from ..health import run_local_checks
 from ..models import FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
-from ..origin_expansion import DIRECT_PUBLISH_MODE, EXPANDED_PUBLISH_MODE, set_healthy_ips, set_published_ips, set_resolved_ips
+from ..origin_expansion import (
+    DIRECT_PUBLISH_MODE,
+    EXPANDED_PUBLISH_MODE,
+    expanded_ip_priorities,
+    set_expanded_ip_priorities,
+    set_healthy_ips,
+    set_published_ips,
+    set_resolved_ips,
+)
 from ..schemas import (
     FailoverCollectionCreate,
     FailoverCollectionOut,
@@ -43,6 +51,13 @@ def _normalize_remark(value: str | None) -> str | None:
     return stripped or None
 
 
+def _apply_expanded_ip_priorities(target, values: dict[str, int] | None) -> None:
+    try:
+        set_expanded_ip_priorities(target, values or {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _group_query(db: Session):
     return db.query(FailoverGroup).options(
         selectinload(FailoverGroup.hostnames),
@@ -62,7 +77,7 @@ def _origin_from_payload(group: FailoverGroup, payload: OriginCreate) -> Origin:
         raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
     if payload.publish_mode == EXPANDED_PUBLISH_MODE and target_info.target_type != "hostname":
         raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
-    return Origin(
+    origin = Origin(
         group_id=group.id,
         target=target_info.value,
         target_type=target_info.target_type,
@@ -72,6 +87,8 @@ def _origin_from_payload(group: FailoverGroup, payload: OriginCreate) -> Origin:
         remark=_normalize_remark(payload.remark),
         enabled=payload.enabled,
     )
+    _apply_expanded_ip_priorities(origin, payload.expanded_ip_priorities if target_info.target_type == "hostname" else {})
+    return origin
 
 
 def _origin_from_dns_record(group: FailoverGroup, record: dict, port: int) -> Origin:
@@ -108,7 +125,7 @@ def _global_origin_from_payload(collection: FailoverCollection, payload: Failove
         raise HTTPException(status_code=400, detail="全局 CNAME 备用不能和当前业务分组内的主机名相同")
     if payload.publish_mode == EXPANDED_PUBLISH_MODE and target_info.target_type != "hostname":
         raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
-    return FailoverGlobalOrigin(
+    global_origin = FailoverGlobalOrigin(
         collection_id=collection.id,
         target=target_info.value,
         target_type=target_info.target_type,
@@ -118,6 +135,8 @@ def _global_origin_from_payload(collection: FailoverCollection, payload: Failove
         remark=_normalize_remark(payload.remark),
         enabled=payload.enabled,
     )
+    _apply_expanded_ip_priorities(global_origin, payload.expanded_ip_priorities if target_info.target_type == "hostname" else {})
+    return global_origin
 
 
 def _reset_origin_probe_state(origin: Origin) -> None:
@@ -146,6 +165,7 @@ def _copy_global_origin_to_origin(origin: Origin, global_origin: FailoverGlobalO
     origin.priority = global_origin.priority
     origin.remark = global_origin.remark
     origin.enabled = global_origin.enabled
+    origin.expanded_ip_priorities_json = global_origin.expanded_ip_priorities_json
     if endpoint_changed:
         _reset_origin_probe_state(origin)
 
@@ -349,6 +369,8 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
         new_port = updates["port"]
     if "publish_mode" in updates and updates["publish_mode"] is not None:
         new_publish_mode = updates.pop("publish_mode")
+    priority_updates_provided = "expanded_ip_priorities" in updates
+    priority_updates = updates.pop("expanded_ip_priorities", None) if priority_updates_provided else None
     if new_target_type != "hostname" and new_publish_mode == EXPANDED_PUBLISH_MODE:
         raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
     _ensure_global_origin_unique(db, global_origin.collection_id, new_target, new_port, exclude_id=global_origin.id)
@@ -358,6 +380,10 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
     global_origin.target_type = new_target_type
     global_origin.publish_mode = new_publish_mode if new_target_type == "hostname" else DIRECT_PUBLISH_MODE
     global_origin.port = new_port
+    if priority_updates_provided:
+        _apply_expanded_ip_priorities(global_origin, priority_updates if new_target_type == "hostname" else {})
+    elif new_target_type != "hostname":
+        _apply_expanded_ip_priorities(global_origin, {})
     if "remark" in updates:
         global_origin.remark = _normalize_remark(updates.pop("remark"))
     for key, value in updates.items():
@@ -651,6 +677,9 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     if new_target_type != "hostname" and new_publish_mode == EXPANDED_PUBLISH_MODE:
         raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
 
+    priority_updates_provided = "expanded_ip_priorities" in updates
+    priority_updates = updates.pop("expanded_ip_priorities", None) if priority_updates_provided else None
+
     duplicate = (
         db.query(Origin)
         .filter(
@@ -666,9 +695,17 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
 
     endpoint_changed = new_target != origin.target or new_port != origin.port or new_publish_mode != origin.publish_mode
     target_changed = new_target != origin.target or new_target_type != origin.target_type or new_publish_mode != origin.publish_mode
+    old_expanded_ip_priorities = expanded_ip_priorities(origin)
     origin.target = new_target
     origin.target_type = new_target_type
     origin.publish_mode = new_publish_mode if new_target_type == "hostname" else DIRECT_PUBLISH_MODE
+    if priority_updates_provided:
+        _apply_expanded_ip_priorities(origin, priority_updates if new_target_type == "hostname" else {})
+    elif new_target_type != "hostname":
+        _apply_expanded_ip_priorities(origin, {})
+    target_changed = target_changed or (
+        origin.publish_mode == EXPANDED_PUBLISH_MODE and old_expanded_ip_priorities != expanded_ip_priorities(origin)
+    )
     if "remark" in updates:
         origin.remark = _normalize_remark(updates.pop("remark"))
     for key, value in updates.items():

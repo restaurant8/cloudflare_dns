@@ -4,7 +4,7 @@ from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Te
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
-from .origin_expansion import healthy_ips, published_ips, resolved_ips
+from .origin_expansion import expanded_ip_priorities, healthy_ips, published_ips, resolved_ips
 
 
 def utcnow() -> datetime:
@@ -163,6 +163,7 @@ class Origin(Base, TimestampMixin):
     resolved_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     healthy_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     published_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    expanded_ip_priorities_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
 
     group: Mapped["FailoverGroup"] = relationship("FailoverGroup", back_populates="origins")
     global_origin: Mapped["FailoverGlobalOrigin | None"] = relationship("FailoverGlobalOrigin", back_populates="mirrored_origins")
@@ -180,6 +181,10 @@ class Origin(Base, TimestampMixin):
     def published_ips(self) -> list[str]:
         return published_ips(self)
 
+    @property
+    def expanded_ip_priorities(self) -> dict[str, int]:
+        return expanded_ip_priorities(self)
+
 
 class FailoverGlobalOrigin(Base, TimestampMixin):
     __tablename__ = "failover_global_origins"
@@ -194,6 +199,11 @@ class FailoverGlobalOrigin(Base, TimestampMixin):
     priority: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
     remark: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    expanded_ip_priorities_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+
+    @property
+    def expanded_ip_priorities(self) -> dict[str, int]:
+        return expanded_ip_priorities(self)
 
     collection: Mapped["FailoverCollection"] = relationship("FailoverCollection", back_populates="global_origins")
     mirrored_origins: Mapped[list["Origin"]] = relationship("Origin", back_populates="global_origin")
@@ -243,6 +253,79 @@ class TargetPoolProbeState(Base, TimestampMixin):
     @property
     def agent_enabled(self) -> bool:
         return True if self.agent is None else self.agent.enabled
+
+
+class AzPanelResource(Base, TimestampMixin):
+    __tablename__ = "azpanel_resources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String(20), default="azure", nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String(120))
+    region: Mapped[str | None] = mapped_column(String(120))
+    ip_version: Mapped[str] = mapped_column(String(10), default="ipv4", nullable=False)
+    origin_id: Mapped[int | None] = mapped_column(ForeignKey("origins.id", ondelete="SET NULL"))
+    current_ip: Mapped[str | None] = mapped_column(String(120))
+    port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    auto_change_on_blocked: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    auto_update_origin: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=1800, nullable=False)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_change_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    remark: Mapped[str | None] = mapped_column(Text)
+
+    origin: Mapped["Origin | None"] = relationship("Origin")
+    xboard_nodes: Mapped[list["XboardNodeBinding"]] = relationship("XboardNodeBinding", back_populates="azpanel_resource")
+    jobs: Mapped[list["IpChangeJob"]] = relationship("IpChangeJob", back_populates="azpanel_resource")
+
+
+class XboardNodeBinding(Base, TimestampMixin):
+    __tablename__ = "xboard_node_bindings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    xboard_node_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    node_type: Mapped[str | None] = mapped_column(String(40))
+    host: Mapped[str | None] = mapped_column(String(255))
+    port: Mapped[int | None] = mapped_column(Integer)
+    origin_id: Mapped[int | None] = mapped_column(ForeignKey("origins.id", ondelete="SET NULL"))
+    azpanel_resource_id: Mapped[int | None] = mapped_column(ForeignKey("azpanel_resources.id", ondelete="SET NULL"))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    auto_update_after_change: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    remark: Mapped[str | None] = mapped_column(Text)
+
+    origin: Mapped["Origin | None"] = relationship("Origin")
+    azpanel_resource: Mapped["AzPanelResource | None"] = relationship("AzPanelResource", back_populates="xboard_nodes")
+    jobs: Mapped[list["IpChangeJob"]] = relationship("IpChangeJob", back_populates="xboard_node")
+
+
+class IpChangeJob(Base, TimestampMixin):
+    __tablename__ = "ip_change_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trigger_type: Mapped[str] = mapped_column(String(40), default="manual", nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="running", nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    provider: Mapped[str | None] = mapped_column(String(20))
+    azpanel_resource_id: Mapped[int | None] = mapped_column(ForeignKey("azpanel_resources.id", ondelete="SET NULL"))
+    xboard_node_id: Mapped[int | None] = mapped_column(ForeignKey("xboard_node_bindings.id", ondelete="SET NULL"))
+    origin_id: Mapped[int | None] = mapped_column(ForeignKey("origins.id", ondelete="SET NULL"))
+    old_ip: Mapped[str | None] = mapped_column(String(120))
+    new_ip: Mapped[str | None] = mapped_column(String(120))
+    request_json: Mapped[str | None] = mapped_column(Text)
+    response_json: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    azpanel_resource: Mapped["AzPanelResource | None"] = relationship("AzPanelResource", back_populates="jobs")
+    xboard_node: Mapped["XboardNodeBinding | None"] = relationship("XboardNodeBinding", back_populates="jobs")
+    origin: Mapped["Origin | None"] = relationship("Origin")
 
 
 class ExternalIpSource(Base, TimestampMixin):

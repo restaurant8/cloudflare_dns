@@ -61,6 +61,7 @@ export type Origin = {
   resolved_ips: string[];
   healthy_ips: string[];
   published_ips: string[];
+  expanded_ip_priorities: Record<string, number>;
   probe_states: ProbeState[];
 };
 
@@ -97,6 +98,7 @@ export type FailoverGlobalOrigin = {
   publish_mode: string;
   port: number;
   priority: number;
+  expanded_ip_priorities: Record<string, number>;
   remark: string | null;
   enabled: boolean;
   created_at: string;
@@ -237,6 +239,79 @@ export type SshSettings = {
   upstream_url: string;
   session_ttl_seconds: number;
   entry_path: string;
+};
+
+export type AzPanelSettings = {
+  enabled: boolean;
+  base_url: string;
+  api_token_configured: boolean;
+  timeout_seconds: number;
+  default_cooldown_seconds: number;
+};
+
+export type AzPanelResource = {
+  id: number;
+  name: string;
+  provider: string;
+  resource_id: string;
+  account_id: string | null;
+  region: string | null;
+  ip_version: string;
+  origin_id: number | null;
+  current_ip: string | null;
+  port: number;
+  enabled: boolean;
+  auto_change_on_blocked: boolean;
+  auto_update_origin: boolean;
+  cooldown_seconds: number;
+  last_attempt_at: string | null;
+  last_change_at: string | null;
+  last_error: string | null;
+  remark: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type XboardSettings = {
+  enabled: boolean;
+  base_url: string;
+  api_token_configured: boolean;
+  timeout_seconds: number;
+};
+
+export type XboardNodeBinding = {
+  id: number;
+  name: string;
+  xboard_node_id: number;
+  node_type: string | null;
+  host: string | null;
+  port: number | null;
+  origin_id: number | null;
+  azpanel_resource_id: number | null;
+  enabled: boolean;
+  auto_update_after_change: boolean;
+  last_sync_at: string | null;
+  last_error: string | null;
+  remark: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type IpChangeJob = {
+  id: number;
+  trigger_type: string;
+  status: string;
+  reason: string | null;
+  provider: string | null;
+  azpanel_resource_id: number | null;
+  xboard_node_id: number | null;
+  origin_id: number | null;
+  old_ip: string | null;
+  new_ip: string | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+  created_at: string;
 };
 
 export type Overview = {

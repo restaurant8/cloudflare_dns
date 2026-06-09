@@ -38,6 +38,12 @@ def _migrate_existing_schema() -> None:
                 if column_name not in existing:
                     connection.execute(text(statement))
 
+        if "failover_global_origins" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("failover_global_origins")}
+            for column_name, statement in _global_origin_migration_statements(dialect).items():
+                if column_name not in existing:
+                    connection.execute(text(statement))
+
         if "target_pool_items" in table_names:
             existing = {column["name"] for column in inspector.get_columns("target_pool_items")}
             for column_name, statement in _target_pool_migration_statements(dialect).items():
@@ -99,6 +105,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
             "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NULL",
             "healthy_ips_json": "ALTER TABLE origins ADD COLUMN healthy_ips_json TEXT NULL",
             "published_ips_json": "ALTER TABLE origins ADD COLUMN published_ips_json TEXT NULL",
+            "expanded_ip_priorities_json": "ALTER TABLE origins ADD COLUMN expanded_ip_priorities_json TEXT NULL",
         }
     return {
         "global_origin_id": "ALTER TABLE origins ADD COLUMN global_origin_id INTEGER",
@@ -107,6 +114,17 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
         "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NOT NULL DEFAULT '[]'",
         "healthy_ips_json": "ALTER TABLE origins ADD COLUMN healthy_ips_json TEXT NOT NULL DEFAULT '[]'",
         "published_ips_json": "ALTER TABLE origins ADD COLUMN published_ips_json TEXT NOT NULL DEFAULT '[]'",
+        "expanded_ip_priorities_json": "ALTER TABLE origins ADD COLUMN expanded_ip_priorities_json TEXT NOT NULL DEFAULT '{}'",
+    }
+
+
+def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
+    if dialect == "mysql":
+        return {
+            "expanded_ip_priorities_json": "ALTER TABLE failover_global_origins ADD COLUMN expanded_ip_priorities_json TEXT NULL",
+        }
+    return {
+        "expanded_ip_priorities_json": "ALTER TABLE failover_global_origins ADD COLUMN expanded_ip_priorities_json TEXT NOT NULL DEFAULT '{}'",
     }
 
 
