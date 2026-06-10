@@ -1,12 +1,13 @@
+from datetime import datetime
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Agent, CloudflareCredential, FailoverCollection, FailoverGroup, Origin, ProbeState, User, Zone
+from app.models import Agent, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, ProbeState, User, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, resolved_ips
-from app.routes.groups import add_group_hostname, create_collection, create_global_origin, create_group, delete_group_hostname, update_global_origin, update_group, update_origin
+from app.routes.groups import add_group_hostname, create_collection, create_global_origin, create_group, delete_global_origin, delete_group_hostname, update_global_origin, update_group, update_origin
 from app.schemas import FailoverCollectionCreate, FailoverGlobalOriginCreate, FailoverGlobalOriginUpdate, FailoverGroupCreate, FailoverGroupUpdate, FailoverHostnameCreate, OriginOut, OriginUpdate
 from app.security import encrypt_secret
 
@@ -246,6 +247,82 @@ def test_update_global_origin_updates_all_mirrored_origins():
     assert mirror.priority == 5
     assert mirror.remark == "新备用"
     assert mirror.enabled is False
+
+
+def test_update_current_global_origin_republishes_dns(monkeypatch):
+    FakeCloudflareClient.records = [{"id": "record-1", "name": "www.example.com", "type": "A", "content": "192.0.2.20", "ttl": 60, "proxied": False}]
+    monkeypatch.setattr("app.failover.CloudflareClient", FakeCloudflareClient)
+    db = make_session()
+    zone, user = setup_zone(db)
+    collection = FailoverCollection(name="业务 当前全局")
+    db.add(collection)
+    db.flush()
+    group = FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="www.example.com", current_record_id="record-1")
+    global_origin = FailoverGlobalOrigin(collection_id=collection.id, target="192.0.2.20", target_type="ipv4", port=22, priority=5, enabled=True)
+    db.add_all([group, global_origin])
+    db.flush()
+    mirror = Origin(
+        group_id=group.id,
+        global_origin_id=global_origin.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=22,
+        priority=5,
+        status="healthy",
+        enabled=True,
+    )
+    db.add(mirror)
+    db.flush()
+    group.current_origin_id = mirror.id
+    db.commit()
+
+    update_global_origin(global_origin.id, FailoverGlobalOriginUpdate(target="192.0.2.55"), user, db)
+
+    assert FakeCloudflareClient.records[0]["content"] == "192.0.2.55"
+    assert FakeCloudflareClient.records[0]["type"] == "A"
+
+
+def test_delete_current_global_origin_republishes_next_backup(monkeypatch):
+    FakeCloudflareClient.records = [{"id": "record-1", "name": "www.example.com", "type": "A", "content": "192.0.2.20", "ttl": 60, "proxied": False}]
+    monkeypatch.setattr("app.failover.CloudflareClient", FakeCloudflareClient)
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: None)
+    db = make_session()
+    zone, user = setup_zone(db)
+    collection = FailoverCollection(name="业务 删除全局")
+    db.add(collection)
+    db.flush()
+    group = FailoverGroup(
+        zone_id=zone.id,
+        collection_id=collection.id,
+        hostname="www.example.com",
+        current_record_id="record-1",
+        min_switch_interval_seconds=120,
+        last_switch_at=datetime.utcnow(),
+    )
+    global_origin = FailoverGlobalOrigin(collection_id=collection.id, target="192.0.2.20", target_type="ipv4", port=22, priority=5, enabled=True)
+    db.add_all([group, global_origin])
+    db.flush()
+    current = Origin(
+        group_id=group.id,
+        global_origin_id=global_origin.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=22,
+        priority=5,
+        status="healthy",
+        enabled=True,
+    )
+    backup = Origin(group_id=group.id, target="192.0.2.30", target_type="ipv4", port=22, priority=10, status="healthy", enabled=True)
+    db.add_all([current, backup])
+    db.flush()
+    group.current_origin_id = current.id
+    db.commit()
+
+    delete_global_origin(global_origin.id, user, db)
+
+    db.refresh(group)
+    assert group.current_origin_id == backup.id
+    assert FakeCloudflareClient.records[0]["content"] == "192.0.2.30"
 
 
 def test_update_group_collection_adds_and_removes_global_origin_mirrors():

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "xboard",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "echo xboard-already-running && ping -n 100000 127.0.0.1 > NUL"],
+      "port": 7001
+    }
+  ]
+}

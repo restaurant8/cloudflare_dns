@@ -150,7 +150,7 @@ def _reset_origin_probe_state(origin: Origin) -> None:
     set_published_ips(origin, [])
 
 
-def _copy_global_origin_to_origin(origin: Origin, global_origin: FailoverGlobalOrigin) -> None:
+def _copy_global_origin_to_origin(origin: Origin, global_origin: FailoverGlobalOrigin) -> bool:
     endpoint_changed = (
         origin.target != global_origin.target
         or origin.target_type != global_origin.target_type
@@ -168,6 +168,7 @@ def _copy_global_origin_to_origin(origin: Origin, global_origin: FailoverGlobalO
     origin.expanded_ip_priorities_json = global_origin.expanded_ip_priorities_json
     if endpoint_changed:
         _reset_origin_probe_state(origin)
+    return endpoint_changed
 
 
 def _ensure_global_origin_unique(db: Session, collection_id: int, target: str, port: int, exclude_id: int | None = None) -> None:
@@ -202,9 +203,10 @@ def _ensure_global_origin_update_has_no_group_conflicts(db: Session, global_orig
         raise HTTPException(status_code=409, detail=f"这些切换组已存在相同目标，无法整体修改：{names}")
 
 
-def sync_global_origins_to_group(db: Session, group: FailoverGroup) -> None:
+def sync_global_origins_to_group(db: Session, group: FailoverGroup) -> bool:
     collection = group.collection
     active_global_ids: set[int] = set()
+    current_endpoint_changed = False
     if collection:
         global_origins = sorted(collection.global_origins, key=lambda item: (item.priority, item.id))
         for global_origin in global_origins:
@@ -225,18 +227,46 @@ def sync_global_origins_to_group(db: Session, group: FailoverGroup) -> None:
                 origin = Origin(group_id=group.id, target=global_origin.target, target_type=global_origin.target_type, port=global_origin.port)
                 db.add(origin)
                 group.origins.append(origin)
-            _copy_global_origin_to_origin(origin, global_origin)
+            was_current = group.current_origin_id == origin.id
+            previous_priority = origin.priority
+            previous_enabled = origin.enabled
+            endpoint_changed = _copy_global_origin_to_origin(origin, global_origin)
+            if was_current and endpoint_changed:
+                current_endpoint_changed = True
+            if was_current and (endpoint_changed or previous_priority != origin.priority or previous_enabled != origin.enabled):
+                group.last_switch_at = None
 
     stale_global_origins = [origin for origin in group.origins if origin.global_origin_id and origin.global_origin_id not in active_global_ids]
     for origin in stale_global_origins:
         if group.current_origin_id == origin.id:
             group.current_origin_id = None
+            group.last_switch_at = None
         db.delete(origin)
+    return current_endpoint_changed
 
 
-def sync_global_origins_to_collection(db: Session, collection: FailoverCollection) -> None:
+def sync_global_origins_to_collection(db: Session, collection: FailoverCollection) -> list[FailoverGroup]:
+    current_endpoint_changed_groups: list[FailoverGroup] = []
     for group in collection.groups:
-        sync_global_origins_to_group(db, group)
+        if sync_global_origins_to_group(db, group):
+            current_endpoint_changed_groups.append(group)
+    return current_endpoint_changed_groups
+
+
+def _publish_current_group_origin(db: Session, group: FailoverGroup) -> None:
+    if not group.enabled or not group.current_origin_id:
+        return
+    current_origin = next((origin for origin in group.origins if origin.id == group.current_origin_id), None)
+    if current_origin is None:
+        current_origin = db.get(Origin, group.current_origin_id)
+    if current_origin is None or not current_origin.enabled:
+        return
+    try:
+        publish_origin(db, group, current_origin)
+    except Exception as exc:
+        group.last_error = str(exc)
+    else:
+        group.last_error = None
 
 
 def _validate_group_collection(group: FailoverGroup, collection: FailoverCollection | None) -> None:
@@ -334,7 +364,9 @@ def create_global_origin(collection_id: int, payload: FailoverGlobalOriginCreate
     db.add(global_origin)
     db.flush()
     collection.global_origins.append(global_origin)
-    sync_global_origins_to_collection(db, collection)
+    current_endpoint_changed_groups = sync_global_origins_to_collection(db, collection)
+    for group in current_endpoint_changed_groups:
+        _publish_current_group_origin(db, group)
     evaluate_failover_groups(db)
     db.commit()
     return _collection_query(db).filter(FailoverCollection.id == collection_id).one()
@@ -388,7 +420,9 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
         global_origin.remark = _normalize_remark(updates.pop("remark"))
     for key, value in updates.items():
         setattr(global_origin, key, value)
-    sync_global_origins_to_collection(db, global_origin.collection)
+    current_endpoint_changed_groups = sync_global_origins_to_collection(db, global_origin.collection)
+    for group in current_endpoint_changed_groups:
+        _publish_current_group_origin(db, group)
     evaluate_failover_groups(db)
     db.commit()
     db.refresh(global_origin)
@@ -411,8 +445,11 @@ def delete_global_origin(global_origin_id: int, _: User = Depends(get_current_us
     for origin in mirrored_origins:
         if origin.group.current_origin_id == origin.id:
             origin.group.current_origin_id = None
+            origin.group.last_switch_at = None
         db.delete(origin)
     db.delete(global_origin)
+    db.flush()
+    db.expire_all()
     if affected_group_ids:
         evaluate_failover_groups(db)
     db.commit()

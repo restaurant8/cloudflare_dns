@@ -167,6 +167,52 @@ def _record_label(record: dict) -> str:
     return f"{record.get('type')} {record.get('content')}（{proxy_state}，ID {record.get('id')}）"
 
 
+def _normalize_dns_content(record_type: str, value: str | None) -> str:
+    content = str(value or "").strip()
+    if record_type == "CNAME":
+        return content.rstrip(".").lower()
+    return content
+
+
+def _desired_record_for_origin(origin: Origin) -> tuple[str, str] | None:
+    if is_expanded_origin(origin):
+        selected_ip = selected_healthy_ip(origin)
+        if not selected_ip:
+            return None
+        return record_type_for_ip(selected_ip), selected_ip
+    return record_type_for_target_type(origin.target_type), origin.target
+
+
+def _record_matches(record: dict, record_type: str, content: str) -> bool:
+    return (
+        record.get("type") == record_type
+        and not record.get("proxied")
+        and _normalize_dns_content(record_type, record.get("content")) == _normalize_dns_content(record_type, content)
+    )
+
+
+def current_dns_matches_origin(db: Session, group: FailoverGroup, origin: Origin) -> bool:
+    desired = _desired_record_for_origin(origin)
+    if desired is None:
+        return True
+    record_type, content = desired
+    credential = group.zone.credential
+    client = CloudflareClient(decrypt_secret(credential.token_encrypted))
+    for hostname_entry in ensure_group_hostname_entries(db, group):
+        managed_ids = _record_ids(hostname_entry)
+        if not managed_ids:
+            return False
+        records = _same_name_records(client, group, hostname_entry)
+        managed_records = [record for record in records if record.get("id") in managed_ids]
+        if len(managed_records) != len(managed_ids):
+            return False
+        if len(managed_records) != 1:
+            return False
+        if not _record_matches(managed_records[0], record_type, content):
+            return False
+    return True
+
+
 def _same_name_records(client: CloudflareClient, group: FailoverGroup, hostname_entry: FailoverHostname) -> list[dict]:
     return _managed_dns_records(client, group.zone.cf_zone_id, hostname_entry.hostname)
 
@@ -341,7 +387,17 @@ def evaluate_failover_groups(db: Session) -> int:
             group.last_error = None
         if desired.id == group.current_origin_id and not group.last_error:
             desired_expanded_ip = selected_healthy_ip(desired)
-            if is_expanded_origin(desired) and published_ips(desired) != ([desired_expanded_ip] if desired_expanded_ip else []):
+            try:
+                dns_matches = current_dns_matches_origin(db, group, desired)
+            except Exception as exc:
+                message = str(exc)
+                group.last_error = message
+                payload = {"group_id": group.id, "hostname": group.hostname, "error": message}
+                add_event(db, "dns.consistency_check_failed", "error", f"{group.hostname} DNS 一致性检查失败: {message}", payload)
+                send_webhooks(db, "dns.consistency_check_failed", payload)
+                continue
+            expanded_metadata_mismatch = is_expanded_origin(desired) and published_ips(desired) != ([desired_expanded_ip] if desired_expanded_ip else [])
+            if expanded_metadata_mismatch or not dns_matches:
                 try:
                     record = publish_origin(db, group, desired)
                 except Exception as exc:
@@ -360,7 +416,8 @@ def evaluate_failover_groups(db: Session) -> int:
                         "record_type": record["type"],
                         "content": record["content"],
                     }
-                    add_event(db, "dns.switched", "info", f"{group.hostname} 已更新健康 IP 池 {record['content']}", payload)
+                    message = f"{group.hostname} 已修正 DNS 记录为 {record['type']} {record['content']}"
+                    add_event(db, "dns.switched", "info", message, payload)
                     send_webhooks(db, "dns.switched", payload)
             continue
         if group.last_switch_at:

@@ -218,6 +218,22 @@ def test_publish_origin_reclaims_orphaned_app_managed_records(monkeypatch):
     assert {item["id"] for item in ClientWithOrphanedRecord.records} == {"record-1"}
 
 
+def test_evaluate_republishes_current_origin_when_dns_drifted(monkeypatch):
+    FakeCloudflareClient.records = [{"id": "record-1", "name": "www.example.com", "type": "A", "content": "192.0.2.99", "ttl": 60, "proxied": False}]
+    monkeypatch.setattr("app.failover.CloudflareClient", FakeCloudflareClient)
+    db = make_session()
+    group, origin_model = setup_group(db, "192.0.2.20", current_record_id="record-1")
+    group.current_origin_id = origin_model.id
+    group.last_switch_at = datetime.utcnow()
+    db.commit()
+
+    switches = evaluate_failover_groups(db)
+
+    assert switches == 0
+    assert FakeCloudflareClient.records[0]["content"] == "192.0.2.20"
+    assert FakeCloudflareClient.records[0]["type"] == "A"
+
+
 def test_publish_origin_rejects_unmanaged_same_name_conflict(monkeypatch):
     FakeCloudflareClient.records = [
         {"id": "record-1", "name": "www.example.com", "type": "A", "content": "192.0.2.1", "ttl": 60, "proxied": False},
