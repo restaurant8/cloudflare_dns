@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.health import LOCAL_SOURCE, mark_stale_agents, recalculate_origin_status, run_local_checks
+from app.health import LOCAL_SOURCE, mark_stale_agents, recalculate_origin_status, refresh_expanded_origin_ips, run_local_checks
 from app.models import (
     Agent,
     CloudflareCredential,
@@ -17,7 +17,7 @@ from app.models import (
     ProbeState,
     Zone,
 )
-from app.origin_expansion import EXPANDED_PUBLISH_MODE, healthy_ips
+from app.origin_expansion import EXPANDED_PUBLISH_MODE, healthy_ips, resolved_ips, set_published_ips
 from app.security import encrypt_secret
 
 
@@ -395,6 +395,17 @@ def test_run_local_checks_prefers_global_origin_and_syncs_matching_backups(monke
 
     assert backup_state.success_count == global_state.success_count == 1
     assert backup_state.last_checked_at == global_state.last_checked_at
+
+
+def test_refresh_expanded_origin_keeps_published_ip_in_probe_list(monkeypatch):
+    origin = Origin(target="backup.example.net", target_type="hostname", publish_mode=EXPANDED_PUBLISH_MODE, port=443)
+    set_published_ips(origin, ["192.0.2.10"])
+    monkeypatch.setattr("app.health.resolve_hostname_ips", lambda hostname: ["192.0.2.20"])
+
+    ips = refresh_expanded_origin_ips(origin)
+
+    assert ips == ["192.0.2.10", "192.0.2.20"]
+    assert resolved_ips(origin) == ["192.0.2.10", "192.0.2.20"]
 
 
 def test_expanded_hostname_checks_each_resolved_ip_and_keeps_healthy_pool(monkeypatch):

@@ -11,6 +11,7 @@ from .origin_expansion import (
     expanded_source_key,
     healthy_ips,
     is_expanded_origin,
+    published_ips,
     resolve_hostname_ips,
     resolved_ips,
     set_healthy_ips,
@@ -619,6 +620,7 @@ def refresh_expanded_origin_ips(origin: Origin) -> list[str]:
     if origin.target_type != "hostname" or getattr(origin, "publish_mode", None) != EXPANDED_PUBLISH_MODE:
         return []
     ips = resolve_hostname_ips(origin.target)
+    ips = sorted(set(ips + published_ips(origin)))
     set_resolved_ips(origin, ips)
     return ips
 

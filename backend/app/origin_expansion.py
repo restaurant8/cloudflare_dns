@@ -80,6 +80,9 @@ def selected_healthy_ip(origin: Any) -> str | None:
     ips = healthy_ips(origin)
     if not ips:
         return None
+    current_published = published_ips(origin)
+    if current_published and current_published[0] in ips:
+        return current_published[0]
     priorities = expanded_ip_priorities(origin)
     return sorted(
         ips,
