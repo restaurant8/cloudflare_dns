@@ -133,9 +133,11 @@ def _agent_default_migration_statement(dialect: str) -> str:
 def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":
         return {
+            "preferred_agent_id": "ALTER TABLE failover_global_origins ADD COLUMN preferred_agent_id INT NULL",
             "expanded_ip_priorities_json": "ALTER TABLE failover_global_origins ADD COLUMN expanded_ip_priorities_json TEXT NULL",
         }
     return {
+        "preferred_agent_id": "ALTER TABLE failover_global_origins ADD COLUMN preferred_agent_id INTEGER",
         "expanded_ip_priorities_json": "ALTER TABLE failover_global_origins ADD COLUMN expanded_ip_priorities_json TEXT NOT NULL DEFAULT '{}'",
     }
 

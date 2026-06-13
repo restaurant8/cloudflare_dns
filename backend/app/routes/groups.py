@@ -129,7 +129,7 @@ def _collection_hostname_values(collection: FailoverCollection) -> set[str]:
     return values
 
 
-def _global_origin_from_payload(collection: FailoverCollection, payload: FailoverGlobalOriginCreate) -> FailoverGlobalOrigin:
+def _global_origin_from_payload(db: Session, collection: FailoverCollection, payload: FailoverGlobalOriginCreate) -> FailoverGlobalOrigin:
     target_info = parse_target(payload.target)
     if target_info.record_type == "CNAME" and target_info.value in _collection_hostname_values(collection):
         raise HTTPException(status_code=400, detail="全局 CNAME 备用不能和当前业务分组内的主机名相同")
@@ -142,6 +142,7 @@ def _global_origin_from_payload(collection: FailoverCollection, payload: Failove
         publish_mode=payload.publish_mode if target_info.target_type == "hostname" else DIRECT_PUBLISH_MODE,
         port=payload.port,
         priority=payload.priority,
+        preferred_agent_id=_validate_preferred_agent_id(db, payload.preferred_agent_id),
         remark=_normalize_remark(payload.remark),
         enabled=payload.enabled,
     )
@@ -167,7 +168,9 @@ def _copy_global_origin_to_origin(origin: Origin, global_origin: FailoverGlobalO
         or origin.port != global_origin.port
         or origin.publish_mode != global_origin.publish_mode
     )
+    probe_source_changed = origin.preferred_agent_id != global_origin.preferred_agent_id
     origin.global_origin_id = global_origin.id
+    origin.preferred_agent_id = global_origin.preferred_agent_id
     origin.target = global_origin.target
     origin.target_type = global_origin.target_type
     origin.publish_mode = global_origin.publish_mode
@@ -176,7 +179,7 @@ def _copy_global_origin_to_origin(origin: Origin, global_origin: FailoverGlobalO
     origin.remark = global_origin.remark
     origin.enabled = global_origin.enabled
     origin.expanded_ip_priorities_json = global_origin.expanded_ip_priorities_json
-    if endpoint_changed:
+    if endpoint_changed or probe_source_changed:
         _reset_origin_probe_state(origin)
     return endpoint_changed
 
@@ -234,7 +237,13 @@ def sync_global_origins_to_group(db: Session, group: FailoverGroup) -> bool:
                     None,
                 )
             if origin is None:
-                origin = Origin(group_id=group.id, target=global_origin.target, target_type=global_origin.target_type, port=global_origin.port)
+                origin = Origin(
+                    group_id=group.id,
+                    preferred_agent_id=global_origin.preferred_agent_id,
+                    target=global_origin.target,
+                    target_type=global_origin.target_type,
+                    port=global_origin.port,
+                )
                 db.add(origin)
                 group.origins.append(origin)
             was_current = group.current_origin_id == origin.id
@@ -369,7 +378,7 @@ def create_global_origin(collection_id: int, payload: FailoverGlobalOriginCreate
     )
     if collection is None:
         raise HTTPException(status_code=404, detail="业务分组不存在")
-    global_origin = _global_origin_from_payload(collection, payload)
+    global_origin = _global_origin_from_payload(db, collection, payload)
     _ensure_global_origin_unique(db, collection.id, global_origin.target, global_origin.port)
     db.add(global_origin)
     db.flush()
@@ -401,6 +410,7 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
     new_target_type = global_origin.target_type
     new_port = global_origin.port
     new_publish_mode = global_origin.publish_mode
+    new_preferred_agent_id = global_origin.preferred_agent_id
     if "target" in updates and updates["target"] is not None:
         target_info = parse_target(updates.pop("target"))
         if target_info.record_type == "CNAME" and target_info.value in _collection_hostname_values(global_origin.collection):
@@ -415,6 +425,8 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
     priority_updates = updates.pop("expanded_ip_priorities", None) if priority_updates_provided else None
     if new_target_type != "hostname" and new_publish_mode == EXPANDED_PUBLISH_MODE:
         raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
+    if "preferred_agent_id" in updates:
+        new_preferred_agent_id = _validate_preferred_agent_id(db, updates.pop("preferred_agent_id"))
     _ensure_global_origin_unique(db, global_origin.collection_id, new_target, new_port, exclude_id=global_origin.id)
     _ensure_global_origin_update_has_no_group_conflicts(db, global_origin, new_target, new_port)
 
@@ -422,6 +434,7 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
     global_origin.target_type = new_target_type
     global_origin.publish_mode = new_publish_mode if new_target_type == "hostname" else DIRECT_PUBLISH_MODE
     global_origin.port = new_port
+    global_origin.preferred_agent_id = new_preferred_agent_id
     if priority_updates_provided:
         _apply_expanded_ip_priorities(global_origin, priority_updates if new_target_type == "hostname" else {})
     elif new_target_type != "hostname":

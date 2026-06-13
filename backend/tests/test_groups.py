@@ -194,6 +194,9 @@ def test_delete_group_hostname_keeps_at_least_one_hostname(monkeypatch):
 def test_create_global_origin_syncs_to_all_collection_groups():
     db = make_session()
     zone, user = setup_zone(db)
+    agent = Agent(name="杭州", region="china", token_hash="hash", status="online")
+    db.add(agent)
+    db.flush()
     collection = create_collection(FailoverCollectionCreate(name="业务 A"), user, db)
     groups = [
         FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="a.example.com"),
@@ -204,38 +207,55 @@ def test_create_global_origin_syncs_to_all_collection_groups():
 
     updated = create_global_origin(
         collection.id,
-        FailoverGlobalOriginCreate(target="192.0.2.20", port=22, priority=30, remark="通用备用"),
+        FailoverGlobalOriginCreate(target="192.0.2.20", port=22, priority=30, remark="通用备用", preferred_agent_id=agent.id),
         user,
         db,
     )
 
     assert len(updated.global_origins) == 1
+    assert updated.global_origins[0].preferred_agent_id == agent.id
     for group in db.query(FailoverGroup).filter(FailoverGroup.collection_id == collection.id).all():
         mirrors = [origin for origin in group.origins if origin.global_origin_id == updated.global_origins[0].id]
         assert len(mirrors) == 1
         assert mirrors[0].target == "192.0.2.20"
         assert mirrors[0].priority == 30
         assert mirrors[0].remark == "通用备用"
+        assert mirrors[0].preferred_agent_id == agent.id
 
 
 def test_update_global_origin_updates_all_mirrored_origins():
     db = make_session()
     zone, user = setup_zone(db)
+    first_agent = Agent(name="杭州", region="china", token_hash="hash-1", status="online")
+    second_agent = Agent(name="上海", region="china", token_hash="hash-2", status="online")
+    db.add_all([first_agent, second_agent])
+    db.flush()
     collection = create_collection(FailoverCollectionCreate(name="业务 B"), user, db)
     group = FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="a.example.com")
     db.add(group)
     db.commit()
     updated = create_global_origin(
         collection.id,
-        FailoverGlobalOriginCreate(target="192.0.2.20", port=22, priority=30, remark="旧备用"),
+        FailoverGlobalOriginCreate(target="192.0.2.20", port=22, priority=30, remark="旧备用", preferred_agent_id=first_agent.id),
         user,
         db,
     )
     global_origin = updated.global_origins[0]
+    mirror = db.query(Origin).filter(Origin.global_origin_id == global_origin.id).one()
+    db.add(
+        ProbeState(
+            origin_id=mirror.id,
+            source_key=f"agent:{first_agent.id}",
+            agent_id=first_agent.id,
+            status="healthy",
+            last_checked_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
 
     update_global_origin(
         global_origin.id,
-        FailoverGlobalOriginUpdate(target="2001:db8::20", port=443, priority=5, remark="新备用", enabled=False),
+        FailoverGlobalOriginUpdate(target="2001:db8::20", port=443, priority=5, remark="新备用", preferred_agent_id=second_agent.id, enabled=False),
         user,
         db,
     )
@@ -246,7 +266,9 @@ def test_update_global_origin_updates_all_mirrored_origins():
     assert mirror.port == 443
     assert mirror.priority == 5
     assert mirror.remark == "新备用"
+    assert mirror.preferred_agent_id == second_agent.id
     assert mirror.enabled is False
+    assert mirror.probe_states == []
 
 
 def test_update_current_global_origin_republishes_dns(monkeypatch):

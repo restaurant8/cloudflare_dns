@@ -342,6 +342,7 @@ class FailoverGlobalOriginUpdate(OriginUpdate):
 class FailoverGlobalOriginOut(BaseModel):
     id: int
     collection_id: int
+    preferred_agent_id: int | None
     target: str
     target_type: str
     publish_mode: str

@@ -19,7 +19,7 @@ from ..health import (
     refresh_expanded_origin_ips,
     sync_probe_states_from_origin,
 )
-from ..models import Agent, FailoverGroup, Origin, User
+from ..models import Agent, FailoverGlobalOrigin, FailoverGroup, Origin, User
 from ..origin_expansion import expanded_source_key, is_expanded_origin, resolved_ips
 from ..request_utils import client_ip_from_request
 from ..runtime_settings import get_runtime_settings
@@ -167,6 +167,10 @@ def delete_agent(agent_id: int, _: User = Depends(get_current_user), db: Session
         raise HTTPException(status_code=404, detail="探针不存在")
     db.query(Origin).filter(Origin.preferred_agent_id == agent.id).update(
         {Origin.preferred_agent_id: None},
+        synchronize_session=False,
+    )
+    db.query(FailoverGlobalOrigin).filter(FailoverGlobalOrigin.preferred_agent_id == agent.id).update(
+        {FailoverGlobalOrigin.preferred_agent_id: None},
         synchronize_session=False,
     )
     db.delete(agent)

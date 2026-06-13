@@ -194,6 +194,7 @@ class FailoverGlobalOrigin(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     collection_id: Mapped[int] = mapped_column(ForeignKey("failover_collections.id", ondelete="CASCADE"), nullable=False)
+    preferred_agent_id: Mapped[int | None] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"))
     target: Mapped[str] = mapped_column(String(255), nullable=False)
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)
     publish_mode: Mapped[str] = mapped_column(String(20), default="direct", nullable=False)
@@ -208,6 +209,7 @@ class FailoverGlobalOrigin(Base, TimestampMixin):
         return expanded_ip_priorities(self)
 
     collection: Mapped["FailoverCollection"] = relationship("FailoverCollection", back_populates="global_origins")
+    preferred_agent: Mapped["Agent | None"] = relationship("Agent", foreign_keys=[preferred_agent_id])
     mirrored_origins: Mapped[list["Origin"]] = relationship("Origin", back_populates="global_origin")
 
 

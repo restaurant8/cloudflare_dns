@@ -94,6 +94,7 @@ export type FailoverHostname = {
 export type FailoverGlobalOrigin = {
   id: number;
   collection_id: number;
+  preferred_agent_id: number | null;
   target: string;
   target_type: string;
   publish_mode: string;

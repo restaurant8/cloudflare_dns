@@ -35,7 +35,7 @@ type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" |
 type ExpandedIpPriorityMap = Record<string, number>;
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; remark: string; enabled: boolean };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; remark: string; enabled: boolean };
-type GlobalOriginDraft = Omit<OriginAddDraft, "preferred_agent_id">;
+type GlobalOriginDraft = OriginAddDraft;
 type CollectionDraft = { name: string };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | "" };
 type HostnameAddDraft = { hostname: string; adopt_record_id: string };
@@ -349,7 +349,7 @@ const emptyOverview: Overview = {
 };
 
 const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", remark: "", enabled: true };
-const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, remark: "", enabled: true };
+const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", remark: "", enabled: true };
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
@@ -1788,6 +1788,7 @@ function GroupsPanel({
       priority: maxPriority + 10,
       publish_mode: "direct",
       expanded_ip_priorities: {},
+      preferred_agent_id: "",
       remark: "",
       enabled: true
     });
@@ -1808,6 +1809,7 @@ function GroupsPanel({
             priority: globalOriginAdd.priority,
             publish_mode: globalAddTargetType === "hostname" ? globalOriginAdd.publish_mode : "direct",
             expanded_ip_priorities: globalAddTargetType === "hostname" ? globalOriginAdd.expanded_ip_priorities : {},
+            preferred_agent_id: globalOriginAdd.preferred_agent_id === "" ? null : globalOriginAdd.preferred_agent_id,
             remark: globalOriginAdd.remark.trim() || null,
             enabled: globalOriginAdd.enabled
           })
@@ -1831,6 +1833,7 @@ function GroupsPanel({
         priority: origin.priority,
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
+        preferred_agent_id: origin.preferred_agent_id || "",
         remark: origin.remark || "",
         enabled: origin.enabled
       }
@@ -1849,7 +1852,8 @@ function GroupsPanel({
             ...draft,
             target: draft.target.trim(),
             remark: draft.remark.trim() || null,
-            publish_mode: targetType === "hostname" ? draft.publish_mode : "direct"
+            publish_mode: targetType === "hostname" ? draft.publish_mode : "direct",
+            preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id
           })
         }),
       "全局备用已同步更新",
@@ -1897,6 +1901,7 @@ function GroupsPanel({
       port: item.port || 22,
       publish_mode: "direct",
       expanded_ip_priorities: {},
+      preferred_agent_id: current.preferred_agent_id,
       remark: item.remark || "",
       enabled: true
     }));
@@ -2059,6 +2064,7 @@ function GroupsPanel({
       port: item.port || 22,
       publish_mode: "direct",
       expanded_ip_priorities: {},
+      preferred_agent_id: current.preferred_agent_id,
       remark: item.name || "",
       enabled: true
     }));
@@ -2103,6 +2109,7 @@ function GroupsPanel({
   }
 
   function renderGlobalOrigin(origin: FailoverGlobalOrigin) {
+    const preferredAgent = origin.preferred_agent_id ? agents.find((agent) => agent.id === origin.preferred_agent_id) : null;
     const draft = globalOriginEdits[origin.id] || {
       target: origin.target,
       port: origin.port,
@@ -2127,6 +2134,25 @@ function GroupsPanel({
           <label>
             优先级
             <input type="number" min={0} value={draft.priority} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, priority: Number(event.target.value) } }))} />
+          </label>
+          <label>
+            指定探针
+            <select
+              value={draft.preferred_agent_id}
+              onChange={(event) =>
+                setGlobalOriginEdits((current) => ({
+                  ...current,
+                  [origin.id]: { ...draft, preferred_agent_id: event.target.value ? Number(event.target.value) : "" }
+                }))
+              }
+            >
+              <option value="">跟随默认探针</option>
+              {agents.map((agent) => (
+                <option value={agent.id} key={agent.id}>
+                  {agentSelectLabel(agent)}
+                </option>
+              ))}
+            </select>
           </label>
           <label>
             备注
@@ -2160,7 +2186,10 @@ function GroupsPanel({
       <div className="globalOriginItem" key={origin.id}>
         <div>
           <strong title={`${origin.target}:${origin.port}`}>{displayTargetWithRemark(origin.target, origin.port, origin.remark)}</strong>
-          <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · 发布为 {recordTypeForTargetType(origin.target_type, origin.publish_mode)} · {origin.enabled ? "已启用" : "已停用"}</span>
+          <span>
+            {targetTypeText(origin.target_type)} · 优先级 {origin.priority} · 发布为 {recordTypeForTargetType(origin.target_type, origin.publish_mode)} · {origin.enabled ? "已启用" : "已停用"}
+            {preferredAgent ? ` · 指定探针 ${preferredAgent.name}` : ""}
+          </span>
         </div>
         <div className="rowActions">
           <button className="icon secondaryIcon" title="修改全局备用" onClick={() => beginEditGlobalOrigin(origin)}>
@@ -2595,6 +2624,17 @@ function GroupsPanel({
               <label>
                 优先级
                 <input type="number" min={0} value={globalOriginAdd.priority} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, priority: Number(event.target.value) }))} />
+              </label>
+              <label>
+                指定探针
+                <select value={globalOriginAdd.preferred_agent_id} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, preferred_agent_id: event.target.value ? Number(event.target.value) : "" }))}>
+                  <option value="">跟随默认探针</option>
+                  {agents.map((agent) => (
+                    <option value={agent.id} key={agent.id}>
+                      {agentSelectLabel(agent)}
+                    </option>
+                  ))}
+                </select>
               </label>
             </div>
             <label className="inlineCheck">
