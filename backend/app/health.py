@@ -171,6 +171,29 @@ def active_agents(db: Session, stale_before: datetime | None = None) -> list[Age
     )
 
 
+def default_agent_chain(
+    db: Session,
+    stale_before: datetime | None = None,
+    include_inactive_default: bool = False,
+) -> list[Agent] | None:
+    configured_default = (
+        db.query(Agent)
+        .filter(Agent.enabled.is_(True), Agent.is_default.is_(True))
+        .order_by(Agent.created_at.asc(), Agent.id.asc())
+        .first()
+    )
+    if configured_default is None:
+        return None
+
+    agents = active_agents(db, stale_before)
+    active_default = next((agent for agent in agents if agent.id == configured_default.id), None)
+    if active_default is not None:
+        return [active_default, *[agent for agent in agents if agent.id != active_default.id]]
+    if agents:
+        return agents
+    return [configured_default] if include_inactive_default else []
+
+
 def agent_region(agent: Agent) -> str:
     return FOREIGN_AGENT_REGION if getattr(agent, "region", None) == FOREIGN_AGENT_REGION else CHINA_AGENT_REGION
 
@@ -239,6 +262,25 @@ def _selected_agent_source_keys(
         if status != "unhealthy":
             break
     return selected
+
+
+def _origin_remote_agent_source_keys(
+    db: Session,
+    origin: Origin,
+    states: dict[str, ProbeState],
+    stale_before: datetime,
+    target: str | None = None,
+) -> list[str] | None:
+    if origin.preferred_agent_id:
+        agent = db.get(Agent, origin.preferred_agent_id)
+        if agent is None or not agent.enabled:
+            return []
+        return _selected_agent_source_keys([agent], states, stale_before, target)
+
+    chain = default_agent_chain(db, stale_before, include_inactive_default=True)
+    if chain is None:
+        return None
+    return _selected_agent_source_keys(chain, states, stale_before, target)
 
 
 def _aggregate_probe_state_keys(
@@ -359,11 +401,16 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
         return
 
     stale_before = datetime.utcnow() - timedelta(seconds=max(settings.check_interval_seconds * 3, 90))
-    china_agents, foreign_agents = active_agents_by_region(db, stale_before)
     probe_states = db.query(ProbeState).filter(ProbeState.origin_id == origin.id).all()
     states = {state.source_key: state for state in probe_states}
-    china_source_keys = _selected_agent_source_keys(china_agents, states, stale_before)
-    foreign_source_keys = [LOCAL_SOURCE, *_selected_agent_source_keys(foreign_agents, states, stale_before)]
+    remote_source_keys = _origin_remote_agent_source_keys(db, origin, states, stale_before)
+    if remote_source_keys is None:
+        china_agents, foreign_agents = active_agents_by_region(db, stale_before)
+        china_source_keys = _selected_agent_source_keys(china_agents, states, stale_before)
+        foreign_source_keys = [LOCAL_SOURCE, *_selected_agent_source_keys(foreign_agents, states, stale_before)]
+    else:
+        china_source_keys = remote_source_keys
+        foreign_source_keys = [LOCAL_SOURCE]
     required_sources = [*foreign_source_keys, *china_source_keys]
 
     source_health: dict[str, str] = {}
@@ -532,17 +579,23 @@ def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
         return
 
     stale_before = datetime.utcnow() - timedelta(seconds=max(settings.check_interval_seconds * 3, 90))
-    china_agents, foreign_agents = active_agents_by_region(db, stale_before)
     probe_states = db.query(ProbeState).filter(ProbeState.origin_id == origin.id).all()
     states = {state.source_key: state for state in probe_states}
+    remote_mode = _origin_remote_agent_source_keys(db, origin, states, stale_before) is not None
+    if remote_mode:
+        china_agents: list[Agent] = []
+        foreign_agents: list[Agent] = []
+    else:
+        china_agents, foreign_agents = active_agents_by_region(db, stale_before)
 
     source_errors: dict[str, str | None] = {}
     foreign_healthy: set[str] = set()
-    china_healthy: set[str] = set(ips) if not china_agents else set()
+    china_healthy: set[str] = set(ips) if not remote_mode and not china_agents else set()
     foreign_unknown = False
     china_unknown = False
+    remote_probe_configured = False
     for ip in ips:
-        foreign_source_keys = [LOCAL_SOURCE, *_selected_agent_source_keys(foreign_agents, states, stale_before, ip)]
+        foreign_source_keys = [LOCAL_SOURCE] if remote_mode else [LOCAL_SOURCE, *_selected_agent_source_keys(foreign_agents, states, stale_before, ip)]
         foreign_state_keys = [expanded_source_key(source_key, ip) for source_key in foreign_source_keys]
         foreign_ip_status, foreign_error = _aggregate_probe_state_keys(states, foreign_state_keys, stale_before)
         if foreign_ip_status == "healthy":
@@ -552,8 +605,12 @@ def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
         if foreign_error and "foreign" not in source_errors:
             source_errors["foreign"] = foreign_error
 
-        if china_agents:
+        if remote_mode:
+            china_source_keys = _origin_remote_agent_source_keys(db, origin, states, stale_before, ip) or []
+        else:
             china_source_keys = _selected_agent_source_keys(china_agents, states, stale_before, ip)
+        if china_source_keys:
+            remote_probe_configured = True
             china_state_keys = [expanded_source_key(source_key, ip) for source_key in china_source_keys]
             china_ip_status, china_error = _aggregate_probe_state_keys(states, china_state_keys, stale_before)
             if china_ip_status == "healthy":
@@ -567,7 +624,9 @@ def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
     set_healthy_ips(origin, sorted(final_healthy))
 
     foreign_status = "healthy" if foreign_healthy else ("unknown" if foreign_unknown else "unhealthy")
-    if not china_agents:
+    if remote_mode:
+        china_status = "healthy" if china_healthy else ("unknown" if china_unknown else ("unhealthy" if remote_probe_configured else "not_configured"))
+    elif not china_agents:
         china_status = "not_configured"
     else:
         china_status = "healthy" if china_healthy else ("unknown" if china_unknown else "unhealthy")

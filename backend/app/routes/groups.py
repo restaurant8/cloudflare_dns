@@ -9,7 +9,7 @@ from ..dns_utils import normalize_hostname, parse_target
 from ..events import add_event
 from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records
 from ..health import run_local_checks
-from ..models import FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
+from ..models import Agent, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
 from ..origin_expansion import (
     DIRECT_PUBLISH_MODE,
@@ -58,6 +58,15 @@ def _apply_expanded_ip_priorities(target, values: dict[str, int] | None) -> None
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _validate_preferred_agent_id(db: Session, agent_id: int | None) -> int | None:
+    if agent_id is None:
+        return None
+    agent = db.get(Agent, agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="指定探针不存在")
+    return agent.id
+
+
 def _group_query(db: Session):
     return db.query(FailoverGroup).options(
         selectinload(FailoverGroup.hostnames),
@@ -71,7 +80,7 @@ def _group_hostname_values(group: FailoverGroup) -> set[str]:
     return values
 
 
-def _origin_from_payload(group: FailoverGroup, payload: OriginCreate) -> Origin:
+def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreate) -> Origin:
     target_info = parse_target(payload.target)
     if target_info.record_type == "CNAME" and target_info.value in _group_hostname_values(group):
         raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
@@ -84,6 +93,7 @@ def _origin_from_payload(group: FailoverGroup, payload: OriginCreate) -> Origin:
         publish_mode=payload.publish_mode if target_info.target_type == "hostname" else DIRECT_PUBLISH_MODE,
         port=payload.port,
         priority=payload.priority,
+        preferred_agent_id=_validate_preferred_agent_id(db, payload.preferred_agent_id),
         remark=_normalize_remark(payload.remark),
         enabled=payload.enabled,
     )
@@ -654,7 +664,7 @@ def create_origin(group_id: int, payload: OriginCreate, _: User = Depends(get_cu
     group = db.get(FailoverGroup, group_id)
     if group is None:
         raise HTTPException(status_code=404, detail="切换组不存在")
-    origin = _origin_from_payload(group, payload)
+    origin = _origin_from_payload(db, group, payload)
     duplicate = (
         db.query(Origin)
         .filter(Origin.group_id == group.id, Origin.target == origin.target, Origin.port == origin.port)
@@ -677,7 +687,7 @@ def create_origins_bulk(group_id: int, payload: OriginBulkCreate, _: User = Depe
     new_origins: list[Origin] = []
     new_keys: set[tuple[str, int]] = set()
     for item in payload.origins:
-        origin = _origin_from_payload(group, item)
+        origin = _origin_from_payload(db, group, item)
         key = (origin.target, origin.port)
         if key in existing_keys or key in new_keys:
             raise HTTPException(status_code=409, detail=f"{origin.target}:{origin.port} 已经在备用目标池中")
@@ -701,6 +711,7 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     new_target_type = origin.target_type
     new_port = origin.port
     new_publish_mode = origin.publish_mode
+    new_preferred_agent_id = origin.preferred_agent_id
     if "target" in updates and updates["target"] is not None:
         target_info = parse_target(updates.pop("target"))
         if target_info.record_type == "CNAME" and target_info.value in _group_hostname_values(group):
@@ -713,6 +724,10 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
         new_publish_mode = updates.pop("publish_mode")
     if new_target_type != "hostname" and new_publish_mode == EXPANDED_PUBLISH_MODE:
         raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
+
+    preferred_agent_update_provided = "preferred_agent_id" in updates
+    if preferred_agent_update_provided:
+        new_preferred_agent_id = _validate_preferred_agent_id(db, updates.pop("preferred_agent_id"))
 
     priority_updates_provided = "expanded_ip_priorities" in updates
     priority_updates = updates.pop("expanded_ip_priorities", None) if priority_updates_provided else None
@@ -731,11 +746,13 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
         raise HTTPException(status_code=409, detail=f"{new_target}:{new_port} 已经在备用目标池中")
 
     endpoint_changed = new_target != origin.target or new_port != origin.port or new_publish_mode != origin.publish_mode
+    probe_source_changed = preferred_agent_update_provided and new_preferred_agent_id != origin.preferred_agent_id
     target_changed = new_target != origin.target or new_target_type != origin.target_type or new_publish_mode != origin.publish_mode
     old_expanded_ip_priorities = expanded_ip_priorities(origin)
     origin.target = new_target
     origin.target_type = new_target_type
     origin.publish_mode = new_publish_mode if new_target_type == "hostname" else DIRECT_PUBLISH_MODE
+    origin.preferred_agent_id = new_preferred_agent_id
     if priority_updates_provided:
         _apply_expanded_ip_priorities(origin, priority_updates if new_target_type == "hostname" else {})
     elif new_target_type != "hostname":
@@ -748,7 +765,7 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     for key, value in updates.items():
         setattr(origin, key, value)
 
-    if endpoint_changed:
+    if endpoint_changed or probe_source_changed:
         origin.status = "unknown"
         origin.last_error = "等待本地和探针探测结果"
         origin.last_checked_at = None

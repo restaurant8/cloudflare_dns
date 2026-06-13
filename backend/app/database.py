@@ -60,6 +60,8 @@ def _migrate_existing_schema() -> None:
             existing = {column["name"] for column in inspector.get_columns("agents")}
             if "region" not in existing:
                 connection.execute(text("ALTER TABLE agents ADD COLUMN region VARCHAR(20) NOT NULL DEFAULT 'china'"))
+            if "is_default" not in existing:
+                connection.execute(text(_agent_default_migration_statement(dialect)))
 
         if "failover_groups" in table_names:
             existing_columns = {column["name"]: column for column in inspector.get_columns("failover_groups")}
@@ -100,6 +102,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":
         return {
             "global_origin_id": "ALTER TABLE origins ADD COLUMN global_origin_id INT NULL",
+            "preferred_agent_id": "ALTER TABLE origins ADD COLUMN preferred_agent_id INT NULL",
             "publish_mode": "ALTER TABLE origins ADD COLUMN publish_mode VARCHAR(20) NOT NULL DEFAULT 'direct'",
             "remark": "ALTER TABLE origins ADD COLUMN remark TEXT NULL",
             "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NULL",
@@ -109,6 +112,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
         }
     return {
         "global_origin_id": "ALTER TABLE origins ADD COLUMN global_origin_id INTEGER",
+        "preferred_agent_id": "ALTER TABLE origins ADD COLUMN preferred_agent_id INTEGER",
         "publish_mode": "ALTER TABLE origins ADD COLUMN publish_mode VARCHAR(20) NOT NULL DEFAULT 'direct'",
         "remark": "ALTER TABLE origins ADD COLUMN remark TEXT",
         "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NOT NULL DEFAULT '[]'",
@@ -116,6 +120,14 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
         "published_ips_json": "ALTER TABLE origins ADD COLUMN published_ips_json TEXT NOT NULL DEFAULT '[]'",
         "expanded_ip_priorities_json": "ALTER TABLE origins ADD COLUMN expanded_ip_priorities_json TEXT NOT NULL DEFAULT '{}'",
     }
+
+
+def _agent_default_migration_statement(dialect: str) -> str:
+    if dialect == "mysql":
+        return "ALTER TABLE agents ADD COLUMN is_default TINYINT(1) NOT NULL DEFAULT 0"
+    if dialect == "postgresql":
+        return "ALTER TABLE agents ADD COLUMN is_default BOOLEAN NOT NULL DEFAULT FALSE"
+    return "ALTER TABLE agents ADD COLUMN is_default BOOLEAN NOT NULL DEFAULT 0"
 
 
 def _global_origin_migration_statements(dialect: str) -> dict[str, str]:

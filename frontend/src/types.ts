@@ -47,6 +47,7 @@ export type Origin = {
   id: number;
   group_id: number;
   global_origin_id: number | null;
+  preferred_agent_id: number | null;
   target: string;
   target_type: string;
   publish_mode: string;
@@ -164,6 +165,7 @@ export type Agent = {
   name: string;
   region: string;
   enabled: boolean;
+  is_default: boolean;
   status: string;
   last_seen_at: string | null;
   last_ip: string | null;

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
@@ -125,6 +125,21 @@ def test_update_agent_renames_probe():
     assert db.get(Agent, agent.id).name == "mainland probe"
 
 
+def test_update_agent_sets_unique_default_probe():
+    db = make_session()
+    _, _, first_agent = make_group_with_duplicate_origins(db)
+    second_agent = Agent(name="china-2", region="china", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow(), is_default=True)
+    db.add(second_agent)
+    db.commit()
+    db.refresh(second_agent)
+
+    response = update_agent(first_agent.id, AgentUpdate(is_default=True), _=SimpleNamespace(), db=db)
+
+    assert response.is_default is True
+    assert db.get(Agent, first_agent.id).is_default is True
+    assert db.get(Agent, second_agent.id).is_default is False
+
+
 def test_agent_results_apply_duplicate_target_to_all_matching_origins():
     db = make_session()
     current, backup, agent = make_group_with_duplicate_origins(db)
@@ -150,6 +165,35 @@ def test_agent_results_apply_duplicate_target_to_all_matching_origins():
     assert {result.origin_id for result in results} == {current.id, backup.id}
 
 
+def test_agent_results_do_not_update_origin_assigned_to_another_probe():
+    db = make_session()
+    current, backup, primary_agent = make_group_with_duplicate_origins(db)
+    secondary_agent = Agent(name="china-2", region="china", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow())
+    db.add(secondary_agent)
+    db.flush()
+    current.preferred_agent_id = primary_agent.id
+    backup.preferred_agent_id = secondary_agent.id
+    db.commit()
+
+    payload = AgentResultsIn(
+        results=[
+            AgentResultIn(
+                origin_id=current.id,
+                target=current.target,
+                port=current.port,
+                success=True,
+                rtt_ms=8.5,
+            )
+        ]
+    )
+
+    agent_results(payload, request(), agent=primary_agent, db=db)
+
+    states = db.query(ProbeState).filter(ProbeState.origin_id.in_([current.id, backup.id])).all()
+
+    assert {state.origin_id for state in states} == {current.id}
+
+
 def test_agent_tasks_only_use_first_same_region_probe_until_it_fails():
     db = make_session()
     current, _, primary_agent = make_group_with_duplicate_origins(db)
@@ -164,6 +208,60 @@ def test_agent_tasks_only_use_first_same_region_probe_until_it_fails():
     assert len(primary_response.tasks) == 1
     assert primary_response.tasks[0].target == current.target
     assert secondary_response.tasks == []
+
+
+def test_agent_tasks_use_default_probe_before_other_regions():
+    db = make_session()
+    current, _, default_probe = make_group_with_duplicate_origins(db)
+    default_probe.is_default = True
+    backup_probe = Agent(name="foreign-backup", region="foreign", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow())
+    db.add(backup_probe)
+    db.commit()
+    db.refresh(backup_probe)
+
+    default_response = agent_tasks(request(), agent=default_probe, db=db)
+    backup_response = agent_tasks(request(), agent=backup_probe, db=db)
+
+    assert len(default_response.tasks) == 1
+    assert default_response.tasks[0].target == current.target
+    assert backup_response.tasks == []
+
+
+def test_agent_tasks_use_backup_when_default_probe_is_offline():
+    db = make_session()
+    current, _, default_probe = make_group_with_duplicate_origins(db)
+    default_probe.is_default = True
+    default_probe.status = "offline"
+    default_probe.last_seen_at = datetime.utcnow() - timedelta(minutes=10)
+    backup_probe = Agent(name="foreign-backup", region="foreign", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow())
+    db.add(backup_probe)
+    db.commit()
+    db.refresh(backup_probe)
+
+    response = agent_tasks(request(), agent=backup_probe, db=db)
+
+    assert len(response.tasks) == 1
+    assert response.tasks[0].target == current.target
+
+
+def test_agent_tasks_origin_preferred_probe_overrides_default_probe():
+    db = make_session()
+    current, backup, default_probe = make_group_with_duplicate_origins(db)
+    default_probe.is_default = True
+    backup.enabled = False
+    preferred_probe = Agent(name="preferred", region="foreign", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow())
+    db.add(preferred_probe)
+    db.flush()
+    current.preferred_agent_id = preferred_probe.id
+    db.commit()
+    db.refresh(preferred_probe)
+
+    default_response = agent_tasks(request(), agent=default_probe, db=db)
+    preferred_response = agent_tasks(request(), agent=preferred_probe, db=db)
+
+    assert default_response.tasks == []
+    assert len(preferred_response.tasks) == 1
+    assert preferred_response.tasks[0].target == current.target
 
 
 def test_agent_tasks_use_second_same_region_probe_after_first_fails():

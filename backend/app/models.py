@@ -148,6 +148,7 @@ class Origin(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("failover_groups.id", ondelete="CASCADE"), nullable=False)
     global_origin_id: Mapped[int | None] = mapped_column(ForeignKey("failover_global_origins.id", ondelete="SET NULL"))
+    preferred_agent_id: Mapped[int | None] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"))
     target: Mapped[str] = mapped_column(String(255), nullable=False)
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)
     publish_mode: Mapped[str] = mapped_column(String(20), default="direct", nullable=False)
@@ -167,6 +168,7 @@ class Origin(Base, TimestampMixin):
 
     group: Mapped["FailoverGroup"] = relationship("FailoverGroup", back_populates="origins")
     global_origin: Mapped["FailoverGlobalOrigin | None"] = relationship("FailoverGlobalOrigin", back_populates="mirrored_origins")
+    preferred_agent: Mapped["Agent | None"] = relationship("Agent", foreign_keys=[preferred_agent_id])
     probe_states: Mapped[list["ProbeState"]] = relationship("ProbeState", back_populates="origin", cascade="all, delete-orphan")
 
     @property
@@ -402,6 +404,7 @@ class Agent(Base, TimestampMixin):
     region: Mapped[str] = mapped_column(String(20), default="china", nullable=False)
     token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_ip: Mapped[str | None] = mapped_column(String(80))

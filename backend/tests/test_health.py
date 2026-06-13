@@ -135,6 +135,63 @@ def test_one_healthy_online_agent_prevents_blocked_false_positive():
     assert origin.last_error is None
 
 
+def test_default_probe_ignores_other_probe_until_default_fails():
+    db = make_session()
+    origin, default_agent = make_origin_with_agent(db)
+    default_agent.is_default = True
+    secondary_agent = Agent(name="china-2", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow())
+    db.add(secondary_agent)
+    db.commit()
+    db.refresh(secondary_agent)
+    set_probe(db, origin, LOCAL_SOURCE, "healthy")
+    set_probe(db, origin, f"agent:{default_agent.id}", "healthy")
+    set_probe(db, origin, f"agent:{secondary_agent.id}", "unhealthy")
+
+    recalculate_origin_status(db, origin)
+
+    assert origin.status == "healthy"
+    assert origin.last_error is None
+
+
+def test_default_probe_offline_uses_online_backup_probe():
+    db = make_session()
+    origin, default_agent = make_origin_with_agent(db)
+    default_agent.is_default = True
+    default_agent.status = "offline"
+    default_agent.last_seen_at = datetime.utcnow() - timedelta(minutes=10)
+    backup_agent = Agent(name="foreign-backup", region="foreign", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow())
+    db.add(backup_agent)
+    db.commit()
+    db.refresh(backup_agent)
+    set_probe(db, origin, LOCAL_SOURCE, "healthy")
+    set_probe(db, origin, f"agent:{backup_agent.id}", "healthy")
+
+    recalculate_origin_status(db, origin)
+
+    assert origin.status == "healthy"
+    assert origin.last_error is None
+
+
+def test_origin_preferred_probe_overrides_default_probe_health():
+    db = make_session()
+    origin, default_agent = make_origin_with_agent(db)
+    default_agent.is_default = True
+    preferred_agent = Agent(name="preferred", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow())
+    db.add(preferred_agent)
+    db.flush()
+    origin.preferred_agent_id = preferred_agent.id
+    db.commit()
+    db.refresh(preferred_agent)
+    set_probe(db, origin, LOCAL_SOURCE, "healthy")
+    set_probe(db, origin, f"agent:{default_agent.id}", "healthy")
+    set_probe(db, origin, f"agent:{preferred_agent.id}", "unhealthy")
+
+    recalculate_origin_status(db, origin)
+
+    assert origin.status == "blocked"
+    assert "疑似被墙" in origin.last_error
+
+
 def test_second_same_region_agent_is_ignored_until_first_fails():
     db = make_session()
     origin, primary_agent = make_origin_with_agent(db)

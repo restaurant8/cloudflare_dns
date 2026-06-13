@@ -262,6 +262,7 @@ class OriginCreate(BaseModel):
     priority: int = Field(default=10, ge=0, le=100000)
     publish_mode: Literal["direct", "expanded"] = "direct"
     expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
+    preferred_agent_id: int | None = None
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool = True
 
@@ -276,6 +277,7 @@ class OriginUpdate(BaseModel):
     priority: int | None = Field(default=None, ge=0, le=100000)
     publish_mode: Literal["direct", "expanded"] | None = None
     expanded_ip_priorities: dict[str, int] | None = None
+    preferred_agent_id: int | None = None
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool | None = None
 
@@ -303,6 +305,7 @@ class OriginOut(BaseModel):
     id: int
     group_id: int
     global_origin_id: int | None
+    preferred_agent_id: int | None
     target: str
     target_type: str
     publish_mode: str
@@ -711,7 +714,8 @@ class AgentCreate(BaseModel):
 
 
 class AgentUpdate(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    is_default: bool | None = None
 
 
 class AgentOut(BaseModel):
@@ -719,6 +723,7 @@ class AgentOut(BaseModel):
     name: str
     region: str
     enabled: bool
+    is_default: bool
     status: str
     last_seen_at: datetime | None
     last_ip: str | None

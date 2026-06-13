@@ -12,6 +12,7 @@ from ..health import (
     active_agents,
     agent_region,
     apply_probe_result,
+    default_agent_chain,
     mark_agent_online,
     origin_needs_probe,
     prioritize_global_origin_checks,
@@ -71,6 +72,10 @@ def _should_agent_probe_target(agent: Agent, same_region_agents: list[Agent], or
     return True
 
 
+def _result_allowed_for_agent(origin: Origin, agent: Agent) -> bool:
+    return not origin.preferred_agent_id or origin.preferred_agent_id == agent.id
+
+
 def _matching_origins_for_probe(origins: list[Origin], target: str, port: int) -> list[Origin]:
     matches: list[Origin] = []
     normalized_target = _normalized_probe_target(target)
@@ -95,7 +100,7 @@ def agent_install_script():
 
 @router.get("/agents", response_model=list[AgentOut])
 def list_agents(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(Agent).order_by(Agent.region.asc(), Agent.created_at.asc(), Agent.id.asc()).all()
+    return db.query(Agent).order_by(Agent.is_default.desc(), Agent.region.asc(), Agent.created_at.asc(), Agent.id.asc()).all()
 
 
 @router.post("/agents", response_model=AgentCreated)
@@ -113,10 +118,18 @@ def update_agent(agent_id: int, payload: AgentUpdate, _: User = Depends(get_curr
     agent = db.get(Agent, agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="探针不存在")
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="探针名称不能为空")
-    agent.name = name
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="探针名称不能为空")
+        agent.name = name
+    if payload.is_default is not None:
+        if payload.is_default:
+            db.query(Agent).filter(Agent.id != agent.id, Agent.is_default.is_(True)).update(
+                {Agent.is_default: False},
+                synchronize_session=False,
+            )
+        agent.is_default = payload.is_default
     db.commit()
     db.refresh(agent)
     return agent
@@ -152,6 +165,10 @@ def delete_agent(agent_id: int, _: User = Depends(get_current_user), db: Session
     agent = db.get(Agent, agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="探针不存在")
+    db.query(Origin).filter(Origin.preferred_agent_id == agent.id).update(
+        {Origin.preferred_agent_id: None},
+        synchronize_session=False,
+    )
     db.delete(agent)
     db.commit()
     return Message(message="探针已删除")
@@ -171,6 +188,7 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
     stale_before = datetime.utcnow() - timedelta(seconds=max(settings.check_interval_seconds * 3, 90))
     agents_by_region = _same_region_agents_by_region(active_agents(db, stale_before))
     same_region_agents = agents_by_region.get(agent_region(agent), [])
+    default_chain = default_agent_chain(db, stale_before)
     tasks = []
     task_keys: set[tuple[str, int]] = set()
 
@@ -189,16 +207,22 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
     origins_to_probe, _ = prioritize_global_origin_checks(origin_candidates)
 
     for origin in origins_to_probe:
+        if origin.preferred_agent_id:
+            agent_chain = [agent] if origin.preferred_agent_id == agent.id and agent.enabled else []
+        elif default_chain is not None:
+            agent_chain = default_chain
+        else:
+            agent_chain = same_region_agents
         if is_expanded_origin(origin):
             try:
                 ips = refresh_expanded_origin_ips(origin)
             except OSError:
                 ips = resolved_ips(origin)
             for ip in ips:
-                if _should_agent_probe_target(agent, same_region_agents, origin, stale_before, ip):
+                if _should_agent_probe_target(agent, agent_chain, origin, stale_before, ip):
                     add_task(origin.id, ip, origin.port)
             continue
-        if _should_agent_probe_target(agent, same_region_agents, origin, stale_before):
+        if _should_agent_probe_target(agent, agent_chain, origin, stale_before):
             add_task(origin.id, origin.target, origin.port)
     db.commit()
     return AgentTasksResponse(interval_seconds=settings.check_interval_seconds, tasks=tasks)
@@ -220,7 +244,11 @@ def agent_results(payload: AgentResultsIn, request: Request, agent: Agent = Depe
         if key in processed_keys:
             continue
         processed_keys.add(key)
-        matched_origins = _matching_origins_for_probe(origins, item.target, item.port)
+        matched_origins = [
+            origin
+            for origin in _matching_origins_for_probe(origins, item.target, item.port)
+            if _result_allowed_for_agent(origin, agent)
+        ]
         for origin in matched_origins:
             source_key = f"agent:{agent.id}"
             if is_expanded_origin(origin):

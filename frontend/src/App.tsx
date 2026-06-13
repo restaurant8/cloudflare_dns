@@ -33,9 +33,9 @@ import type { Agent, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Cr
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
-type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; remark: string; enabled: boolean };
-type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; remark: string; enabled: boolean };
-type GlobalOriginDraft = OriginAddDraft;
+type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; remark: string; enabled: boolean };
+type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; remark: string; enabled: boolean };
+type GlobalOriginDraft = Omit<OriginAddDraft, "preferred_agent_id">;
 type CollectionDraft = { name: string };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | "" };
 type HostnameAddDraft = { hostname: string; adopt_record_id: string };
@@ -136,6 +136,10 @@ function targetTypeText(value: string): string {
 
 function agentRegionText(value: string): string {
   return value === "foreign" ? "国外探针" : "国内探针";
+}
+
+function agentSelectLabel(agent: Agent): string {
+  return `${agent.name}${agent.is_default ? " · 默认" : ""} · ${agentRegionText(agent.region)} · ${agent.enabled ? "启用" : "停用"}`;
 }
 
 function telegramNotifyLevelText(value: string): string {
@@ -344,7 +348,8 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, remark: "", enabled: true };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", remark: "", enabled: true };
+const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, remark: "", enabled: true };
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
@@ -745,7 +750,7 @@ export default function App() {
           />
         )}
         {section === "groups" && (
-          <GroupsPanel token={token} collections={failoverCollections} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} act={act} />
+          <GroupsPanel token={token} collections={failoverCollections} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} agents={agents} act={act} />
         )}
         {section === "targetPool" && (
           <TargetPoolPanel token={token} targetPool={targetPool} groups={groups} act={act} />
@@ -1685,6 +1690,7 @@ function GroupsPanel({
   groups,
   targetPool,
   externalIpItems,
+  agents,
   act
 }: {
   token: string;
@@ -1692,13 +1698,14 @@ function GroupsPanel({
   groups: FailoverGroup[];
   targetPool: TargetPoolItem[];
   externalIpItems: ExternalIpItem[];
+  agents: Agent[];
   act: ActionRunner;
 }) {
   const [collectionDraft, setCollectionDraft] = useState<CollectionDraft>({ name: "" });
   const [editingCollectionId, setEditingCollectionId] = useState<number | null>(null);
   const [collectionEdits, setCollectionEdits] = useState<Record<number, CollectionDraft>>({});
   const [addingGlobalCollectionId, setAddingGlobalCollectionId] = useState<number | null>(null);
-  const [globalOriginAdd, setGlobalOriginAdd] = useState<GlobalOriginDraft>(defaultOriginAddDraft);
+  const [globalOriginAdd, setGlobalOriginAdd] = useState<GlobalOriginDraft>(defaultGlobalOriginDraft);
   const [editingGlobalOriginId, setEditingGlobalOriginId] = useState<number | null>(null);
   const [globalOriginEdits, setGlobalOriginEdits] = useState<Record<number, GlobalOriginDraft>>({});
   const [addingGroupId, setAddingGroupId] = useState<number | null>(null);
@@ -1809,7 +1816,7 @@ function GroupsPanel({
       "全局备用已同步到该业务分组",
       () => {
         setAddingGlobalCollectionId(null);
-        setGlobalOriginAdd(defaultOriginAddDraft);
+        setGlobalOriginAdd(defaultGlobalOriginDraft);
       }
     );
   }
@@ -1860,6 +1867,7 @@ function GroupsPanel({
       priority: maxPriority + 10,
       publish_mode: "direct",
       expanded_ip_priorities: {},
+      preferred_agent_id: "",
       remark: "",
       enabled: true
     });
@@ -1874,6 +1882,7 @@ function GroupsPanel({
       port: item.port || 22,
       publish_mode: "direct",
       expanded_ip_priorities: {},
+      preferred_agent_id: current.preferred_agent_id,
       remark: item.remark || "",
       enabled: true
     }));
@@ -1908,6 +1917,7 @@ function GroupsPanel({
             priority: originAdd.priority,
             publish_mode: addTargetType === "hostname" ? originAdd.publish_mode : "direct",
             expanded_ip_priorities: addTargetType === "hostname" ? originAdd.expanded_ip_priorities : {},
+            preferred_agent_id: originAdd.preferred_agent_id === "" ? null : originAdd.preferred_agent_id,
             remark: originAdd.remark.trim() || null,
             enabled: originAdd.enabled
           })
@@ -1998,6 +2008,7 @@ function GroupsPanel({
         priority: origin.priority,
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
+        preferred_agent_id: origin.preferred_agent_id || "",
         remark: origin.remark || "",
         enabled: origin.enabled
       }
@@ -2008,7 +2019,11 @@ function GroupsPanel({
     const draft = originEdits[originId];
     if (!draft) return;
     const targetType = inferDraftTargetType(draft.target);
-    const payload = { ...draft, publish_mode: targetType === "hostname" ? draft.publish_mode : "direct" };
+    const payload = {
+      ...draft,
+      publish_mode: targetType === "hostname" ? draft.publish_mode : "direct",
+      preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id
+    };
     await act(
       () =>
         apiFetch(`/api/groups/origins/${originId}`, token, {
@@ -2029,6 +2044,7 @@ function GroupsPanel({
       port: item.port || 22,
       publish_mode: "direct",
       expanded_ip_priorities: {},
+      preferred_agent_id: current.preferred_agent_id,
       remark: item.name || "",
       enabled: true
     }));
@@ -2368,6 +2384,7 @@ function GroupsPanel({
                       const editType = inferDraftTargetType(originEdit.target);
                       const isCurrentOrigin = group.current_origin_id === origin.id;
                       const isPrimaryOrigin = origin.priority === primaryPriority;
+                      const preferredAgent = origin.preferred_agent_id ? agents.find((agent) => agent.id === origin.preferred_agent_id) : null;
                       const displayStatus = origin.enabled ? origin.status : "disabled";
                       const healthMeta = !origin.enabled ? "已停用，不参与检查" : `最后检测 ${fmtDate(origin.last_checked_at)}`;
                       const activeOriginProbeStates = activeProbeStates(origin.probe_states);
@@ -2393,6 +2410,25 @@ function GroupsPanel({
                                 <label>
                                   优先级
                                   <input type="number" min={0} value={originEdit.priority} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, priority: Number(event.target.value) } }))} />
+                                </label>
+                                <label>
+                                  指定探针
+                                  <select
+                                    value={originEdit.preferred_agent_id}
+                                    onChange={(event) =>
+                                      setOriginEdits((current) => ({
+                                        ...current,
+                                        [origin.id]: { ...originEdit, preferred_agent_id: event.target.value ? Number(event.target.value) : "" }
+                                      }))
+                                    }
+                                  >
+                                    <option value="">跟随默认探针</option>
+                                    {agents.map((agent) => (
+                                      <option value={agent.id} key={agent.id}>
+                                        {agentSelectLabel(agent)}
+                                      </option>
+                                    ))}
+                                  </select>
                                 </label>
                                 <label>
                                   备注
@@ -2444,6 +2480,7 @@ function GroupsPanel({
                                     {origin.global_origin_id && <span className="originBadge global">全局备用</span>}
                                     <span className={`originBadge ${isPrimaryOrigin ? "primary" : "backup"}`}>{isPrimaryOrigin ? "主用" : "备用"}</span>
                                     <span className="originBadge record">{recordTypeForTargetType(origin.target_type, origin.publish_mode)}</span>
+                                    {preferredAgent && <span className="originBadge record">指定探针 {preferredAgent.name}</span>}
                                   </div>
                                 </div>
                                 <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · {origin.enabled ? "已启用" : "已停用"} · {healthMeta}</span>
@@ -2660,6 +2697,17 @@ function GroupsPanel({
               <label>
                 优先级
                 <input type="number" min={0} value={originAdd.priority} onChange={(event) => setOriginAdd((current) => ({ ...current, priority: Number(event.target.value) }))} />
+              </label>
+              <label>
+                指定探针
+                <select value={originAdd.preferred_agent_id} onChange={(event) => setOriginAdd((current) => ({ ...current, preferred_agent_id: event.target.value ? Number(event.target.value) : "" }))}>
+                  <option value="">跟随默认探针</option>
+                  {agents.map((agent) => (
+                    <option value={agent.id} key={agent.id}>
+                      {agentSelectLabel(agent)}
+                    </option>
+                  ))}
+                </select>
               </label>
             </div>
             <label className="inlineCheck">
@@ -4130,7 +4178,7 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
       <div className="panel">
         <div className="panelTitle">
           <h2>探针服务器状态</h2>
-          <p>同区域探针按列表顺序接力使用；主探针不可达时，下一个同区域探针才会复检。</p>
+          <p>设置默认探针后，所有源站优先使用默认探针；默认探针离线时，其他在线探针接力复检。未设置默认时，仍按同区域顺序接力。</p>
         </div>
         <div className="agentStatusGrid">
           {agents.map((agent) => {
@@ -4147,9 +4195,13 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
                   ) : (
                     <strong>{agent.name}</strong>
                   )}
-                  <Status value={agent.enabled ? agent.status : "disabled"} />
+                  <div className="rowActions compactInline">
+                    {agent.is_default && <span className="originBadge primary">默认</span>}
+                    <Status value={agent.enabled ? agent.status : "disabled"} />
+                  </div>
                 </div>
                 <span>区域：{agentRegionText(agent.region)}</span>
+                <span>默认探针：{agent.is_default ? "是" : "否"}</span>
                 <span>启用状态：{agent.enabled ? "已启用" : "已停用"}</span>
                 <span>最后 IP：{agent.last_ip || "-"}</span>
                 <span>最后上报：{fmtDate(agent.last_seen_at)}</span>
@@ -4167,6 +4219,23 @@ function AgentsPanel({ token, agents, agentToken, setAgentToken, act }: { token:
                     <>
                       <button className="icon secondaryIcon" title="修改探针名称" onClick={() => beginEditAgent(agent)}>
                         <Pencil size={15} />
+                      </button>
+                      <button
+                        className="secondary compactBtn"
+                        title={agent.is_default ? "取消默认探针" : "设为默认探针"}
+                        onClick={() =>
+                          act(
+                            () =>
+                              apiFetch(`/api/agents/${agent.id}`, token, {
+                                method: "PATCH",
+                                body: JSON.stringify({ is_default: !agent.is_default })
+                              }),
+                            agent.is_default ? "已取消默认探针" : "默认探针已更新"
+                          )
+                        }
+                      >
+                        <RadioTower size={15} />
+                        <span>{agent.is_default ? "取消默认" : "设为默认"}</span>
                       </button>
                       <button
                         className="icon secondaryIcon"
