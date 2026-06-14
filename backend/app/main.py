@@ -13,19 +13,28 @@ from .runtime_settings import get_runtime_settings
 from .routes import routers
 
 
+def _run_scheduler_tick() -> int:
+    """Run one blocking probe/evaluation tick. Returns the next interval in seconds.
+
+    This does blocking TCP/DNS probes, so it must be called from a worker thread
+    (via asyncio.to_thread) to avoid freezing the API event loop.
+    """
+    with SessionLocal() as db:
+        runtime_settings = get_runtime_settings(db)
+        mark_stale_agents(db)
+        check_cache = {}
+        run_local_checks(db, check_cache=check_cache)
+        sync_due_external_ip_sources(db)
+        evaluate_failover_groups(db)
+        db.commit()
+        return runtime_settings.check_interval_seconds
+
+
 async def scheduler_loop(stop_event: asyncio.Event) -> None:
     timeout_seconds = get_settings().check_interval_seconds
     while not stop_event.is_set():
         try:
-            with SessionLocal() as db:
-                runtime_settings = get_runtime_settings(db)
-                mark_stale_agents(db)
-                check_cache = {}
-                run_local_checks(db, check_cache=check_cache)
-                sync_due_external_ip_sources(db)
-                evaluate_failover_groups(db)
-                db.commit()
-                timeout_seconds = runtime_settings.check_interval_seconds
+            timeout_seconds = await asyncio.to_thread(_run_scheduler_tick)
         except Exception:
             # The next loop will retry; API event logging may not be available if DB init failed.
             pass

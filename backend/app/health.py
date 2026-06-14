@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session, selectinload
@@ -724,6 +725,29 @@ def run_local_checks(
     def sync_if_global(origin: Origin) -> None:
         if origin.id in global_origin_ids:
             sync_probe_states_from_origin(db, origin, origins_to_check)
+
+    # Pre-probe every direct (non-expanded) target concurrently so the sequential
+    # evaluation below never blocks on TCP I/O. These results are keyed by
+    # (target, port) exactly like check_once, so the loop reuses them verbatim and
+    # the outcome — probe results, `checked` count, and apply_probe_result order —
+    # is identical to probing inline. Expanded origins still resolve+probe inside
+    # the loop to avoid resolving DNS twice.
+    prefetch_keys: dict[tuple[str, int], tuple[str, int]] = {}
+    for origin in origins_to_probe:
+        if is_expanded_origin(origin):
+            continue
+        key = (origin.target.strip().rstrip(".").lower(), int(origin.port))
+        if key not in check_cache and key not in prefetch_keys:
+            prefetch_keys[key] = (origin.target, origin.port)
+    if prefetch_keys:
+        with ThreadPoolExecutor(max_workers=min(len(prefetch_keys), 16)) as executor:
+            futures = {
+                key: executor.submit(tcp_check, target, port, settings.check_timeout_seconds)
+                for key, (target, port) in prefetch_keys.items()
+            }
+            for key, future in futures.items():
+                check_cache[key] = future.result()
+                checked += 1
 
     for origin in origins_to_probe:
         if is_expanded_origin(origin):

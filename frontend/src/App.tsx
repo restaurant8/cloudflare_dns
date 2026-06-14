@@ -354,7 +354,7 @@ const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
 const defaultSnippetDraft: SnippetDraft = { title: "", category: "command", address: "", username: "", port: "22", tags: "", content: "", code: "" };
-const liveRefreshIntervalMs = 3000;
+const liveRefreshIntervalMs = 10000;
 const accessTokenStorageKey = "accessToken";
 const rememberedUsernameStorageKey = "cloudflareDnsRememberedUsername";
 
