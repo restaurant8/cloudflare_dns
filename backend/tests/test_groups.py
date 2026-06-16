@@ -168,6 +168,45 @@ def test_add_group_hostname_publishes_current_origin(monkeypatch):
     }
 
 
+def test_add_group_hostname_keeps_hostname_when_publish_fails(monkeypatch):
+    class PublishFailClient(FakeCloudflareClient):
+        records = [
+            {
+                "id": "record-1",
+                "name": "www.example.com",
+                "type": "A",
+                "content": "192.0.2.10",
+                "ttl": 60,
+                "proxied": False,
+            }
+        ]
+
+        def create_dns_record(self, zone_id: str, record: dict):
+            if record["name"] == "api.example.com":
+                raise RuntimeError("cloudflare temporary failure")
+            return super().create_dns_record(zone_id, record)
+
+    monkeypatch.setattr("app.routes.groups.CloudflareClient", PublishFailClient)
+    monkeypatch.setattr("app.failover.CloudflareClient", PublishFailClient)
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = create_group(
+        FailoverGroupCreate(
+            zone_id=zone.id,
+            hostname="www.example.com",
+            adopt_record_id="record-1",
+            primary_port=22,
+        ),
+        user,
+        db,
+    )
+
+    updated = add_group_hostname(group.id, FailoverHostnameCreate(hostname="api.example.com"), user, db)
+
+    assert {item.hostname for item in updated.hostnames} == {"www.example.com", "api.example.com"}
+    assert "DNS 发布失败" in (updated.last_error or "")
+
+
 def test_delete_group_hostname_keeps_at_least_one_hostname(monkeypatch):
     monkeypatch.setattr("app.routes.groups.CloudflareClient", FakeCloudflareClient)
     db = make_session()

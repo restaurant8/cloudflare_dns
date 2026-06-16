@@ -633,8 +633,17 @@ def add_group_hostname(group_id: int, payload: FailoverHostnameCreate, _: User =
         try:
             publish_origin(db, group, current_origin)
         except Exception as exc:
-            db.rollback()
-            raise HTTPException(status_code=502, detail=f"DNS 发布失败，主域名未添加：{exc}") from exc
+            message = f"DNS 发布失败，主域名已保存但暂未完全接管：{exc}"
+            group.last_error = message
+            add_event(
+                db,
+                "dns.publish_failed",
+                "error",
+                f"{group.hostname} 添加主域名 {hostname} 后发布 DNS 失败: {exc}",
+                {"group_id": group.id, "hostname": hostname, "error": str(exc)},
+            )
+        else:
+            group.last_error = None
     add_event(db, "group.hostname_added", "info", f"{group.hostname} 已添加主域名 {hostname}", {"group_id": group.id, "hostname": hostname})
     db.commit()
     return _group_query(db).filter(FailoverGroup.id == group_id).one()
