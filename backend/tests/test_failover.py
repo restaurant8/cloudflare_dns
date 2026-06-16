@@ -396,6 +396,52 @@ def test_evaluate_republishes_current_origin_when_dns_drifted(monkeypatch):
     assert FakeCloudflareClient.records[0]["type"] == "A"
 
 
+def test_evaluate_adopts_historical_identical_record_without_record_id(monkeypatch):
+    class HistoricalIdenticalClient:
+        historical_record = {
+            "id": "historical-record",
+            "name": "www.example.com",
+            "type": "A",
+            "content": "192.0.2.20",
+            "ttl": 60,
+            "proxied": False,
+        }
+        create_attempts = 0
+
+        def __init__(self, token: str):
+            self.token = token
+
+        def list_dns_records(self, zone_id: str, name: str | None = None):
+            records = []
+            if name == "www.example.com" and self.__class__.create_attempts:
+                records.append(self.__class__.historical_record)
+            return records
+
+        def update_dns_record(self, zone_id: str, record_id: str, record: dict):
+            self.__class__.historical_record.update(record)
+            return {**self.__class__.historical_record}
+
+        def create_dns_record(self, zone_id: str, record: dict):
+            self.__class__.create_attempts += 1
+            raise CloudflareError("An identical record already exists.", 400, {})
+
+        def delete_dns_record(self, zone_id: str, record_id: str):
+            pass
+
+    monkeypatch.setattr("app.failover.CloudflareClient", HistoricalIdenticalClient)
+    db = make_session()
+    group, origin_model = setup_group(db, "192.0.2.20", current_record_id=None)
+    group.current_origin_id = origin_model.id
+    db.commit()
+
+    switches = evaluate_failover_groups(db)
+
+    assert switches == 0
+    assert group.last_error is None
+    assert group.current_record_id == "historical-record"
+    assert HistoricalIdenticalClient.create_attempts == 1
+
+
 def test_publish_origin_rejects_unmanaged_same_name_conflict(monkeypatch):
     FakeCloudflareClient.records = [
         {"id": "record-1", "name": "www.example.com", "type": "A", "content": "192.0.2.1", "ttl": 60, "proxied": False},

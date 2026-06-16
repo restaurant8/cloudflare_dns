@@ -94,13 +94,12 @@ def _managed_dns_records(client: CloudflareClient, cf_zone_id: str, hostname: st
     if normalized_hostname is None:
         return records
     filtered = [record for record in records if _normalized_record_name(record.get("name")) == normalized_hostname]
-    if filtered:
-        return filtered
-    return [
+    precise_records = [
         record
         for record in client.list_dns_records(cf_zone_id, name=hostname)
         if record.get("type") in MANAGED_RECORD_TYPES
     ]
+    return _dedupe_records([*filtered, *precise_records])
 
 
 def find_managed_dns_record_by_id(client: CloudflareClient, cf_zone_id: str, record_id: str) -> dict | None:
@@ -205,6 +204,51 @@ def _is_identical_record_error(exc: CloudflareError) -> bool:
     return "identical record already exists" in str(exc).lower()
 
 
+def _dedupe_records(records: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    unique_records = []
+    for record in records:
+        record_id = str(record.get("id") or "")
+        if record_id and record_id in seen:
+            continue
+        if record_id:
+            seen.add(record_id)
+        unique_records.append(record)
+    return unique_records
+
+
+def _adopt_record_after_identical_error(
+    client: CloudflareClient,
+    group: FailoverGroup,
+    hostname_entry: FailoverHostname,
+    body: dict,
+    preferred_records: list[dict] | None = None,
+) -> dict | None:
+    records = _dedupe_records([*(preferred_records or []), *_same_name_records(client, group, hostname_entry)])
+    for record in records:
+        if _record_has_same_identity(record, body["type"], body["content"]):
+            if _record_matches(record, body["type"], body["content"]):
+                return record
+            return client.update_dns_record(group.zone.cf_zone_id, record["id"], body)
+
+    same_type_records = [record for record in records if record.get("type") == body["type"]]
+    fallback_record = same_type_records[0] if len(same_type_records) == 1 else records[0] if len(records) == 1 else None
+    if fallback_record is None:
+        return None
+    try:
+        return client.update_dns_record(group.zone.cf_zone_id, fallback_record["id"], body)
+    except CloudflareError as exc:
+        if not _is_identical_record_error(exc):
+            raise
+        refreshed_records = _dedupe_records(_same_name_records(client, group, hostname_entry))
+        for record in refreshed_records:
+            if _record_has_same_identity(record, body["type"], body["content"]):
+                if _record_matches(record, body["type"], body["content"]):
+                    return record
+                return client.update_dns_record(group.zone.cf_zone_id, record["id"], body)
+        raise
+
+
 def _create_dns_record_or_adopt(
     client: CloudflareClient,
     group: FailoverGroup,
@@ -216,11 +260,9 @@ def _create_dns_record_or_adopt(
     except CloudflareError as exc:
         if not _is_identical_record_error(exc):
             raise
-        for record in _same_name_records(client, group, hostname_entry):
-            if _record_has_same_identity(record, body["type"], body["content"]):
-                if _record_matches(record, body["type"], body["content"]):
-                    return record
-                return client.update_dns_record(group.zone.cf_zone_id, record["id"], body)
+        adopted = _adopt_record_after_identical_error(client, group, hostname_entry, body)
+        if adopted is not None:
+            return adopted
         raise
 
 
@@ -246,7 +288,11 @@ def _publish_one_hostname_record(
             record = client.update_dns_record(group.zone.cf_zone_id, target_record["id"], body)
         except CloudflareError as exc:
             if _is_identical_record_error(exc):
-                record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
+                adopted = _adopt_record_after_identical_error(client, group, hostname_entry, body, [target_record, *managed_records])
+                if adopted is None:
+                    record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
+                else:
+                    record = adopted
             else:
                 client.delete_dns_record(group.zone.cf_zone_id, target_record["id"])
                 record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
