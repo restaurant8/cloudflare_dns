@@ -1433,11 +1433,22 @@ form.panel {
   color: #166534;
 }
 
-.hostnameChip button {
-  background: transparent;
-  color: inherit;
-  min-height: 18px;
-  padding: 0 2px;
+.hostnameChip .hostnameDeleteButton {
+  align-items: center;
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+  color: #dc2626;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 22px;
+  min-width: 22px;
+  padding: 0;
+}
+
+.hostnameChip .hostnameDeleteButton:hover {
+  background: #fecaca;
+  border-color: #fca5a5;
+  color: #991b1b;
 }
 
 .rowActions {

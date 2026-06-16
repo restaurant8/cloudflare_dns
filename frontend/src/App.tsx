@@ -1965,7 +1965,10 @@ function GroupsPanel({
     );
   }
 
-  async function deleteHostname(hostnameId: number) {
+  async function deleteHostname(hostnameId: number, hostname: string) {
+    if (!window.confirm(`确认取消接管主域名 ${hostname} 吗？\nCloudflare 上的 DNS 记录不会被删除。`)) {
+      return;
+    }
     await act(
       () => apiFetch(`/api/groups/hostnames/${hostnameId}`, token, { method: "DELETE" }),
       "主域名已取消接管"
@@ -2322,8 +2325,14 @@ function GroupsPanel({
                       <span className={`hostnameChip ${hostname.hostname === group.hostname ? "primary" : ""}`} key={hostname.id || hostname.hostname}>
                         {hostname.hostname}
                         {groupHostnames.length > 1 && hostname.id > 0 && (
-                          <button type="button" title="取消接管这个主域名" onClick={() => deleteHostname(hostname.id)}>
-                            ×
+                          <button
+                            className="hostnameDeleteButton"
+                            type="button"
+                            aria-label={`取消接管主域名 ${hostname.hostname}`}
+                            title="取消接管这个主域名"
+                            onClick={() => deleteHostname(hostname.id, hostname.hostname)}
+                          >
+                            <Trash2 size={13} />
                           </button>
                         )}
                       </span>
