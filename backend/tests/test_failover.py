@@ -517,7 +517,31 @@ def test_evaluate_triggers_ip_change_when_current_machine_down(monkeypatch):
 
     evaluate_failover_groups(db)
 
-    assert calls == [(current.id, f"{group.hostname} current origin is machine_down")]
+    assert calls == [(current.id, f"{group.hostname} origin {current.target} is machine_down")]
+
+
+def test_evaluate_triggers_ip_change_for_blocked_non_current_origin(monkeypatch):
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    # A backup origin that got blocked but is NOT the currently published origin.
+    blocked_backup = Origin(group_id=group.id, target="192.0.2.20", target_type="ipv4", port=443, status="blocked", priority=20)
+    db.add(blocked_backup)
+    group.current_origin_id = current.id
+    db.commit()
+    db.refresh(blocked_backup)
+    calls = []
+
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.failover.trigger_ip_change_for_origin",
+        lambda db_arg, origin_arg, reason: calls.append((origin_arg.id, reason)),
+    )
+
+    evaluate_failover_groups(db)
+
+    # The blocked backup must still get an IP-change attempt even though it is not current.
+    assert (blocked_backup.id, f"{group.hostname} origin {blocked_backup.target} is blocked") in calls
 
 
 def test_evaluate_switches_to_higher_priority_healthy_origin_by_status(monkeypatch):

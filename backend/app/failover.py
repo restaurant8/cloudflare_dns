@@ -463,9 +463,14 @@ def evaluate_failover_groups(db: Session) -> int:
         if _should_probe_group_before_switch(group):
             run_local_checks(db, group_id=group.id, include_all=False)
 
-        current = _current_origin(group)
-        if current is not None and current.status in {"blocked", "machine_down", "unhealthy"}:
-            trigger_ip_change_for_origin(db, current, f"{group.hostname} current origin is {current.status}")
+        # Trigger an automatic IP change for every blocked/down origin in the group,
+        # not just the currently published one. Otherwise an origin that gets blocked
+        # and then failed away from would never have its IP replaced, because it is no
+        # longer the "current" origin on subsequent cycles. Each attempt is still gated
+        # by the resource's auto_change_on_blocked flag and cooldown.
+        for group_origin in group.origins:
+            if group_origin.enabled and group_origin.status in {"blocked", "machine_down", "unhealthy"}:
+                trigger_ip_change_for_origin(db, group_origin, f"{group.hostname} origin {group_origin.target} is {group_origin.status}")
 
         desired = choose_desired_origin(group.origins, group.current_origin_id)
         if desired is None:
