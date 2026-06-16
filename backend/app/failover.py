@@ -367,8 +367,8 @@ def evaluate_failover_groups(db: Session) -> int:
             run_local_checks(db, group_id=group.id, include_all=False)
 
         current = _current_origin(group)
-        if current is not None and current.status == "blocked":
-            trigger_ip_change_for_origin(db, current, f"{group.hostname} current origin is blocked")
+        if current is not None and current.status in {"blocked", "machine_down", "unhealthy"}:
+            trigger_ip_change_for_origin(db, current, f"{group.hostname} current origin is {current.status}")
 
         desired = choose_desired_origin(group.origins, group.current_origin_id)
         if desired is None:

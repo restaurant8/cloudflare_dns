@@ -296,6 +296,26 @@ def test_evaluate_probes_group_before_switching_from_failed_current(monkeypatch)
     assert group.current_origin_id == backup.id
 
 
+def test_evaluate_triggers_ip_change_when_current_machine_down(monkeypatch):
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    current.status = "machine_down"
+    group.current_origin_id = current.id
+    db.commit()
+    calls = []
+
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.failover.trigger_ip_change_for_origin",
+        lambda db_arg, origin_arg, reason: calls.append((origin_arg.id, reason)),
+    )
+
+    evaluate_failover_groups(db)
+
+    assert calls == [(current.id, f"{group.hostname} current origin is machine_down")]
+
+
 def test_evaluate_switches_to_higher_priority_healthy_origin_by_status(monkeypatch):
     db = make_session()
     group, current = setup_group(db, "192.0.2.10")

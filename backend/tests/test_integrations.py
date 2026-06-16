@@ -6,6 +6,7 @@ from app.integrations import (
     azpanel_settings,
     change_resource_ip,
     list_azpanel_remote_resources,
+    sync_resource_current_ip_to_origin,
     trigger_ip_change_for_origin,
     update_azpanel_settings,
 )
@@ -116,6 +117,54 @@ def test_list_azpanel_remote_resources_caches_loaded_aws_instances(monkeypatch):
     assert cached[0]["cached"] is True
 
 
+def test_remote_resource_refresh_syncs_matching_bound_resource_and_origin(monkeypatch):
+    db = make_session()
+    update_azpanel_settings(db, {"base_url": "https://az.example.com", "api_token": "secret-token"})
+    origin = make_origin(db)
+    resource = AzPanelResource(
+        name="tokyo-node",
+        provider="aws",
+        resource_id="i-123",
+        account_id="aws-main",
+        region="ap-northeast-1",
+        ip_version="ipv4",
+        origin_id=origin.id,
+        current_ip="192.0.2.10",
+        port=31111,
+        auto_update_origin=True,
+    )
+    db.add(resource)
+    db.commit()
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "resources": [
+                    {
+                        "provider": "aws",
+                        "name": "tokyo-node",
+                        "resource_id": "i-123",
+                        "account_id": "aws-main",
+                        "region": "ap-northeast-1",
+                        "ip_version": "ipv4",
+                        "current_ip": "203.0.113.88",
+                    }
+                ]
+            }
+
+    monkeypatch.setattr("app.integrations.httpx.get", lambda *args, **kwargs: Response())
+
+    list_azpanel_remote_resources(db, "aws")
+
+    assert resource.current_ip == "203.0.113.88"
+    assert origin.target == "203.0.113.88"
+    assert origin.port == 31111
+    assert origin.status == "unknown"
+
+
 def test_change_resource_ip_updates_resource_and_xboard_binding_without_xboard_api(monkeypatch):
     db = make_session()
     make_user(db)
@@ -140,6 +189,31 @@ def test_change_resource_ip_updates_resource_and_xboard_binding_without_xboard_a
     assert resource.current_ip == "198.51.100.20"
     assert node.host == "198.51.100.20"
     assert node.last_error is None
+
+
+def test_bound_resource_current_ip_syncs_to_origin():
+    db = make_session()
+    origin = make_origin(db)
+    resource = AzPanelResource(
+        name="aws-node",
+        provider="aws",
+        resource_id="i-123",
+        origin_id=origin.id,
+        current_ip="203.0.113.20",
+        port=31111,
+        auto_update_origin=True,
+    )
+    db.add(resource)
+    db.commit()
+
+    changed = sync_resource_current_ip_to_origin(db, resource)
+
+    assert changed is True
+    assert origin.target == "203.0.113.20"
+    assert origin.target_type == "ipv4"
+    assert origin.port == 31111
+    assert origin.status == "unknown"
+    assert "资源 IP 已同步" in origin.last_error
 
 
 def test_trigger_ip_change_for_origin_uses_bound_resource(monkeypatch):

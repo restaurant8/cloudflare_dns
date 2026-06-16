@@ -7,6 +7,7 @@ from ..integrations import (
     azpanel_settings,
     change_resource_ip,
     list_azpanel_remote_resources,
+    sync_resource_current_ip_to_origin,
     update_azpanel_settings,
     update_xboard_settings,
     xboard_settings,
@@ -104,6 +105,10 @@ def create_azpanel_resource(payload: AzPanelResourceCreate, _: User = Depends(ge
         remark=_normalize_text(payload.remark),
     )
     db.add(resource)
+    try:
+        sync_resource_current_ip_to_origin(db, resource)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.commit()
     db.refresh(resource)
     return resource
@@ -123,6 +128,10 @@ def update_azpanel_resource(resource_id: int, payload: AzPanelResourceUpdate, _:
         if key in {"account_id", "region", "current_ip", "remark"}:
             value = _normalize_text(value)
         setattr(resource, key, value)
+    try:
+        sync_resource_current_ip_to_origin(db, resource)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.commit()
     db.refresh(resource)
     return resource

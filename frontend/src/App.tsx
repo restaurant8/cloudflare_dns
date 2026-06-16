@@ -3807,7 +3807,7 @@ function AzPanelPanel({
           </label>
           <label className="inlineCheck">
             <input type="checkbox" checked={resourceDraft.auto_change_on_blocked} onChange={(event) => setResourceDraft((current) => ({ ...current, auto_change_on_blocked: event.target.checked }))} />
-            被墙自动换 IP
+            源站故障自动换 IP
           </label>
           <label className="inlineCheck">
             <input type="checkbox" checked={resourceDraft.auto_update_origin} onChange={(event) => setResourceDraft((current) => ({ ...current, auto_update_origin: event.target.checked }))} />
@@ -3826,7 +3826,7 @@ function AzPanelPanel({
       <div className="panel">
         <div className="panelTitle">
           <h2>云资源</h2>
-          <p>手动换 IP 会立即调用 azpanel；自动换 IP 只在绑定的当前源站疑似被墙时触发。</p>
+          <p>手动换 IP 会立即调用 azpanel；自动换 IP 会在绑定的当前源站疑似被墙、机器挂了或本地不可达时触发。</p>
         </div>
         <div className="poolList">
           {resources.map((resource) => (

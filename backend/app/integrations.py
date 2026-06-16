@@ -305,6 +305,40 @@ def _cache_remote_resources(db: Session, items: list[dict[str, Any]]) -> list[di
     return saved
 
 
+def _sync_local_resources_from_remote_items(db: Session, items: list[dict[str, Any]]) -> int:
+    synced = 0
+    for item in items:
+        current_ip = str(item.get("current_ip") or "").strip()
+        if not current_ip:
+            continue
+        provider, account_id, region, resource_id, ip_version = _remote_resource_identity(item)
+        resources = (
+            db.query(AzPanelResource)
+            .filter(
+                AzPanelResource.provider == provider,
+                AzPanelResource.resource_id == resource_id,
+                AzPanelResource.ip_version == ip_version,
+            )
+            .all()
+        )
+        for resource in resources:
+            if (resource.account_id or "") != account_id or (resource.region or "") != region:
+                continue
+            if resource.current_ip == current_ip:
+                continue
+            resource.current_ip = current_ip
+            try:
+                sync_resource_current_ip_to_origin(db, resource)
+            except ValueError as exc:
+                resource.last_error = f"远端 IP 无法同步到源站: {exc}"
+            else:
+                resource.last_error = None
+            synced += 1
+    if synced:
+        db.flush()
+    return synced
+
+
 def list_azpanel_remote_resources(db: Session, provider: str | None = None) -> list[dict[str, Any]]:
     settings = azpanel_settings(db)
     if not settings["base_url"]:
@@ -339,6 +373,7 @@ def list_azpanel_remote_resources(db: Session, provider: str | None = None) -> l
         return cached_items
     normalized = [_normalize_remote_resource(item) for item in raw_items if isinstance(item, dict)]
     remote_items = _cache_remote_resources(db, [item for item in normalized if item is not None])
+    _sync_local_resources_from_remote_items(db, remote_items)
     merged = {_remote_resource_identity(item): item for item in cached_items}
     merged.update({_remote_resource_identity(item): item for item in remote_items})
     return sorted(
@@ -379,6 +414,27 @@ def _resource_on_cooldown(resource: AzPanelResource, now: datetime) -> bool:
     if last_attempt_at is None:
         return False
     return (now - last_attempt_at).total_seconds() < max(resource.cooldown_seconds, 60)
+
+
+def sync_resource_current_ip_to_origin(db: Session, resource: AzPanelResource) -> bool:
+    if not resource.origin_id or not resource.auto_update_origin or not resource.current_ip:
+        return False
+    origin = db.get(Origin, resource.origin_id)
+    if origin is None:
+        return False
+    target_info = parse_target(resource.current_ip)
+    changed = origin.target != target_info.value or origin.target_type != target_info.target_type or origin.port != resource.port
+    if not changed:
+        return False
+    origin.target = target_info.value
+    origin.target_type = target_info.target_type
+    origin.port = resource.port
+    origin.status = "unknown"
+    origin.last_error = "资源 IP 已同步，等待本地和探针探测结果"
+    origin.last_checked_at = None
+    origin.last_rtt_ms = None
+    origin.probe_states.clear()
+    return True
 
 
 def change_resource_ip(
@@ -440,13 +496,7 @@ def change_resource_ip(
         job.new_ip = target_info.value
         job.response_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
-        origin = db.get(Origin, resource.origin_id) if resource.origin_id else None
-        if origin is not None and resource.auto_update_origin:
-            origin.target = target_info.value
-            origin.target_type = target_info.target_type
-            origin.port = resource.port
-            origin.status = "unknown"
-            origin.last_error = None
+        sync_resource_current_ip_to_origin(db, resource)
 
         xboard_config = xboard_settings(db)
         for node in list(resource.xboard_nodes):
