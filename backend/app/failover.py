@@ -191,6 +191,27 @@ def _record_matches(record: dict, record_type: str, content: str) -> bool:
     )
 
 
+def _is_identical_record_error(exc: CloudflareError) -> bool:
+    return "identical record already exists" in str(exc).lower()
+
+
+def _create_dns_record_or_adopt(
+    client: CloudflareClient,
+    group: FailoverGroup,
+    hostname_entry: FailoverHostname,
+    body: dict,
+) -> dict:
+    try:
+        return client.create_dns_record(group.zone.cf_zone_id, body)
+    except CloudflareError as exc:
+        if not _is_identical_record_error(exc):
+            raise
+        for record in _same_name_records(client, group, hostname_entry):
+            if _record_matches(record, body["type"], body["content"]):
+                return record
+        raise
+
+
 def current_dns_matches_origin(db: Session, group: FailoverGroup, origin: Origin) -> bool:
     desired = _desired_record_for_origin(origin)
     if desired is None:
@@ -275,9 +296,9 @@ def publish_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
                 record = client.update_dns_record(group.zone.cf_zone_id, target_record_id, body)
             except CloudflareError:
                 client.delete_dns_record(group.zone.cf_zone_id, target_record_id)
-                record = client.create_dns_record(group.zone.cf_zone_id, body)
+                record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
         else:
-            record = client.create_dns_record(group.zone.cf_zone_id, body)
+            record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
 
         _store_record_ids(group, hostname_entry, [record["id"]])
         published_records.append(record)
@@ -322,19 +343,15 @@ def publish_expanded_origin(db: Session, group: FailoverGroup, origin: Origin) -
     for hostname_entry, managed_records in managed_by_hostname:
         for record in managed_records:
             client.delete_dns_record(group.zone.cf_zone_id, record["id"])
-        hostname_records = [
-            client.create_dns_record(
-                group.zone.cf_zone_id,
-                {
-                    "type": record_type_for_ip(selected_ip),
-                    "name": hostname_entry.hostname,
-                    "content": selected_ip,
-                    "ttl": group.ttl,
-                    "proxied": False,
-                    "comment": f"{MANAGED_RECORD_COMMENT_PREFIX} expanded from {origin.target}",
-                },
-            )
-        ]
+        body = {
+            "type": record_type_for_ip(selected_ip),
+            "name": hostname_entry.hostname,
+            "content": selected_ip,
+            "ttl": group.ttl,
+            "proxied": False,
+            "comment": f"{MANAGED_RECORD_COMMENT_PREFIX} expanded from {origin.target}",
+        }
+        hostname_records = [_create_dns_record_or_adopt(client, group, hostname_entry, body)]
         created_records.extend(hostname_records)
         _store_record_ids(group, hostname_entry, [record["id"] for record in hostname_records])
 
