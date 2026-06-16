@@ -136,10 +136,12 @@ class FailoverHostname(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("failover_groups.id", ondelete="CASCADE"), nullable=False)
+    zone_id: Mapped[int | None] = mapped_column(ForeignKey("zones.id", ondelete="SET NULL"))
     hostname: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
     current_record_id: Mapped[str | None] = mapped_column(Text)
 
     group: Mapped["FailoverGroup"] = relationship("FailoverGroup", back_populates="hostnames")
+    zone: Mapped["Zone | None"] = relationship("Zone")
 
 
 class Origin(Base, TimestampMixin):

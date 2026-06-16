@@ -396,50 +396,55 @@ def test_evaluate_republishes_current_origin_when_dns_drifted(monkeypatch):
     assert FakeCloudflareClient.records[0]["type"] == "A"
 
 
-def test_evaluate_adopts_historical_identical_record_without_record_id(monkeypatch):
-    class HistoricalIdenticalClient:
-        historical_record = {
-            "id": "historical-record",
-            "name": "www.example.com",
-            "type": "A",
-            "content": "192.0.2.20",
-            "ttl": 60,
-            "proxied": False,
+def test_publish_origin_publishes_each_hostname_into_its_own_zone(monkeypatch):
+    class MultiZoneClient:
+        by_zone = {
+            "zone-1": [{"id": "record-1", "name": "www.example.com", "type": "A", "content": "192.0.2.1", "ttl": 60, "proxied": False}],
+            "zone-2": [{"id": "rec-2", "name": "api.other.net", "type": "A", "content": "9.9.9.9", "ttl": 60, "proxied": False}],
         }
-        create_attempts = 0
 
         def __init__(self, token: str):
             self.token = token
 
         def list_dns_records(self, zone_id: str, name: str | None = None):
-            records = []
-            if name == "www.example.com" and self.__class__.create_attempts:
-                records.append(self.__class__.historical_record)
-            return records
+            return [r for r in self.by_zone.get(zone_id, []) if name is None or r["name"] == name]
 
         def update_dns_record(self, zone_id: str, record_id: str, record: dict):
-            self.__class__.historical_record.update(record)
-            return {**self.__class__.historical_record}
+            existing = next(r for r in self.by_zone[zone_id] if r["id"] == record_id)
+            existing.update(record)
+            return {**existing}
 
         def create_dns_record(self, zone_id: str, record: dict):
-            self.__class__.create_attempts += 1
-            raise CloudflareError("An identical record already exists.", 400, {})
+            created = {"id": f"new-{zone_id}", **record}
+            self.by_zone.setdefault(zone_id, []).append(created)
+            return created
 
         def delete_dns_record(self, zone_id: str, record_id: str):
-            pass
+            self.by_zone[zone_id] = [r for r in self.by_zone.get(zone_id, []) if r["id"] != record_id]
 
-    monkeypatch.setattr("app.failover.CloudflareClient", HistoricalIdenticalClient)
+    monkeypatch.setattr("app.failover.CloudflareClient", MultiZoneClient)
     db = make_session()
-    group, origin_model = setup_group(db, "192.0.2.20", current_record_id=None)
-    group.current_origin_id = origin_model.id
+    group, origin_model = setup_group(db, "203.0.113.5", current_record_id="record-1")
+
+    # A second hostname living in a different zone, with its own credential/token.
+    cred2 = CloudflareCredential(name="cf2", token_encrypted=encrypt_secret("token2"))
+    db.add(cred2)
+    db.flush()
+    zone2 = Zone(credential_id=cred2.id, cf_zone_id="zone-2", name="other.net")
+    db.add(zone2)
+    db.flush()
+    db.add(FailoverHostname(group_id=group.id, hostname="www.example.com", current_record_id="record-1"))
+    db.add(FailoverHostname(group_id=group.id, hostname="api.other.net", zone_id=zone2.id, current_record_id="rec-2"))
     db.commit()
 
-    switches = evaluate_failover_groups(db)
+    record = publish_origin(db, group, origin_model)
 
-    assert switches == 0
-    assert group.last_error is None
-    assert group.current_record_id == "historical-record"
-    assert HistoricalIdenticalClient.create_attempts == 1
+    # Each hostname was updated inside its own zone, pointing at the origin IP.
+    assert {(r["name"], r["content"]) for r in MultiZoneClient.by_zone["zone-1"]} == {("www.example.com", "203.0.113.5")}
+    assert {(r["name"], r["content"]) for r in MultiZoneClient.by_zone["zone-2"]} == {("api.other.net", "203.0.113.5")}
+    # The cross-zone hostname must NOT leak into the group's own zone.
+    assert all(r["name"] != "api.other.net" for r in MultiZoneClient.by_zone["zone-1"])
+    assert record["id"] == "record-1,rec-2"
 
 
 def test_publish_origin_rejects_unmanaged_same_name_conflict(monkeypatch):

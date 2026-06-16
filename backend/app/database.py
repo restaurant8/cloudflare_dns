@@ -92,6 +92,11 @@ def _migrate_existing_schema() -> None:
                     )
                 )
 
+        if "failover_hostnames" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("failover_hostnames")}
+            if "zone_id" not in existing:
+                connection.execute(text(_failover_hostname_zone_migration_statement(dialect)))
+
         if "telegram_notifications" in table_names:
             existing = {column["name"] for column in inspector.get_columns("telegram_notifications")}
             if "notify_level" not in existing:
@@ -184,6 +189,12 @@ def _failover_group_no_healthy_migration_statement(dialect: str) -> str:
     if dialect == "postgresql":
         return "ALTER TABLE failover_groups ADD COLUMN no_healthy_notified_at TIMESTAMP NULL"
     return "ALTER TABLE failover_groups ADD COLUMN no_healthy_notified_at DATETIME NULL"
+
+
+def _failover_hostname_zone_migration_statement(dialect: str) -> str:
+    if dialect == "mysql":
+        return "ALTER TABLE failover_hostnames ADD COLUMN zone_id INT NULL"
+    return "ALTER TABLE failover_hostnames ADD COLUMN zone_id INTEGER"
 
 
 def _failover_group_collection_migration_statement(dialect: str) -> str:

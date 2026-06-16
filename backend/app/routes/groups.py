@@ -7,7 +7,7 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import normalize_hostname, parse_target
 from ..events import add_event
-from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records
+from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records, zone_for_hostname
 from ..health import run_local_checks
 from ..models import Agent, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
@@ -78,6 +78,29 @@ def _group_hostname_values(group: FailoverGroup) -> set[str]:
     values = {group.hostname}
     values.update(hostname.hostname for hostname in group.hostnames)
     return values
+
+
+def _zone_matches_hostname(zone_name: str, hostname: str) -> bool:
+    zone_name = (zone_name or "").rstrip(".").lower()
+    hostname = (hostname or "").rstrip(".").lower()
+    return bool(zone_name) and (hostname == zone_name or hostname.endswith("." + zone_name))
+
+
+def _resolve_hostname_zone(db: Session, group: FailoverGroup, hostname: str) -> Zone | None:
+    """Find the registered Cloudflare zone a hostname belongs to.
+
+    Prefers the longest matching zone name, then the group's own credential so a
+    same-zone hostname always resolves to the group's zone.
+    """
+    candidates = [zone for zone in db.query(Zone).all() if _zone_matches_hostname(zone.name, hostname)]
+    if not candidates:
+        return None
+    group_credential_id = group.zone.credential_id
+    candidates.sort(
+        key=lambda zone: (len(zone.name or ""), 1 if zone.credential_id == group_credential_id else 0),
+        reverse=True,
+    )
+    return candidates[0]
 
 
 def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreate) -> Origin:
@@ -614,15 +637,23 @@ def add_group_hostname(group_id: int, payload: FailoverHostnameCreate, _: User =
         if conflict:
             raise HTTPException(status_code=400, detail=f"该主域名和业务分组全局备用 {conflict.target} 冲突")
 
-    client = CloudflareClient(decrypt_secret(group.zone.credential.token_encrypted))
+    target_zone = _resolve_hostname_zone(db, group, hostname)
+    if target_zone is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"域名 {hostname} 所属的 Cloudflare 区域尚未在系统中添加，请先在区域页面同步该区域后再试",
+        )
+
+    client = CloudflareClient(decrypt_secret(target_zone.credential.token_encrypted))
     try:
-        existing_record_id = validate_group_hostname_records(client, group.zone.cf_zone_id, hostname, payload.adopt_record_id)
+        existing_record_id = validate_group_hostname_records(client, target_zone.cf_zone_id, hostname, payload.adopt_record_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     hostname_entry = FailoverHostname(
         group=group,
         hostname=hostname,
+        zone_id=target_zone.id if target_zone.id != group.zone_id else None,
         current_record_id=payload.adopt_record_id or existing_record_id,
     )
     db.add(hostname_entry)
@@ -663,10 +694,11 @@ def delete_group_hostname(hostname_id: int, _: User = Depends(get_current_user),
     was_primary = removed_hostname == group.hostname
     record_ids = [item.strip() for item in (hostname_entry.current_record_id or "").split(",") if item.strip()]
     if record_ids:
-        client = CloudflareClient(decrypt_secret(group.zone.credential.token_encrypted))
+        zone = zone_for_hostname(db, group, hostname_entry)
+        client = CloudflareClient(decrypt_secret(zone.credential.token_encrypted))
         for record_id in record_ids:
             try:
-                client.delete_dns_record(group.zone.cf_zone_id, record_id)
+                client.delete_dns_record(zone.cf_zone_id, record_id)
             except CloudflareError as exc:
                 if exc.status_code == 404:
                     continue

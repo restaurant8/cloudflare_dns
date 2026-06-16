@@ -7,7 +7,7 @@ from .dns_utils import record_type_for_target_type
 from .events import add_event
 from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, run_local_checks
 from .integrations import trigger_ip_change_for_origin
-from .models import DnsRecord, FailoverGroup, FailoverHostname, Origin
+from .models import DnsRecord, FailoverGroup, FailoverHostname, Origin, Zone
 from .notifier import send_webhooks
 from .origin_expansion import (
     DIRECT_PUBLISH_MODE,
@@ -94,12 +94,13 @@ def _managed_dns_records(client: CloudflareClient, cf_zone_id: str, hostname: st
     if normalized_hostname is None:
         return records
     filtered = [record for record in records if _normalized_record_name(record.get("name")) == normalized_hostname]
-    precise_records = [
+    if filtered:
+        return filtered
+    return [
         record
         for record in client.list_dns_records(cf_zone_id, name=hostname)
         if record.get("type") in MANAGED_RECORD_TYPES
     ]
-    return _dedupe_records([*filtered, *precise_records])
 
 
 def find_managed_dns_record_by_id(client: CloudflareClient, cf_zone_id: str, record_id: str) -> dict | None:
@@ -204,78 +205,52 @@ def _is_identical_record_error(exc: CloudflareError) -> bool:
     return "identical record already exists" in str(exc).lower()
 
 
-def _dedupe_records(records: list[dict]) -> list[dict]:
-    seen: set[str] = set()
-    unique_records = []
-    for record in records:
-        record_id = str(record.get("id") or "")
-        if record_id and record_id in seen:
-            continue
-        if record_id:
-            seen.add(record_id)
-        unique_records.append(record)
-    return unique_records
+def zone_for_hostname(db: Session, group: FailoverGroup, hostname_entry: FailoverHostname) -> Zone:
+    """Resolve the Cloudflare zone a hostname entry should be published into.
+
+    A null ``zone_id`` keeps the legacy behaviour of using the group's own zone,
+    so existing single-zone groups are unaffected.
+    """
+    if hostname_entry.zone_id:
+        zone = db.get(Zone, hostname_entry.zone_id)
+        if zone is not None:
+            return zone
+    return group.zone
 
 
-def _adopt_record_after_identical_error(
-    client: CloudflareClient,
-    group: FailoverGroup,
-    hostname_entry: FailoverHostname,
-    body: dict,
-    preferred_records: list[dict] | None = None,
-) -> dict | None:
-    records = _dedupe_records([*(preferred_records or []), *_same_name_records(client, group, hostname_entry)])
-    for record in records:
-        if _record_has_same_identity(record, body["type"], body["content"]):
-            if _record_matches(record, body["type"], body["content"]):
-                return record
-            return client.update_dns_record(group.zone.cf_zone_id, record["id"], body)
-
-    same_type_records = [record for record in records if record.get("type") == body["type"]]
-    fallback_record = same_type_records[0] if len(same_type_records) == 1 else records[0] if len(records) == 1 else None
-    if fallback_record is None:
-        return None
-    try:
-        return client.update_dns_record(group.zone.cf_zone_id, fallback_record["id"], body)
-    except CloudflareError as exc:
-        if not _is_identical_record_error(exc):
-            raise
-        refreshed_records = _dedupe_records(_same_name_records(client, group, hostname_entry))
-        for record in refreshed_records:
-            if _record_has_same_identity(record, body["type"], body["content"]):
-                if _record_matches(record, body["type"], body["content"]):
-                    return record
-                return client.update_dns_record(group.zone.cf_zone_id, record["id"], body)
-        raise
+def _client_for_zone(zone: Zone) -> CloudflareClient:
+    return CloudflareClient(decrypt_secret(zone.credential.token_encrypted))
 
 
 def _create_dns_record_or_adopt(
     client: CloudflareClient,
-    group: FailoverGroup,
+    cf_zone_id: str,
     hostname_entry: FailoverHostname,
     body: dict,
 ) -> dict:
     try:
-        return client.create_dns_record(group.zone.cf_zone_id, body)
+        return client.create_dns_record(cf_zone_id, body)
     except CloudflareError as exc:
         if not _is_identical_record_error(exc):
             raise
-        adopted = _adopt_record_after_identical_error(client, group, hostname_entry, body)
-        if adopted is not None:
-            return adopted
+        for record in _same_name_records(client, cf_zone_id, hostname_entry):
+            if _record_has_same_identity(record, body["type"], body["content"]):
+                if _record_matches(record, body["type"], body["content"]):
+                    return record
+                return client.update_dns_record(cf_zone_id, record["id"], body)
         raise
 
 
 def _publish_one_hostname_record(
     client: CloudflareClient,
-    group: FailoverGroup,
+    cf_zone_id: str,
     hostname_entry: FailoverHostname,
     managed_records: list[dict],
     body: dict,
 ) -> dict:
     if body["type"] == "CNAME" and len(managed_records) > 1:
         for extra_record in managed_records[1:]:
-            client.delete_dns_record(group.zone.cf_zone_id, extra_record["id"])
+            client.delete_dns_record(cf_zone_id, extra_record["id"])
         managed_records = managed_records[:1]
 
     same_record = next(
@@ -285,23 +260,19 @@ def _publish_one_hostname_record(
     target_record = same_record or (managed_records[0] if managed_records else None)
     if target_record:
         try:
-            record = client.update_dns_record(group.zone.cf_zone_id, target_record["id"], body)
+            record = client.update_dns_record(cf_zone_id, target_record["id"], body)
         except CloudflareError as exc:
             if _is_identical_record_error(exc):
-                adopted = _adopt_record_after_identical_error(client, group, hostname_entry, body, [target_record, *managed_records])
-                if adopted is None:
-                    record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
-                else:
-                    record = adopted
+                record = _create_dns_record_or_adopt(client, cf_zone_id, hostname_entry, body)
             else:
-                client.delete_dns_record(group.zone.cf_zone_id, target_record["id"])
-                record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
+                client.delete_dns_record(cf_zone_id, target_record["id"])
+                record = _create_dns_record_or_adopt(client, cf_zone_id, hostname_entry, body)
     else:
-        record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
+        record = _create_dns_record_or_adopt(client, cf_zone_id, hostname_entry, body)
 
     for extra_record in managed_records:
         if extra_record["id"] != record["id"]:
-            client.delete_dns_record(group.zone.cf_zone_id, extra_record["id"])
+            client.delete_dns_record(cf_zone_id, extra_record["id"])
     return record
 
 
@@ -310,13 +281,13 @@ def current_dns_matches_origin(db: Session, group: FailoverGroup, origin: Origin
     if desired is None:
         return True
     record_type, content = desired
-    credential = group.zone.credential
-    client = CloudflareClient(decrypt_secret(credential.token_encrypted))
     for hostname_entry in ensure_group_hostname_entries(db, group):
         managed_ids = _record_ids(hostname_entry)
         if not managed_ids:
             return False
-        records = _same_name_records(client, group, hostname_entry)
+        zone = zone_for_hostname(db, group, hostname_entry)
+        client = _client_for_zone(zone)
+        records = _same_name_records(client, zone.cf_zone_id, hostname_entry)
         managed_records = [record for record in records if record.get("id") in managed_ids]
         if len(managed_records) != len(managed_ids):
             return False
@@ -327,8 +298,8 @@ def current_dns_matches_origin(db: Session, group: FailoverGroup, origin: Origin
     return True
 
 
-def _same_name_records(client: CloudflareClient, group: FailoverGroup, hostname_entry: FailoverHostname) -> list[dict]:
-    return _managed_dns_records(client, group.zone.cf_zone_id, hostname_entry.hostname)
+def _same_name_records(client: CloudflareClient, cf_zone_id: str, hostname_entry: FailoverHostname) -> list[dict]:
+    return _managed_dns_records(client, cf_zone_id, hostname_entry.hostname)
 
 
 def _validate_same_name_records(group: FailoverGroup, hostname_entry: FailoverHostname, records: list[dict]) -> list[dict]:
@@ -362,23 +333,24 @@ def publish_origin(
 
     record_type = record_type_for_target_type(origin.target_type)
 
-    credential = group.zone.credential
-    token = decrypt_secret(credential.token_encrypted)
-    client = CloudflareClient(token)
     target_hostnames = hostname_entries if hostname_entries is not None else ensure_group_hostname_entries(db, group)
     managed_by_hostname = []
     for hostname_entry in target_hostnames:
         try:
             if record_type == "CNAME" and origin.target.rstrip(".").lower() == hostname_entry.hostname.rstrip(".").lower():
                 raise ValueError(f"CNAME 目标不能和当前主机名相同：{hostname_entry.hostname}")
-            managed_by_hostname.append(
-                (hostname_entry, _validate_same_name_records(group, hostname_entry, _same_name_records(client, group, hostname_entry)))
+            zone = zone_for_hostname(db, group, hostname_entry)
+            client = _client_for_zone(zone)
+            managed_records = _validate_same_name_records(
+                group, hostname_entry, _same_name_records(client, zone.cf_zone_id, hostname_entry)
             )
+            managed_by_hostname.append((hostname_entry, zone, client, managed_records))
         except Exception as exc:
             raise DnsPublishError(hostname_entry.hostname, str(exc)) from exc
 
     published_records = []
-    for hostname_entry, managed_records in managed_by_hostname:
+    touched_zones: dict[int, tuple[Zone, CloudflareClient]] = {}
+    for hostname_entry, zone, client, managed_records in managed_by_hostname:
         body = {
             "type": record_type,
             "name": hostname_entry.hostname,
@@ -389,15 +361,16 @@ def publish_origin(
         }
 
         try:
-            record = _publish_one_hostname_record(client, group, hostname_entry, managed_records, body)
+            record = _publish_one_hostname_record(client, zone.cf_zone_id, hostname_entry, managed_records, body)
         except Exception as exc:
             raise DnsPublishError(hostname_entry.hostname, str(exc)) from exc
 
         _store_record_ids(group, hostname_entry, [record["id"]])
         published_records.append(record)
+        touched_zones[zone.id] = (zone, client)
         local_record = (
             db.query(DnsRecord)
-            .filter(DnsRecord.zone_id == group.zone_id, DnsRecord.cf_record_id == record["id"])
+            .filter(DnsRecord.zone_id == zone.id, DnsRecord.cf_record_id == record["id"])
             .one_or_none()
         )
         if local_record:
@@ -407,7 +380,8 @@ def publish_origin(
             local_record.proxied = False
     origin.publish_mode = DIRECT_PUBLISH_MODE
     set_published_ips(origin, [])
-    sync_zone_records(db, credential, group.zone, client=client)
+    for zone, client in touched_zones.values():
+        sync_zone_records(db, zone.credential, zone, client=client)
     return {
         "id": ",".join(record["id"] for record in published_records),
         "type": record_type,
@@ -428,21 +402,22 @@ def publish_expanded_origin(
     if not selected_ip:
         raise ValueError("展开域名当前没有健康 IP，无法发布")
 
-    credential = group.zone.credential
-    token = decrypt_secret(credential.token_encrypted)
-    client = CloudflareClient(token)
     target_hostnames = hostname_entries if hostname_entries is not None else ensure_group_hostname_entries(db, group)
     managed_by_hostname = []
     for hostname_entry in target_hostnames:
         try:
-            managed_by_hostname.append(
-                (hostname_entry, _validate_same_name_records(group, hostname_entry, _same_name_records(client, group, hostname_entry)))
+            zone = zone_for_hostname(db, group, hostname_entry)
+            client = _client_for_zone(zone)
+            managed_records = _validate_same_name_records(
+                group, hostname_entry, _same_name_records(client, zone.cf_zone_id, hostname_entry)
             )
+            managed_by_hostname.append((hostname_entry, zone, client, managed_records))
         except Exception as exc:
             raise DnsPublishError(hostname_entry.hostname, str(exc)) from exc
 
     created_records = []
-    for hostname_entry, managed_records in managed_by_hostname:
+    touched_zones: dict[int, tuple[Zone, CloudflareClient]] = {}
+    for hostname_entry, zone, client, managed_records in managed_by_hostname:
         body = {
             "type": record_type_for_ip(selected_ip),
             "name": hostname_entry.hostname,
@@ -452,14 +427,16 @@ def publish_expanded_origin(
             "comment": f"{MANAGED_RECORD_COMMENT_PREFIX} expanded from {origin.target}",
         }
         try:
-            hostname_records = [_publish_one_hostname_record(client, group, hostname_entry, managed_records, body)]
+            hostname_records = [_publish_one_hostname_record(client, zone.cf_zone_id, hostname_entry, managed_records, body)]
         except Exception as exc:
             raise DnsPublishError(hostname_entry.hostname, str(exc)) from exc
         created_records.extend(hostname_records)
         _store_record_ids(group, hostname_entry, [record["id"] for record in hostname_records])
+        touched_zones[zone.id] = (zone, client)
 
     set_published_ips(origin, [selected_ip])
-    sync_zone_records(db, credential, group.zone, client=client)
+    for zone, client in touched_zones.values():
+        sync_zone_records(db, zone.credential, zone, client=client)
     return {
         "id": ",".join(record["id"] for record in created_records),
         "type": record_type_for_ip(selected_ip),
@@ -473,7 +450,7 @@ def evaluate_failover_groups(db: Session) -> int:
         db.query(FailoverGroup)
         .options(
             selectinload(FailoverGroup.origins),
-            selectinload(FailoverGroup.hostnames),
+            selectinload(FailoverGroup.hostnames).selectinload(FailoverHostname.zone),
             selectinload(FailoverGroup.zone),
         )
         .filter(FailoverGroup.enabled.is_(True))

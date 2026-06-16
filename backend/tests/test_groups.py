@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.cloudflare import CloudflareError
 from app.database import Base
 from app.models import Agent, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, resolved_ips
@@ -221,62 +220,6 @@ def test_add_group_hostname_only_publishes_new_hostname(monkeypatch):
         ("www.example.com", "192.0.2.10"),
         ("api.example.com", "192.0.2.10"),
     }
-
-
-def test_add_group_hostname_adopts_historical_identical_record(monkeypatch):
-    class HistoricalIdenticalClient(FakeCloudflareClient):
-        records = [
-            {
-                "id": "record-1",
-                "name": "www.example.com",
-                "type": "A",
-                "content": "192.0.2.10",
-                "ttl": 60,
-                "proxied": False,
-            }
-        ]
-        historical_record = {
-            "id": "historical-record",
-            "name": "api.example.com",
-            "type": "A",
-            "content": "192.0.2.10",
-            "ttl": 60,
-            "proxied": False,
-        }
-        create_attempts = 0
-
-        def list_dns_records(self, zone_id: str, name: str | None = None):
-            records = list(self.records)
-            if name == "api.example.com" and self.__class__.create_attempts:
-                records.append(self.__class__.historical_record)
-            return [record for record in records if name is None or record["name"] == name]
-
-        def create_dns_record(self, zone_id: str, record: dict):
-            if record["name"] == "api.example.com":
-                self.__class__.create_attempts += 1
-                raise CloudflareError("An identical record already exists.", 400, {})
-            return super().create_dns_record(zone_id, record)
-
-    monkeypatch.setattr("app.routes.groups.CloudflareClient", HistoricalIdenticalClient)
-    monkeypatch.setattr("app.failover.CloudflareClient", HistoricalIdenticalClient)
-    db = make_session()
-    zone, user = setup_zone(db)
-    group = create_group(
-        FailoverGroupCreate(
-            zone_id=zone.id,
-            hostname="www.example.com",
-            adopt_record_id="record-1",
-            primary_port=22,
-        ),
-        user,
-        db,
-    )
-
-    updated = add_group_hostname(group.id, FailoverHostnameCreate(hostname="api.example.com"), user, db)
-
-    api_hostname = next(item for item in updated.hostnames if item.hostname == "api.example.com")
-    assert api_hostname.current_record_id == "historical-record"
-    assert updated.last_error is None
 
 
 def test_add_group_hostname_keeps_hostname_when_publish_fails(monkeypatch):

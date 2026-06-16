@@ -249,6 +249,7 @@ class FailoverHostnameCreate(BaseModel):
 class FailoverHostnameOut(BaseModel):
     id: int
     group_id: int
+    zone_id: int | None = None
     hostname: str
     current_record_id: str | None
     created_at: datetime
