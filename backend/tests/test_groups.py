@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Agent, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, ProbeState, User, Zone
+from app.models import Agent, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, resolved_ips
 from app.routes.groups import add_group_hostname, create_collection, create_global_origin, create_group, delete_global_origin, delete_group_hostname, update_global_origin, update_group, update_origin
 from app.schemas import FailoverCollectionCreate, FailoverGlobalOriginCreate, FailoverGlobalOriginUpdate, FailoverGroupCreate, FailoverGroupUpdate, FailoverHostnameCreate, OriginOut, OriginUpdate
@@ -282,6 +282,30 @@ def test_delete_group_hostname_keeps_at_least_one_hostname(monkeypatch):
         assert getattr(exc, "status_code", None) == 400
     else:
         raise AssertionError("Expected last hostname deletion to fail")
+
+
+def test_delete_group_hostname_deletes_managed_dns_record(monkeypatch):
+    class DeleteTrackingClient(FakeCloudflareClient):
+        deleted_ids: list[str] = []
+
+        def delete_dns_record(self, zone_id: str, record_id: str):
+            self.__class__.deleted_ids.append(record_id)
+
+    monkeypatch.setattr("app.routes.groups.CloudflareClient", DeleteTrackingClient)
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com", ttl=60, current_record_id="record-1")
+    db.add(group)
+    db.flush()
+    db.add(FailoverHostname(group_id=group.id, hostname="www.example.com", current_record_id="record-1"))
+    api_hostname = FailoverHostname(group_id=group.id, hostname="api.example.com", current_record_id="record-2")
+    db.add(api_hostname)
+    db.commit()
+
+    updated = delete_group_hostname(api_hostname.id, user, db)
+
+    assert DeleteTrackingClient.deleted_ids == ["record-2"]
+    assert [item.hostname for item in updated.hostnames] == ["www.example.com"]
 
 
 def test_create_global_origin_syncs_to_all_collection_groups():

@@ -247,6 +247,40 @@ def test_publish_origin_converts_identical_proxied_record_to_dns_only(monkeypatc
     assert IdenticalProxiedClient.hidden_record["ttl"] == 60
 
 
+def test_publish_expanded_origin_reuses_existing_selected_record(monkeypatch):
+    class ReuseExpandedRecordClient(FakeCloudflareClient):
+        records = [
+            {
+                "id": "record-1",
+                "name": "www.example.com",
+                "type": "A",
+                "content": "192.0.2.20",
+                "ttl": 60,
+                "proxied": False,
+            }
+        ]
+        create_attempts = 0
+
+        def create_dns_record(self, zone_id: str, record: dict):
+            self.__class__.create_attempts += 1
+            raise AssertionError("existing selected expanded IP record should be reused")
+
+    monkeypatch.setattr("app.failover.CloudflareClient", ReuseExpandedRecordClient)
+    db = make_session()
+    group, origin_model = setup_group(db, "backup.example.net")
+    origin_model.publish_mode = EXPANDED_PUBLISH_MODE
+    set_healthy_ips(origin_model, ["192.0.2.20"])
+    db.add(FailoverHostname(group_id=group.id, hostname="www.example.com", current_record_id="record-1"))
+    db.commit()
+
+    record = publish_origin(db, group, origin_model)
+
+    assert record["id"] == "record-1"
+    assert record["type"] == "A"
+    assert record["content"] == "192.0.2.20"
+    assert ReuseExpandedRecordClient.create_attempts == 0
+
+
 def test_publish_origin_creates_cname_for_hostname(monkeypatch):
     FakeCloudflareClient.records = []
     monkeypatch.setattr("app.failover.CloudflareClient", FakeCloudflareClient)
@@ -278,7 +312,9 @@ def test_publish_expanded_hostname_creates_selected_healthy_record_by_priority(m
             return created
 
         def update_dns_record(self, zone_id: str, record_id: str, record: dict):
-            raise AssertionError("expanded publishing should recreate the managed record set")
+            existing = next(item for item in self.__class__.records if item["id"] == record_id)
+            existing.update(record)
+            return {**existing}
 
         def delete_dns_record(self, zone_id: str, record_id: str):
             self.__class__.records = [record for record in self.__class__.records if record["id"] != record_id]
@@ -294,7 +330,8 @@ def test_publish_expanded_hostname_creates_selected_healthy_record_by_priority(m
 
     assert record["type"] == "AAAA"
     assert record["content"] == "2001:db8::10"
-    assert group.current_record_id == "new-record-1"
+    assert group.current_record_id == "record-1"
+    assert ExpandedClient.created == 0
     assert [(item["type"], item["content"]) for item in ExpandedClient.records] == [("AAAA", "2001:db8::10")]
 
 

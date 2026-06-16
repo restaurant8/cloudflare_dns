@@ -28,6 +28,12 @@ WAITING_FOR_PROBES_MESSAGE = "等待源站探测结果"
 RECOVERABLE_GROUP_ERRORS = {NO_HEALTHY_ORIGIN_MESSAGE, WAITING_FOR_PROBES_MESSAGE}
 
 
+class DnsPublishError(ValueError):
+    def __init__(self, hostname: str, message: str):
+        super().__init__(message)
+        self.hostname = hostname
+
+
 def choose_desired_origin(origins: list[Origin], current_origin_id: int | None = None) -> Origin | None:
     healthy = [origin for origin in origins if origin.enabled and origin.status == ORIGIN_AVAILABLE_STATUS]
     if not healthy:
@@ -218,6 +224,41 @@ def _create_dns_record_or_adopt(
         raise
 
 
+def _publish_one_hostname_record(
+    client: CloudflareClient,
+    group: FailoverGroup,
+    hostname_entry: FailoverHostname,
+    managed_records: list[dict],
+    body: dict,
+) -> dict:
+    if body["type"] == "CNAME" and len(managed_records) > 1:
+        for extra_record in managed_records[1:]:
+            client.delete_dns_record(group.zone.cf_zone_id, extra_record["id"])
+        managed_records = managed_records[:1]
+
+    same_record = next(
+        (record for record in managed_records if _record_has_same_identity(record, body["type"], body["content"])),
+        None,
+    )
+    target_record = same_record or (managed_records[0] if managed_records else None)
+    if target_record:
+        try:
+            record = client.update_dns_record(group.zone.cf_zone_id, target_record["id"], body)
+        except CloudflareError as exc:
+            if _is_identical_record_error(exc):
+                record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
+            else:
+                client.delete_dns_record(group.zone.cf_zone_id, target_record["id"])
+                record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
+    else:
+        record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
+
+    for extra_record in managed_records:
+        if extra_record["id"] != record["id"]:
+            client.delete_dns_record(group.zone.cf_zone_id, extra_record["id"])
+    return record
+
+
 def current_dns_matches_origin(db: Session, group: FailoverGroup, origin: Origin) -> bool:
     desired = _desired_record_for_origin(origin)
     if desired is None:
@@ -281,18 +322,17 @@ def publish_origin(
     target_hostnames = hostname_entries if hostname_entries is not None else ensure_group_hostname_entries(db, group)
     managed_by_hostname = []
     for hostname_entry in target_hostnames:
-        if record_type == "CNAME" and origin.target.rstrip(".").lower() == hostname_entry.hostname.rstrip(".").lower():
-            raise ValueError(f"CNAME 目标不能和当前主机名相同：{hostname_entry.hostname}")
-        managed_by_hostname.append(
-            (hostname_entry, _validate_same_name_records(group, hostname_entry, _same_name_records(client, group, hostname_entry)))
-        )
+        try:
+            if record_type == "CNAME" and origin.target.rstrip(".").lower() == hostname_entry.hostname.rstrip(".").lower():
+                raise ValueError(f"CNAME 目标不能和当前主机名相同：{hostname_entry.hostname}")
+            managed_by_hostname.append(
+                (hostname_entry, _validate_same_name_records(group, hostname_entry, _same_name_records(client, group, hostname_entry)))
+            )
+        except Exception as exc:
+            raise DnsPublishError(hostname_entry.hostname, str(exc)) from exc
 
     published_records = []
     for hostname_entry, managed_records in managed_by_hostname:
-        target_record_id = managed_records[0]["id"] if managed_records else None
-        for extra_record in managed_records[1:]:
-            client.delete_dns_record(group.zone.cf_zone_id, extra_record["id"])
-
         body = {
             "type": record_type,
             "name": hostname_entry.hostname,
@@ -302,14 +342,10 @@ def publish_origin(
             "comment": MANAGED_RECORD_COMMENT_PREFIX,
         }
 
-        if target_record_id:
-            try:
-                record = client.update_dns_record(group.zone.cf_zone_id, target_record_id, body)
-            except CloudflareError:
-                client.delete_dns_record(group.zone.cf_zone_id, target_record_id)
-                record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
-        else:
-            record = _create_dns_record_or_adopt(client, group, hostname_entry, body)
+        try:
+            record = _publish_one_hostname_record(client, group, hostname_entry, managed_records, body)
+        except Exception as exc:
+            raise DnsPublishError(hostname_entry.hostname, str(exc)) from exc
 
         _store_record_ids(group, hostname_entry, [record["id"]])
         published_records.append(record)
@@ -350,15 +386,17 @@ def publish_expanded_origin(
     token = decrypt_secret(credential.token_encrypted)
     client = CloudflareClient(token)
     target_hostnames = hostname_entries if hostname_entries is not None else ensure_group_hostname_entries(db, group)
-    managed_by_hostname = [
-        (hostname_entry, _validate_same_name_records(group, hostname_entry, _same_name_records(client, group, hostname_entry)))
-        for hostname_entry in target_hostnames
-    ]
+    managed_by_hostname = []
+    for hostname_entry in target_hostnames:
+        try:
+            managed_by_hostname.append(
+                (hostname_entry, _validate_same_name_records(group, hostname_entry, _same_name_records(client, group, hostname_entry)))
+            )
+        except Exception as exc:
+            raise DnsPublishError(hostname_entry.hostname, str(exc)) from exc
 
     created_records = []
     for hostname_entry, managed_records in managed_by_hostname:
-        for record in managed_records:
-            client.delete_dns_record(group.zone.cf_zone_id, record["id"])
         body = {
             "type": record_type_for_ip(selected_ip),
             "name": hostname_entry.hostname,
@@ -367,7 +405,10 @@ def publish_expanded_origin(
             "proxied": False,
             "comment": f"{MANAGED_RECORD_COMMENT_PREFIX} expanded from {origin.target}",
         }
-        hostname_records = [_create_dns_record_or_adopt(client, group, hostname_entry, body)]
+        try:
+            hostname_records = [_publish_one_hostname_record(client, group, hostname_entry, managed_records, body)]
+        except Exception as exc:
+            raise DnsPublishError(hostname_entry.hostname, str(exc)) from exc
         created_records.extend(hostname_records)
         _store_record_ids(group, hostname_entry, [record["id"] for record in hostname_records])
 
@@ -435,14 +476,18 @@ def evaluate_failover_groups(db: Session) -> int:
                     record = publish_origin(db, group, desired)
                 except Exception as exc:
                     message = str(exc)
+                    failed_hostname = getattr(exc, "hostname", group.hostname)
                     group.last_error = message
-                    payload = {"group_id": group.id, "hostname": group.hostname, "error": message}
+                    payload = {"group_id": group.id, "hostname": failed_hostname, "error": message}
                     add_event(db, "dns.publish_failed", "error", f"{group.hostname} 发布 DNS 失败: {message}", payload)
                     send_webhooks(db, "dns.publish_failed", payload)
                 else:
+                    published_hostnames = record.get("hostnames") or [group.hostname]
+                    hostname_label = ", ".join(str(item) for item in published_hostnames)
                     payload = {
                         "group_id": group.id,
-                        "hostname": group.hostname,
+                        "hostname": hostname_label,
+                        "hostnames": published_hostnames,
                         "old_origin_id": desired.id,
                         "new_origin_id": desired.id,
                         "record_id": record["id"],
@@ -463,8 +508,9 @@ def evaluate_failover_groups(db: Session) -> int:
         except Exception as exc:
             message = str(exc)
             if group.last_error != message:
+                failed_hostname = getattr(exc, "hostname", group.hostname)
                 group.last_error = message
-                payload = {"group_id": group.id, "hostname": group.hostname, "error": message}
+                payload = {"group_id": group.id, "hostname": failed_hostname, "error": message}
                 add_event(db, "dns.publish_failed", "error", f"{group.hostname} 发布 DNS 失败: {message}", payload)
                 send_webhooks(db, "dns.publish_failed", payload)
             continue
@@ -473,9 +519,12 @@ def evaluate_failover_groups(db: Session) -> int:
         group.last_switch_at = now
         group.last_error = None
         switches += 1
+        published_hostnames = record.get("hostnames") or [group.hostname]
+        hostname_label = ", ".join(str(item) for item in published_hostnames)
         payload = {
             "group_id": group.id,
-            "hostname": group.hostname,
+            "hostname": hostname_label,
+            "hostnames": published_hostnames,
             "old_origin_id": old_origin_id,
             "new_origin_id": desired.id,
             "record_id": record["id"],

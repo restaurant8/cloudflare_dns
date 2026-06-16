@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
-from ..cloudflare import CloudflareClient
+from ..cloudflare import CloudflareClient, CloudflareError
 from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import normalize_hostname, parse_target
@@ -661,6 +661,16 @@ def delete_group_hostname(hostname_id: int, _: User = Depends(get_current_user),
         raise HTTPException(status_code=400, detail="至少需要保留一个主域名")
     removed_hostname = hostname_entry.hostname
     was_primary = removed_hostname == group.hostname
+    record_ids = [item.strip() for item in (hostname_entry.current_record_id or "").split(",") if item.strip()]
+    if record_ids:
+        client = CloudflareClient(decrypt_secret(group.zone.credential.token_encrypted))
+        for record_id in record_ids:
+            try:
+                client.delete_dns_record(group.zone.cf_zone_id, record_id)
+            except CloudflareError as exc:
+                if exc.status_code == 404:
+                    continue
+                raise HTTPException(status_code=502, detail=f"删除 Cloudflare DNS 记录失败：{exc}") from exc
     db.delete(hostname_entry)
     if was_primary:
         next_primary = sorted(remaining, key=lambda item: item.id)[0]
