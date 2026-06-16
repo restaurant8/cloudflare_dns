@@ -437,6 +437,13 @@ def sync_resource_current_ip_to_origin(db: Session, resource: AzPanelResource) -
     return True
 
 
+def _resource_current_ip_matches_origin(resource: AzPanelResource, origin: Origin) -> bool:
+    if not resource.current_ip:
+        return True
+    target_info = parse_target(resource.current_ip)
+    return origin.target == target_info.value and origin.target_type == target_info.target_type and origin.port == resource.port
+
+
 def change_resource_ip(
     db: Session,
     resource: AzPanelResource,
@@ -566,6 +573,31 @@ def trigger_ip_change_for_origin(db: Session, origin: Origin, reason: str) -> Ip
         .order_by(AzPanelResource.id.asc())
         .all()
     )
+    for resource in resources:
+        if not resource.auto_update_origin or not resource.current_ip:
+            continue
+        try:
+            resource_matches_origin = _resource_current_ip_matches_origin(resource, origin)
+        except ValueError as exc:
+            resource.last_error = f"resource current IP invalid: {exc}"
+            continue
+        if resource_matches_origin:
+            continue
+        sync_resource_current_ip_to_origin(db, resource)
+        add_event(
+            db,
+            "azpanel.resource_ip_synced",
+            "info",
+            f"{resource.name} current IP synced to bound origin before auto change",
+            {
+                "resource_id": resource.id,
+                "provider": resource.provider,
+                "origin_id": origin.id,
+                "current_ip": resource.current_ip,
+                "reason": reason,
+            },
+        )
+        return None
     if not resources and origin.target_type in {"ipv4", "ipv6"}:
         resources = (
             db.query(AzPanelResource)

@@ -165,6 +165,36 @@ def test_agent_results_apply_duplicate_target_to_all_matching_origins():
     assert {result.origin_id for result in results} == {current.id, backup.id}
 
 
+def test_agent_results_ignore_stale_task_after_origin_target_changes():
+    db = make_session()
+    current, backup, agent = make_group_with_duplicate_origins(db)
+    old_target = current.target
+    current.target = "198.51.100.20"
+    backup.target = "198.51.100.30"
+    db.commit()
+
+    payload = AgentResultsIn(
+        results=[
+            AgentResultIn(
+                origin_id=current.id,
+                target=old_target,
+                port=current.port,
+                success=False,
+                rtt_ms=None,
+                error="old target failed",
+            )
+        ]
+    )
+
+    agent_results(payload, request(), agent=agent, db=db)
+
+    states = db.query(ProbeState).filter(ProbeState.origin_id.in_([current.id, backup.id])).all()
+    results = db.query(ProbeResult).filter(ProbeResult.origin_id.in_([current.id, backup.id])).all()
+
+    assert states == []
+    assert results == []
+
+
 def test_agent_results_do_not_update_origin_assigned_to_another_probe():
     db = make_session()
     current, backup, primary_agent = make_group_with_duplicate_origins(db)

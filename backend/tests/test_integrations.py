@@ -10,7 +10,7 @@ from app.integrations import (
     trigger_ip_change_for_origin,
     update_azpanel_settings,
 )
-from app.models import AzPanelRemoteResource, AzPanelResource, CloudflareCredential, FailoverGroup, Origin, User, XboardNodeBinding, Zone
+from app.models import AzPanelRemoteResource, AzPanelResource, CloudflareCredential, FailoverGroup, Origin, ProbeState, User, XboardNodeBinding, Zone
 from app.security import encrypt_secret
 
 
@@ -244,3 +244,40 @@ def test_trigger_ip_change_for_origin_uses_bound_resource(monkeypatch):
     assert job.new_ip == "198.51.100.30"
     assert origin.target == "198.51.100.30"
     assert origin.status == "unknown"
+
+
+def test_trigger_ip_change_syncs_mismatched_resource_ip_before_changing(monkeypatch):
+    db = make_session()
+    update_azpanel_settings(db, {"enabled": True, "base_url": "https://az.example.com", "api_token": "secret-token"})
+    origin = make_origin(db)
+    origin.target = "1.1.1.1"
+    origin.port = 31111
+    origin.status = "machine_down"
+    resource = AzPanelResource(
+        name="aws-node",
+        provider="aws",
+        resource_id="i-123",
+        origin_id=origin.id,
+        current_ip="203.0.113.90",
+        port=31111,
+        auto_update_origin=True,
+    )
+    db.add(resource)
+    db.flush()
+    db.add(ProbeState(origin_id=origin.id, source_key="local", status="unhealthy"))
+    db.commit()
+    db.refresh(origin)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("stale origin IP should be synced, not changed")
+
+    monkeypatch.setattr("app.integrations.call_azpanel_change_ip", fail_if_called)
+
+    job = trigger_ip_change_for_origin(db, origin, "machine_down")
+
+    assert job is None
+    assert origin.target == "203.0.113.90"
+    assert origin.port == 31111
+    assert origin.status == "unknown"
+    assert origin.last_checked_at is None
+    assert origin.probe_states == []
