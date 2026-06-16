@@ -264,18 +264,23 @@ def _validate_same_name_records(group: FailoverGroup, hostname_entry: FailoverHo
     return records
 
 
-def publish_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
+def publish_origin(
+    db: Session,
+    group: FailoverGroup,
+    origin: Origin,
+    hostname_entries: list[FailoverHostname] | None = None,
+) -> dict:
     if is_expanded_origin(origin):
-        return publish_expanded_origin(db, group, origin)
+        return publish_expanded_origin(db, group, origin, hostname_entries=hostname_entries)
 
     record_type = record_type_for_target_type(origin.target_type)
 
     credential = group.zone.credential
     token = decrypt_secret(credential.token_encrypted)
     client = CloudflareClient(token)
-    hostname_entries = ensure_group_hostname_entries(db, group)
+    target_hostnames = hostname_entries if hostname_entries is not None else ensure_group_hostname_entries(db, group)
     managed_by_hostname = []
-    for hostname_entry in hostname_entries:
+    for hostname_entry in target_hostnames:
         if record_type == "CNAME" and origin.target.rstrip(".").lower() == hostname_entry.hostname.rstrip(".").lower():
             raise ValueError(f"CNAME 目标不能和当前主机名相同：{hostname_entry.hostname}")
         managed_by_hostname.append(
@@ -329,7 +334,12 @@ def publish_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
     }
 
 
-def publish_expanded_origin(db: Session, group: FailoverGroup, origin: Origin) -> dict:
+def publish_expanded_origin(
+    db: Session,
+    group: FailoverGroup,
+    origin: Origin,
+    hostname_entries: list[FailoverHostname] | None = None,
+) -> dict:
     if origin.target_type != "hostname":
         raise ValueError("只有域名目标可以展开发布为 IP 池")
     selected_ip = selected_healthy_ip(origin)
@@ -339,10 +349,10 @@ def publish_expanded_origin(db: Session, group: FailoverGroup, origin: Origin) -
     credential = group.zone.credential
     token = decrypt_secret(credential.token_encrypted)
     client = CloudflareClient(token)
-    hostname_entries = ensure_group_hostname_entries(db, group)
+    target_hostnames = hostname_entries if hostname_entries is not None else ensure_group_hostname_entries(db, group)
     managed_by_hostname = [
         (hostname_entry, _validate_same_name_records(group, hostname_entry, _same_name_records(client, group, hostname_entry)))
-        for hostname_entry in hostname_entries
+        for hostname_entry in target_hostnames
     ]
 
     created_records = []

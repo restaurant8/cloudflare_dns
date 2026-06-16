@@ -168,6 +168,60 @@ def test_add_group_hostname_publishes_current_origin(monkeypatch):
     }
 
 
+def test_add_group_hostname_only_publishes_new_hostname(monkeypatch):
+    class OnlyNewHostnameClient(FakeCloudflareClient):
+        records = [
+            {
+                "id": "record-1",
+                "name": "www.example.com",
+                "type": "A",
+                "content": "192.0.2.10",
+                "ttl": 60,
+                "proxied": False,
+            },
+            {
+                "id": "record-2",
+                "name": "api.example.com",
+                "type": "A",
+                "content": "192.0.2.99",
+                "ttl": 60,
+                "proxied": False,
+            },
+        ]
+        updated_names: list[str] = []
+
+        def update_dns_record(self, zone_id: str, record_id: str, record: dict):
+            existing = next(item for item in self.records if item["id"] == record_id)
+            if existing["name"] == "www.example.com":
+                raise AssertionError("primary hostname should not be republished while adding another hostname")
+            self.updated_names.append(existing["name"])
+            return super().update_dns_record(zone_id, record_id, record)
+
+    monkeypatch.setattr("app.routes.groups.CloudflareClient", OnlyNewHostnameClient)
+    monkeypatch.setattr("app.failover.CloudflareClient", OnlyNewHostnameClient)
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = create_group(
+        FailoverGroupCreate(
+            zone_id=zone.id,
+            hostname="www.example.com",
+            adopt_record_id="record-1",
+            primary_port=22,
+        ),
+        user,
+        db,
+    )
+
+    updated = add_group_hostname(group.id, FailoverHostnameCreate(hostname="api.example.com", adopt_record_id="record-2"), user, db)
+
+    assert {item.hostname for item in updated.hostnames} == {"www.example.com", "api.example.com"}
+    assert OnlyNewHostnameClient.updated_names == ["api.example.com"]
+    assert {(item["name"], item["content"]) for item in OnlyNewHostnameClient.records} == {
+        ("www.example.com", "192.0.2.10"),
+        ("api.example.com", "192.0.2.10"),
+    }
+
+
 def test_add_group_hostname_keeps_hostname_when_publish_fails(monkeypatch):
     class PublishFailClient(FakeCloudflareClient):
         records = [

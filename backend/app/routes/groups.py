@@ -631,7 +631,7 @@ def add_group_hostname(group_id: int, payload: FailoverHostnameCreate, _: User =
     current_origin = db.get(Origin, group.current_origin_id) if group.current_origin_id else None
     if group.enabled and current_origin and current_origin.enabled:
         try:
-            publish_origin(db, group, current_origin)
+            publish_origin(db, group, current_origin, hostname_entries=[hostname_entry])
         except Exception as exc:
             message = f"DNS 发布失败，主域名已保存但暂未完全接管：{exc}"
             group.last_error = message
