@@ -191,6 +191,10 @@ def _record_matches(record: dict, record_type: str, content: str) -> bool:
     )
 
 
+def _record_has_same_identity(record: dict, record_type: str, content: str) -> bool:
+    return record.get("type") == record_type and _normalize_dns_content(record_type, record.get("content")) == _normalize_dns_content(record_type, content)
+
+
 def _is_identical_record_error(exc: CloudflareError) -> bool:
     return "identical record already exists" in str(exc).lower()
 
@@ -207,8 +211,10 @@ def _create_dns_record_or_adopt(
         if not _is_identical_record_error(exc):
             raise
         for record in _same_name_records(client, group, hostname_entry):
-            if _record_matches(record, body["type"], body["content"]):
-                return record
+            if _record_has_same_identity(record, body["type"], body["content"]):
+                if _record_matches(record, body["type"], body["content"]):
+                    return record
+                return client.update_dns_record(group.zone.cf_zone_id, record["id"], body)
         raise
 
 

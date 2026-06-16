@@ -188,6 +188,65 @@ def test_publish_origin_adopts_identical_record_created_outside_managed_ids(monk
     assert IdenticalCreateClient.create_attempts == 1
 
 
+def test_publish_origin_converts_identical_proxied_record_to_dns_only(monkeypatch):
+    class IdenticalProxiedClient:
+        records = [
+            {"id": "record-1", "name": "www.example.com", "type": "A", "content": "192.0.2.1", "ttl": 60, "proxied": False}
+        ]
+        hidden_record = {
+            "id": "api-proxied",
+            "name": "api.example.com",
+            "type": "A",
+            "content": "192.0.2.20",
+            "ttl": 1,
+            "proxied": True,
+        }
+        create_attempts = 0
+
+        def __init__(self, token: str):
+            self.token = token
+
+        def list_dns_records(self, zone_id: str, name: str | None = None):
+            records = list(self.__class__.records)
+            if self.__class__.create_attempts:
+                records.append(self.__class__.hidden_record)
+            return [record for record in records if name is None or record["name"] == name]
+
+        def update_dns_record(self, zone_id: str, record_id: str, record: dict):
+            if record_id == self.__class__.hidden_record["id"]:
+                self.__class__.hidden_record.update(record)
+                return {**self.__class__.hidden_record}
+            existing = next(item for item in self.__class__.records if item["id"] == record_id)
+            existing.update(record)
+            return {**existing}
+
+        def create_dns_record(self, zone_id: str, record: dict):
+            if record["name"] == "api.example.com" and record["content"] == "192.0.2.20":
+                self.__class__.create_attempts += 1
+                raise CloudflareError("An identical record already exists.", 400, {})
+            created = {"id": "new-record", **record}
+            self.__class__.records.append(created)
+            return created
+
+        def delete_dns_record(self, zone_id: str, record_id: str):
+            self.__class__.records = [record for record in self.__class__.records if record["id"] != record_id]
+
+    monkeypatch.setattr("app.failover.CloudflareClient", IdenticalProxiedClient)
+    db = make_session()
+    group, origin_model = setup_group(db, "192.0.2.20")
+    db.add(FailoverHostname(group_id=group.id, hostname="www.example.com", current_record_id="record-1"))
+    api_hostname = FailoverHostname(group_id=group.id, hostname="api.example.com")
+    db.add(api_hostname)
+    db.commit()
+
+    record = publish_origin(db, group, origin_model)
+
+    assert record["id"] == "record-1,api-proxied"
+    assert api_hostname.current_record_id == "api-proxied"
+    assert IdenticalProxiedClient.hidden_record["proxied"] is False
+    assert IdenticalProxiedClient.hidden_record["ttl"] == 60
+
+
 def test_publish_origin_creates_cname_for_hostname(monkeypatch):
     FakeCloudflareClient.records = []
     monkeypatch.setattr("app.failover.CloudflareClient", FakeCloudflareClient)
