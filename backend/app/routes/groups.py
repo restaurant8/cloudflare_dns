@@ -67,6 +67,10 @@ def _validate_preferred_agent_id(db: Session, agent_id: int | None) -> int | Non
     return agent.id
 
 
+def _normalize_probe_mode(value: str | None) -> str:
+    return value if value in {"default", "local_only", "china_only", "any"} else "default"
+
+
 def _group_query(db: Session):
     return db.query(FailoverGroup).options(
         selectinload(FailoverGroup.hostnames),
@@ -117,6 +121,7 @@ def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreat
         port=payload.port,
         priority=payload.priority,
         preferred_agent_id=_validate_preferred_agent_id(db, payload.preferred_agent_id),
+        probe_mode=_normalize_probe_mode(payload.probe_mode),
         remark=_normalize_remark(payload.remark),
         enabled=payload.enabled,
     )
@@ -166,6 +171,7 @@ def _global_origin_from_payload(db: Session, collection: FailoverCollection, pay
         port=payload.port,
         priority=payload.priority,
         preferred_agent_id=_validate_preferred_agent_id(db, payload.preferred_agent_id),
+        probe_mode=_normalize_probe_mode(payload.probe_mode),
         remark=_normalize_remark(payload.remark),
         enabled=payload.enabled,
     )
@@ -191,9 +197,13 @@ def _copy_global_origin_to_origin(origin: Origin, global_origin: FailoverGlobalO
         or origin.port != global_origin.port
         or origin.publish_mode != global_origin.publish_mode
     )
-    probe_source_changed = origin.preferred_agent_id != global_origin.preferred_agent_id
+    probe_source_changed = (
+        origin.preferred_agent_id != global_origin.preferred_agent_id
+        or origin.probe_mode != global_origin.probe_mode
+    )
     origin.global_origin_id = global_origin.id
     origin.preferred_agent_id = global_origin.preferred_agent_id
+    origin.probe_mode = global_origin.probe_mode
     origin.target = global_origin.target
     origin.target_type = global_origin.target_type
     origin.publish_mode = global_origin.publish_mode
@@ -434,6 +444,7 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
     new_port = global_origin.port
     new_publish_mode = global_origin.publish_mode
     new_preferred_agent_id = global_origin.preferred_agent_id
+    new_probe_mode = global_origin.probe_mode
     if "target" in updates and updates["target"] is not None:
         target_info = parse_target(updates.pop("target"))
         if target_info.record_type == "CNAME" and target_info.value in _collection_hostname_values(global_origin.collection):
@@ -450,6 +461,8 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
         raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
     if "preferred_agent_id" in updates:
         new_preferred_agent_id = _validate_preferred_agent_id(db, updates.pop("preferred_agent_id"))
+    if "probe_mode" in updates:
+        new_probe_mode = _normalize_probe_mode(updates.pop("probe_mode"))
     _ensure_global_origin_unique(db, global_origin.collection_id, new_target, new_port, exclude_id=global_origin.id)
     _ensure_global_origin_update_has_no_group_conflicts(db, global_origin, new_target, new_port)
 
@@ -458,6 +471,7 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
     global_origin.publish_mode = new_publish_mode if new_target_type == "hostname" else DIRECT_PUBLISH_MODE
     global_origin.port = new_port
     global_origin.preferred_agent_id = new_preferred_agent_id
+    global_origin.probe_mode = new_probe_mode
     if priority_updates_provided:
         _apply_expanded_ip_priorities(global_origin, priority_updates if new_target_type == "hostname" else {})
     elif new_target_type != "hostname":
@@ -776,6 +790,7 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     new_port = origin.port
     new_publish_mode = origin.publish_mode
     new_preferred_agent_id = origin.preferred_agent_id
+    new_probe_mode = origin.probe_mode
     if "target" in updates and updates["target"] is not None:
         target_info = parse_target(updates.pop("target"))
         if target_info.record_type == "CNAME" and target_info.value in _group_hostname_values(group):
@@ -792,6 +807,10 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     preferred_agent_update_provided = "preferred_agent_id" in updates
     if preferred_agent_update_provided:
         new_preferred_agent_id = _validate_preferred_agent_id(db, updates.pop("preferred_agent_id"))
+
+    probe_mode_update_provided = "probe_mode" in updates
+    if probe_mode_update_provided:
+        new_probe_mode = _normalize_probe_mode(updates.pop("probe_mode"))
 
     priority_updates_provided = "expanded_ip_priorities" in updates
     priority_updates = updates.pop("expanded_ip_priorities", None) if priority_updates_provided else None
@@ -810,13 +829,17 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
         raise HTTPException(status_code=409, detail=f"{new_target}:{new_port} 已经在备用目标池中")
 
     endpoint_changed = new_target != origin.target or new_port != origin.port or new_publish_mode != origin.publish_mode
-    probe_source_changed = preferred_agent_update_provided and new_preferred_agent_id != origin.preferred_agent_id
+    probe_source_changed = (
+        (preferred_agent_update_provided and new_preferred_agent_id != origin.preferred_agent_id)
+        or (probe_mode_update_provided and new_probe_mode != origin.probe_mode)
+    )
     target_changed = new_target != origin.target or new_target_type != origin.target_type or new_publish_mode != origin.publish_mode
     old_expanded_ip_priorities = expanded_ip_priorities(origin)
     origin.target = new_target
     origin.target_type = new_target_type
     origin.publish_mode = new_publish_mode if new_target_type == "hostname" else DIRECT_PUBLISH_MODE
     origin.preferred_agent_id = new_preferred_agent_id
+    origin.probe_mode = new_probe_mode
     if priority_updates_provided:
         _apply_expanded_ip_priorities(origin, priority_updates if new_target_type == "hostname" else {})
     elif new_target_type != "hostname":

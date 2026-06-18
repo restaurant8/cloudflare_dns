@@ -294,6 +294,36 @@ def test_agent_tasks_origin_preferred_probe_overrides_default_probe():
     assert preferred_response.tasks[0].target == current.target
 
 
+def test_agent_tasks_skip_local_only_origin():
+    db = make_session()
+    current, backup, agent = make_group_with_duplicate_origins(db)
+    backup.enabled = False
+    current.probe_mode = "local_only"
+    db.commit()
+
+    response = agent_tasks(request(), agent=agent, db=db)
+
+    assert response.tasks == []
+
+
+def test_agent_tasks_any_probe_mode_uses_china_probe_not_foreign_probe():
+    db = make_session()
+    current, backup, china_agent = make_group_with_duplicate_origins(db)
+    backup.enabled = False
+    current.probe_mode = "any"
+    foreign_agent = Agent(name="foreign", region="foreign", token_hash="hash-2", status="online", last_seen_at=datetime.utcnow())
+    db.add(foreign_agent)
+    db.commit()
+    db.refresh(foreign_agent)
+
+    china_response = agent_tasks(request(), agent=china_agent, db=db)
+    foreign_response = agent_tasks(request(), agent=foreign_agent, db=db)
+
+    assert len(china_response.tasks) == 1
+    assert china_response.tasks[0].target == current.target
+    assert foreign_response.tasks == []
+
+
 def test_agent_tasks_use_second_same_region_probe_after_first_fails():
     db = make_session()
     current, _, primary_agent = make_group_with_duplicate_origins(db)

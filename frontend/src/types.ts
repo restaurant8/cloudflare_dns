@@ -51,6 +51,7 @@ export type Origin = {
   target: string;
   target_type: string;
   publish_mode: string;
+  probe_mode: string;
   port: number;
   priority: number;
   remark: string | null;
@@ -98,6 +99,7 @@ export type FailoverGlobalOrigin = {
   target: string;
   target_type: string;
   publish_mode: string;
+  probe_mode: string;
   port: number;
   priority: number;
   expanded_ip_priorities: Record<string, number>;

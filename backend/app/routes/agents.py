@@ -9,12 +9,17 @@ from ..agent_installer import build_install_script
 from ..database import get_db
 from ..deps import get_agent, get_current_user
 from ..health import (
+    CHINA_AGENT_REGION,
+    PROBE_MODE_ANY,
+    PROBE_MODE_CHINA_ONLY,
+    PROBE_MODE_LOCAL_ONLY,
     active_agents,
     agent_region,
     apply_probe_result,
     default_agent_chain,
     mark_agent_online,
     origin_needs_probe,
+    origin_probe_mode,
     prioritize_global_origin_checks,
     refresh_expanded_origin_ips,
     sync_probe_states_from_origin,
@@ -73,7 +78,14 @@ def _should_agent_probe_target(agent: Agent, same_region_agents: list[Agent], or
 
 
 def _result_allowed_for_agent(origin: Origin, agent: Agent) -> bool:
-    return not origin.preferred_agent_id or origin.preferred_agent_id == agent.id
+    mode = origin_probe_mode(origin)
+    if mode == PROBE_MODE_LOCAL_ONLY:
+        return False
+    if origin.preferred_agent_id:
+        return origin.preferred_agent_id == agent.id
+    if mode in {PROBE_MODE_CHINA_ONLY, PROBE_MODE_ANY}:
+        return agent_region(agent) == CHINA_AGENT_REGION
+    return True
 
 
 def _matching_origins_for_probe(origins: list[Origin], target: str, port: int) -> list[Origin]:
@@ -211,8 +223,13 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
     origins_to_probe, _ = prioritize_global_origin_checks(origin_candidates)
 
     for origin in origins_to_probe:
-        if origin.preferred_agent_id:
+        mode = origin_probe_mode(origin)
+        if mode == PROBE_MODE_LOCAL_ONLY:
+            agent_chain = []
+        elif origin.preferred_agent_id:
             agent_chain = [agent] if origin.preferred_agent_id == agent.id and agent.enabled else []
+        elif mode in {PROBE_MODE_CHINA_ONLY, PROBE_MODE_ANY}:
+            agent_chain = same_region_agents if agent_region(agent) == CHINA_AGENT_REGION else []
         elif default_chain is not None:
             agent_chain = default_chain
         else:

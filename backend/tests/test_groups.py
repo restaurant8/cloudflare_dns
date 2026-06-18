@@ -324,13 +324,14 @@ def test_create_global_origin_syncs_to_all_collection_groups():
 
     updated = create_global_origin(
         collection.id,
-        FailoverGlobalOriginCreate(target="192.0.2.20", port=22, priority=30, remark="通用备用", preferred_agent_id=agent.id),
+        FailoverGlobalOriginCreate(target="192.0.2.20", port=22, priority=30, remark="通用备用", preferred_agent_id=agent.id, probe_mode="any"),
         user,
         db,
     )
 
     assert len(updated.global_origins) == 1
     assert updated.global_origins[0].preferred_agent_id == agent.id
+    assert updated.global_origins[0].probe_mode == "any"
     for group in db.query(FailoverGroup).filter(FailoverGroup.collection_id == collection.id).all():
         mirrors = [origin for origin in group.origins if origin.global_origin_id == updated.global_origins[0].id]
         assert len(mirrors) == 1
@@ -338,6 +339,7 @@ def test_create_global_origin_syncs_to_all_collection_groups():
         assert mirrors[0].priority == 30
         assert mirrors[0].remark == "通用备用"
         assert mirrors[0].preferred_agent_id == agent.id
+        assert mirrors[0].probe_mode == "any"
 
 
 def test_update_global_origin_updates_all_mirrored_origins():
@@ -372,7 +374,7 @@ def test_update_global_origin_updates_all_mirrored_origins():
 
     update_global_origin(
         global_origin.id,
-        FailoverGlobalOriginUpdate(target="2001:db8::20", port=443, priority=5, remark="新备用", preferred_agent_id=second_agent.id, enabled=False),
+        FailoverGlobalOriginUpdate(target="2001:db8::20", port=443, priority=5, remark="新备用", preferred_agent_id=second_agent.id, probe_mode="local_only", enabled=False),
         user,
         db,
     )
@@ -384,6 +386,7 @@ def test_update_global_origin_updates_all_mirrored_origins():
     assert mirror.priority == 5
     assert mirror.remark == "新备用"
     assert mirror.preferred_agent_id == second_agent.id
+    assert mirror.probe_mode == "local_only"
     assert mirror.enabled is False
     assert mirror.probe_states == []
 

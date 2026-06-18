@@ -108,6 +108,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
         return {
             "global_origin_id": "ALTER TABLE origins ADD COLUMN global_origin_id INT NULL",
             "preferred_agent_id": "ALTER TABLE origins ADD COLUMN preferred_agent_id INT NULL",
+            "probe_mode": "ALTER TABLE origins ADD COLUMN probe_mode VARCHAR(20) NOT NULL DEFAULT 'default'",
             "publish_mode": "ALTER TABLE origins ADD COLUMN publish_mode VARCHAR(20) NOT NULL DEFAULT 'direct'",
             "remark": "ALTER TABLE origins ADD COLUMN remark TEXT NULL",
             "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NULL",
@@ -118,6 +119,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
     return {
         "global_origin_id": "ALTER TABLE origins ADD COLUMN global_origin_id INTEGER",
         "preferred_agent_id": "ALTER TABLE origins ADD COLUMN preferred_agent_id INTEGER",
+        "probe_mode": "ALTER TABLE origins ADD COLUMN probe_mode VARCHAR(20) NOT NULL DEFAULT 'default'",
         "publish_mode": "ALTER TABLE origins ADD COLUMN publish_mode VARCHAR(20) NOT NULL DEFAULT 'direct'",
         "remark": "ALTER TABLE origins ADD COLUMN remark TEXT",
         "resolved_ips_json": "ALTER TABLE origins ADD COLUMN resolved_ips_json TEXT NOT NULL DEFAULT '[]'",
@@ -139,10 +141,12 @@ def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":
         return {
             "preferred_agent_id": "ALTER TABLE failover_global_origins ADD COLUMN preferred_agent_id INT NULL",
+            "probe_mode": "ALTER TABLE failover_global_origins ADD COLUMN probe_mode VARCHAR(20) NOT NULL DEFAULT 'default'",
             "expanded_ip_priorities_json": "ALTER TABLE failover_global_origins ADD COLUMN expanded_ip_priorities_json TEXT NULL",
         }
     return {
         "preferred_agent_id": "ALTER TABLE failover_global_origins ADD COLUMN preferred_agent_id INTEGER",
+        "probe_mode": "ALTER TABLE failover_global_origins ADD COLUMN probe_mode VARCHAR(20) NOT NULL DEFAULT 'default'",
         "expanded_ip_priorities_json": "ALTER TABLE failover_global_origins ADD COLUMN expanded_ip_priorities_json TEXT NOT NULL DEFAULT '{}'",
     }
 

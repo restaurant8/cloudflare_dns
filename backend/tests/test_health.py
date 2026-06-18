@@ -17,7 +17,7 @@ from app.models import (
     ProbeState,
     Zone,
 )
-from app.origin_expansion import EXPANDED_PUBLISH_MODE, healthy_ips, resolved_ips, set_published_ips
+from app.origin_expansion import EXPANDED_PUBLISH_MODE, expanded_source_key, healthy_ips, resolved_ips, set_published_ips, set_resolved_ips
 from app.security import encrypt_secret
 
 
@@ -80,6 +80,58 @@ def test_origin_blocked_when_local_healthy_but_china_agent_fails():
 
     assert origin.status == "blocked"
     assert "疑似被墙" in origin.last_error
+
+
+def test_origin_local_only_ignores_china_agent_failure():
+    db = make_session()
+    origin, agent = make_origin_with_agent(db)
+    origin.probe_mode = "local_only"
+    db.commit()
+    set_probe(db, origin, LOCAL_SOURCE, "healthy")
+    set_probe(db, origin, f"agent:{agent.id}", "unhealthy")
+
+    recalculate_origin_status(db, origin)
+
+    assert origin.status == "healthy"
+    assert origin.last_error is None
+
+
+def test_origin_china_only_ignores_local_failure():
+    db = make_session()
+    origin, agent = make_origin_with_agent(db)
+    origin.probe_mode = "china_only"
+    db.commit()
+    set_probe(db, origin, LOCAL_SOURCE, "unhealthy")
+    set_probe(db, origin, f"agent:{agent.id}", "healthy")
+
+    recalculate_origin_status(db, origin)
+
+    assert origin.status == "healthy"
+    assert origin.last_error is None
+
+
+def test_origin_any_probe_mode_accepts_local_or_china_health():
+    db = make_session()
+    origin, agent = make_origin_with_agent(db)
+    origin.probe_mode = "any"
+    db.commit()
+    set_probe(db, origin, LOCAL_SOURCE, "healthy")
+    set_probe(db, origin, f"agent:{agent.id}", "unhealthy")
+
+    recalculate_origin_status(db, origin)
+
+    assert origin.status == "healthy"
+
+    db = make_session()
+    origin, agent = make_origin_with_agent(db)
+    origin.probe_mode = "any"
+    db.commit()
+    set_probe(db, origin, LOCAL_SOURCE, "unhealthy")
+    set_probe(db, origin, f"agent:{agent.id}", "healthy")
+
+    recalculate_origin_status(db, origin)
+
+    assert origin.status == "healthy"
 
 
 def test_stale_china_probe_waits_instead_of_marking_blocked():
@@ -254,7 +306,7 @@ def test_origin_machine_down_when_local_and_china_agent_fail():
     assert "机器挂了" in origin.last_error
 
 
-def test_origin_regional_issue_when_local_fails_but_china_agent_is_healthy():
+def test_origin_stays_healthy_when_local_fails_but_china_agent_is_healthy():
     db = make_session()
     origin, agent = make_origin_with_agent(db)
     set_probe(db, origin, LOCAL_SOURCE, "unhealthy")
@@ -262,7 +314,8 @@ def test_origin_regional_issue_when_local_fails_but_china_agent_is_healthy():
 
     recalculate_origin_status(db, origin)
 
-    assert origin.status == "regional_issue"
+    assert origin.status == "healthy"
+    assert origin.last_error is None
 
 
 def test_mark_stale_agents_sends_offline_status(monkeypatch):
@@ -499,3 +552,37 @@ def test_expanded_hostname_checks_each_resolved_ip_and_keeps_healthy_pool(monkey
 
     assert origin.status == "healthy"
     assert healthy_ips(origin) == ["192.0.2.10"]
+
+
+def test_expanded_hostname_keeps_china_healthy_ip_when_local_fails():
+    db = make_session()
+    credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
+    db.add(credential)
+    db.flush()
+    zone = Zone(credential_id=credential.id, cf_zone_id="zone-1", name="example.com")
+    db.add(zone)
+    db.flush()
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com")
+    db.add(group)
+    db.flush()
+    origin = Origin(
+        group_id=group.id,
+        target="backup.example.net",
+        target_type="hostname",
+        publish_mode=EXPANDED_PUBLISH_MODE,
+        port=443,
+        priority=10,
+    )
+    agent = Agent(name="china", region="china", token_hash="hash", status="online", last_seen_at=datetime.utcnow())
+    db.add_all([origin, agent])
+    db.commit()
+    set_resolved_ips(origin, ["192.0.2.10", "192.0.2.20"])
+    for ip in ["192.0.2.10", "192.0.2.20"]:
+        set_probe(db, origin, expanded_source_key(LOCAL_SOURCE, ip), "unhealthy")
+    set_probe(db, origin, expanded_source_key(f"agent:{agent.id}", "192.0.2.10"), "unhealthy")
+    set_probe(db, origin, expanded_source_key(f"agent:{agent.id}", "192.0.2.20"), "healthy")
+
+    recalculate_origin_status(db, origin)
+
+    assert origin.status == "healthy"
+    assert healthy_ips(origin) == ["192.0.2.20"]

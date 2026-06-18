@@ -33,8 +33,9 @@ import type { Agent, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Cr
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
-type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; remark: string; enabled: boolean };
-type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; remark: string; enabled: boolean };
+type ProbeMode = "default" | "local_only" | "china_only" | "any";
+type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean };
+type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean };
 type GlobalOriginDraft = OriginAddDraft;
 type CollectionDraft = { name: string };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | "" };
@@ -140,6 +141,21 @@ function agentRegionText(value: string): string {
 
 function agentSelectLabel(agent: Agent): string {
   return `${agent.name}${agent.is_default ? " · 默认" : ""} · ${agentRegionText(agent.region)} · ${agent.enabled ? "启用" : "停用"}`;
+}
+
+const probeModeOptions: { value: ProbeMode; label: string }[] = [
+  { value: "default", label: "默认：本地 + 探针综合判断" },
+  { value: "local_only", label: "只看本地检测" },
+  { value: "china_only", label: "只看国内探针" },
+  { value: "any", label: "本地或国内任一可用" }
+];
+
+function normalizeProbeMode(value?: string | null): ProbeMode {
+  return value === "local_only" || value === "china_only" || value === "any" ? value : "default";
+}
+
+function probeModeText(value?: string | null): string {
+  return probeModeOptions.find((option) => option.value === normalizeProbeMode(value))?.label || probeModeOptions[0].label;
 }
 
 function telegramNotifyLevelText(value: string): string {
@@ -348,8 +364,8 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", remark: "", enabled: true };
-const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", remark: "", enabled: true };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true };
+const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true };
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
@@ -1789,6 +1805,7 @@ function GroupsPanel({
       publish_mode: "direct",
       expanded_ip_priorities: {},
       preferred_agent_id: "",
+      probe_mode: "default",
       remark: "",
       enabled: true
     });
@@ -1810,6 +1827,7 @@ function GroupsPanel({
             publish_mode: globalAddTargetType === "hostname" ? globalOriginAdd.publish_mode : "direct",
             expanded_ip_priorities: globalAddTargetType === "hostname" ? globalOriginAdd.expanded_ip_priorities : {},
             preferred_agent_id: globalOriginAdd.preferred_agent_id === "" ? null : globalOriginAdd.preferred_agent_id,
+            probe_mode: globalOriginAdd.probe_mode,
             remark: globalOriginAdd.remark.trim() || null,
             enabled: globalOriginAdd.enabled
           })
@@ -1834,6 +1852,7 @@ function GroupsPanel({
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
         preferred_agent_id: origin.preferred_agent_id || "",
+        probe_mode: normalizeProbeMode(origin.probe_mode),
         remark: origin.remark || "",
         enabled: origin.enabled
       }
@@ -1853,7 +1872,8 @@ function GroupsPanel({
             target: draft.target.trim(),
             remark: draft.remark.trim() || null,
             publish_mode: targetType === "hostname" ? draft.publish_mode : "direct",
-            preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id
+            preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id,
+            probe_mode: draft.probe_mode
           })
         }),
       "全局备用已同步更新",
@@ -1872,6 +1892,7 @@ function GroupsPanel({
       publish_mode: "direct",
       expanded_ip_priorities: {},
       preferred_agent_id: "",
+      probe_mode: "default",
       remark: "",
       enabled: true
     });
@@ -1923,6 +1944,7 @@ function GroupsPanel({
             publish_mode: addTargetType === "hostname" ? originAdd.publish_mode : "direct",
             expanded_ip_priorities: addTargetType === "hostname" ? originAdd.expanded_ip_priorities : {},
             preferred_agent_id: originAdd.preferred_agent_id === "" ? null : originAdd.preferred_agent_id,
+            probe_mode: originAdd.probe_mode,
             remark: originAdd.remark.trim() || null,
             enabled: originAdd.enabled
           })
@@ -2017,6 +2039,7 @@ function GroupsPanel({
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
         preferred_agent_id: origin.preferred_agent_id || "",
+        probe_mode: normalizeProbeMode(origin.probe_mode),
         remark: origin.remark || "",
         enabled: origin.enabled
       }
@@ -2030,7 +2053,8 @@ function GroupsPanel({
     const payload = {
       ...draft,
       publish_mode: targetType === "hostname" ? draft.publish_mode : "direct",
-      preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id
+      preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id,
+      probe_mode: draft.probe_mode
     };
     await act(
       () =>
@@ -2119,6 +2143,8 @@ function GroupsPanel({
       priority: origin.priority,
       publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
       expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
+      preferred_agent_id: origin.preferred_agent_id || "",
+      probe_mode: normalizeProbeMode(origin.probe_mode),
       remark: origin.remark || "",
       enabled: origin.enabled
     };
@@ -2158,6 +2184,24 @@ function GroupsPanel({
             </select>
           </label>
           <label>
+            探针策略
+            <select
+              value={draft.probe_mode}
+              onChange={(event) =>
+                setGlobalOriginEdits((current) => ({
+                  ...current,
+                  [origin.id]: { ...draft, probe_mode: event.target.value as ProbeMode }
+                }))
+              }
+            >
+              {probeModeOptions.map((option) => (
+                <option value={option.value} key={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
             备注
             <input value={draft.remark} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, remark: event.target.value } }))} />
           </label>
@@ -2192,6 +2236,7 @@ function GroupsPanel({
           <span>
             {targetTypeText(origin.target_type)} · 优先级 {origin.priority} · 发布为 {recordTypeForTargetType(origin.target_type, origin.publish_mode)} · {origin.enabled ? "已启用" : "已停用"}
             {preferredAgent ? ` · 指定探针 ${preferredAgent.name}` : ""}
+            {normalizeProbeMode(origin.probe_mode) !== "default" ? ` · ${probeModeText(origin.probe_mode)}` : ""}
           </span>
         </div>
         <div className="rowActions">
@@ -2416,6 +2461,8 @@ function GroupsPanel({
                         priority: origin.priority,
                         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
                         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
+                        preferred_agent_id: origin.preferred_agent_id || "",
+                        probe_mode: normalizeProbeMode(origin.probe_mode),
                         remark: origin.remark || "",
                         enabled: origin.enabled
                       };
@@ -2464,6 +2511,24 @@ function GroupsPanel({
                                     {agents.map((agent) => (
                                       <option value={agent.id} key={agent.id}>
                                         {agentSelectLabel(agent)}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label>
+                                  探针策略
+                                  <select
+                                    value={originEdit.probe_mode}
+                                    onChange={(event) =>
+                                      setOriginEdits((current) => ({
+                                        ...current,
+                                        [origin.id]: { ...originEdit, probe_mode: event.target.value as ProbeMode }
+                                      }))
+                                    }
+                                  >
+                                    {probeModeOptions.map((option) => (
+                                      <option value={option.value} key={option.value}>
+                                        {option.label}
                                       </option>
                                     ))}
                                   </select>
@@ -2519,6 +2584,7 @@ function GroupsPanel({
                                     <span className={`originBadge ${isPrimaryOrigin ? "primary" : "backup"}`}>{isPrimaryOrigin ? "主用" : "备用"}</span>
                                     <span className="originBadge record">{recordTypeForTargetType(origin.target_type, origin.publish_mode)}</span>
                                     {preferredAgent && <span className="originBadge record">指定探针 {preferredAgent.name}</span>}
+                                    {normalizeProbeMode(origin.probe_mode) !== "default" && <span className="originBadge record">{probeModeText(origin.probe_mode)}</span>}
                                   </div>
                                 </div>
                                 <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · {origin.enabled ? "已启用" : "已停用"} · {healthMeta}</span>
@@ -2645,6 +2711,16 @@ function GroupsPanel({
                   ))}
                 </select>
               </label>
+              <label>
+                探针策略
+                <select value={globalOriginAdd.probe_mode} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, probe_mode: event.target.value as ProbeMode }))}>
+                  {probeModeOptions.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
             <label className="inlineCheck">
               <input type="checkbox" checked={globalOriginAdd.enabled} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, enabled: event.target.checked }))} />
@@ -2754,6 +2830,16 @@ function GroupsPanel({
                   {agents.map((agent) => (
                     <option value={agent.id} key={agent.id}>
                       {agentSelectLabel(agent)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                探针策略
+                <select value={originAdd.probe_mode} onChange={(event) => setOriginAdd((current) => ({ ...current, probe_mode: event.target.value as ProbeMode }))}>
+                  {probeModeOptions.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label}
                     </option>
                   ))}
                 </select>

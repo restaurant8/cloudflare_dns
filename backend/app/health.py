@@ -25,9 +25,19 @@ from .runtime_settings import get_runtime_settings
 LOCAL_SOURCE = "local"
 CHINA_AGENT_REGION = "china"
 FOREIGN_AGENT_REGION = "foreign"
+PROBE_MODE_DEFAULT = "default"
+PROBE_MODE_LOCAL_ONLY = "local_only"
+PROBE_MODE_CHINA_ONLY = "china_only"
+PROBE_MODE_ANY = "any"
+PROBE_MODES = {PROBE_MODE_DEFAULT, PROBE_MODE_LOCAL_ONLY, PROBE_MODE_CHINA_ONLY, PROBE_MODE_ANY}
 ORIGIN_AVAILABLE_STATUS = "healthy"
 ORIGIN_UNAVAILABLE_STATUSES = {"unhealthy", "blocked", "machine_down", "regional_issue"}
 FINAL_ORIGIN_STATUSES = {ORIGIN_AVAILABLE_STATUS, *ORIGIN_UNAVAILABLE_STATUSES}
+
+
+def origin_probe_mode(origin: Origin) -> str:
+    mode = getattr(origin, "probe_mode", None) or PROBE_MODE_DEFAULT
+    return mode if mode in PROBE_MODES else PROBE_MODE_DEFAULT
 
 
 def origin_needs_probe(origin: Origin, include_all: bool = False) -> bool:
@@ -37,6 +47,12 @@ def origin_needs_probe(origin: Origin, include_all: bool = False) -> bool:
     if not group or not group.enabled or not origin.enabled:
         return False
     return True
+
+
+def origin_needs_local_probe(origin: Origin, include_all: bool = False) -> bool:
+    if not origin_needs_probe(origin, include_all=include_all):
+        return False
+    return origin_probe_mode(origin) != PROBE_MODE_CHINA_ONLY
 
 
 def _normalized_probe_target(target: str) -> str:
@@ -284,6 +300,39 @@ def _origin_remote_agent_source_keys(
     return _selected_agent_source_keys(chain, states, stale_before, target)
 
 
+def _origin_china_agent_source_keys(
+    db: Session,
+    origin: Origin,
+    states: dict[str, ProbeState],
+    stale_before: datetime,
+    target: str | None = None,
+) -> list[str]:
+    if origin.preferred_agent_id:
+        return _origin_remote_agent_source_keys(db, origin, states, stale_before, target) or []
+    china_agents, _ = active_agents_by_region(db, stale_before)
+    return _selected_agent_source_keys(china_agents, states, stale_before, target)
+
+
+def _probe_mode_source_keys(
+    db: Session,
+    origin: Origin,
+    states: dict[str, ProbeState],
+    stale_before: datetime,
+    target: str | None = None,
+) -> list[str] | None:
+    mode = origin_probe_mode(origin)
+    if mode == PROBE_MODE_DEFAULT:
+        return None
+    if mode == PROBE_MODE_LOCAL_ONLY:
+        return [LOCAL_SOURCE]
+    china_source_keys = _origin_china_agent_source_keys(db, origin, states, stale_before, target)
+    if mode == PROBE_MODE_CHINA_ONLY:
+        return china_source_keys
+    if mode == PROBE_MODE_ANY:
+        return [LOCAL_SOURCE, *china_source_keys]
+    return None
+
+
 def _aggregate_probe_state_keys(
     states: dict[str, ProbeState],
     source_keys: list[str],
@@ -404,6 +453,41 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
     stale_before = datetime.utcnow() - timedelta(seconds=max(settings.check_interval_seconds * 3, 90))
     probe_states = db.query(ProbeState).filter(ProbeState.origin_id == origin.id).all()
     states = {state.source_key: state for state in probe_states}
+    probe_mode_source_keys = _probe_mode_source_keys(db, origin, states, stale_before)
+    if probe_mode_source_keys is not None:
+        mode_status, mode_error = _aggregate_probe_state_keys(states, probe_mode_source_keys, stale_before)
+        if not probe_mode_source_keys:
+            origin.status = "unknown"
+            origin.last_error = "没有可用的国内探针"
+        elif mode_status == "healthy":
+            origin.status = "healthy"
+            origin.last_error = None
+        elif mode_status == "unknown":
+            origin.status = "unknown"
+            origin.last_error = mode_error or "等待所选探针策略的检测结果"
+        else:
+            origin.status = "machine_down" if origin_probe_mode(origin) == PROBE_MODE_ANY and len(probe_mode_source_keys) > 1 else "unhealthy"
+            origin.last_error = mode_error or "所选探针策略下目标不可达"
+
+        newest = max((state for state in probe_states if state.last_checked_at), key=lambda item: item.last_checked_at, default=None)
+        if newest:
+            origin.last_checked_at = newest.last_checked_at
+            origin.last_rtt_ms = newest.last_rtt_ms
+            if origin.status == "healthy":
+                origin.last_error = None
+
+        if old_status != origin.status and origin.status in FINAL_ORIGIN_STATUSES:
+            payload = {"origin_id": origin.id, "target": origin.target, "port": origin.port, "status": origin.status}
+            add_event(
+                db,
+                "origin.status_changed",
+                "info" if origin.status == "healthy" else "warning",
+                f"源站 {origin.target}:{origin.port} 状态变为 {origin.status}",
+                payload,
+            )
+            send_webhooks(db, "origin.status_changed", payload)
+        return
+
     remote_source_keys = _origin_remote_agent_source_keys(db, origin, states, stale_before)
     if remote_source_keys is None:
         china_agents, foreign_agents = active_agents_by_region(db, stale_before)
@@ -424,7 +508,10 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
     foreign_status = _aggregate_source_health(source_health, foreign_source_keys)
     china_status = _aggregate_source_health(source_health, china_source_keys)
 
-    if foreign_status == "healthy":
+    if china_status == "healthy":
+        origin.status = "healthy"
+        origin.last_error = None
+    elif foreign_status == "healthy":
         if china_status in {"healthy", "not_configured"}:
             origin.status = "healthy"
             origin.last_error = None
@@ -582,6 +669,61 @@ def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
     stale_before = datetime.utcnow() - timedelta(seconds=max(settings.check_interval_seconds * 3, 90))
     probe_states = db.query(ProbeState).filter(ProbeState.origin_id == origin.id).all()
     states = {state.source_key: state for state in probe_states}
+    if origin_probe_mode(origin) != PROBE_MODE_DEFAULT:
+        healthy: set[str] = set()
+        has_unknown = False
+        source_configured = False
+        first_error: str | None = None
+        for ip in ips:
+            source_keys = _probe_mode_source_keys(db, origin, states, stale_before, ip) or []
+            if source_keys:
+                source_configured = True
+            state_keys = [expanded_source_key(source_key, ip) for source_key in source_keys]
+            ip_status, ip_error = _aggregate_probe_state_keys(states, state_keys, stale_before)
+            if ip_status == "healthy":
+                healthy.add(ip)
+            elif ip_status == "unknown":
+                has_unknown = True
+            if ip_error and first_error is None:
+                first_error = ip_error
+
+        set_healthy_ips(origin, sorted(healthy))
+        if healthy:
+            origin.status = "healthy"
+            origin.last_error = None
+        elif not source_configured:
+            origin.status = "unknown"
+            origin.last_error = "没有可用的国内探针"
+        elif has_unknown:
+            origin.status = "unknown"
+            origin.last_error = first_error or "等待展开 IP 池的所选探针策略检测结果"
+        else:
+            origin.status = "machine_down" if origin_probe_mode(origin) == PROBE_MODE_ANY else "unhealthy"
+            origin.last_error = first_error or "展开 IP 池在所选探针策略下均不可达"
+
+        ips_set = set(ips)
+        expanded_states = [
+            state
+            for state in probe_states
+            if state.last_checked_at and split_expanded_source_key(state.source_key)[1] in ips_set
+        ]
+        newest = max(expanded_states, key=lambda item: item.last_checked_at, default=None)
+        if newest:
+            origin.last_checked_at = newest.last_checked_at
+            origin.last_rtt_ms = newest.last_rtt_ms
+
+        if old_status != origin.status and origin.status in FINAL_ORIGIN_STATUSES:
+            payload = {"origin_id": origin.id, "target": origin.target, "port": origin.port, "status": origin.status}
+            add_event(
+                db,
+                "origin.status_changed",
+                "info" if origin.status == "healthy" else "warning",
+                f"展开源站 {origin.target}:{origin.port} 状态变为 {origin.status}",
+                payload,
+            )
+            send_webhooks(db, "origin.status_changed", payload)
+        return
+
     remote_mode = _origin_remote_agent_source_keys(db, origin, states, stale_before) is not None
     if remote_mode:
         china_agents: list[Agent] = []
@@ -621,7 +763,7 @@ def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
             if china_error and "china" not in source_errors:
                 source_errors["china"] = china_error
 
-    final_healthy = foreign_healthy & china_healthy
+    final_healthy = china_healthy if remote_mode or china_agents else foreign_healthy
     set_healthy_ips(origin, sorted(final_healthy))
 
     foreign_status = "healthy" if foreign_healthy else ("unknown" if foreign_unknown else "unhealthy")
@@ -707,7 +849,7 @@ def run_local_checks(
     origins_to_check = [
         origin
         for origin in origins
-        if origin.group.enabled and origin_needs_probe(origin, include_all=include_all)
+        if origin.group.enabled and origin_needs_local_probe(origin, include_all=include_all)
     ]
     origins_to_probe, global_origin_ids = prioritize_global_origin_checks(origins_to_check)
     checked = 0

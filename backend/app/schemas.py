@@ -264,6 +264,7 @@ class OriginCreate(BaseModel):
     publish_mode: Literal["direct", "expanded"] = "direct"
     expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
     preferred_agent_id: int | None = None
+    probe_mode: Literal["default", "local_only", "china_only", "any"] = "default"
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool = True
 
@@ -279,6 +280,7 @@ class OriginUpdate(BaseModel):
     publish_mode: Literal["direct", "expanded"] | None = None
     expanded_ip_priorities: dict[str, int] | None = None
     preferred_agent_id: int | None = None
+    probe_mode: Literal["default", "local_only", "china_only", "any"] | None = None
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool | None = None
 
@@ -307,6 +309,7 @@ class OriginOut(BaseModel):
     group_id: int
     global_origin_id: int | None
     preferred_agent_id: int | None
+    probe_mode: str
     target: str
     target_type: str
     publish_mode: str
@@ -344,6 +347,7 @@ class FailoverGlobalOriginOut(BaseModel):
     id: int
     collection_id: int
     preferred_agent_id: int | None
+    probe_mode: str
     target: str
     target_type: str
     publish_mode: str
