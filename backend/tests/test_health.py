@@ -96,6 +96,19 @@ def test_origin_local_only_ignores_china_agent_failure():
     assert origin.last_error is None
 
 
+def test_origin_local_only_does_not_accept_china_health_when_local_fails():
+    db = make_session()
+    origin, agent = make_origin_with_agent(db)
+    origin.probe_mode = "local_only"
+    db.commit()
+    set_probe(db, origin, LOCAL_SOURCE, "unhealthy")
+    set_probe(db, origin, f"agent:{agent.id}", "healthy")
+
+    recalculate_origin_status(db, origin)
+
+    assert origin.status == "unhealthy"
+
+
 def test_origin_china_only_ignores_local_failure():
     db = make_session()
     origin, agent = make_origin_with_agent(db)
