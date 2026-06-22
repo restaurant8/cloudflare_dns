@@ -787,7 +787,7 @@ export default function App() {
         <main className="legacy-ui flex-1 p-4 md:p-6">
           {message && <div className={`notice ${messageTone}`} aria-live="polite">{message}</div>}
 
-          {section === "overview" && <OverviewPanel overview={overview} />}
+          {section === "overview" && <OverviewPanel overview={overview} token={token} act={act} setSection={setSection} />}
         {section === "cloudflare" && (
           <CloudflarePanel
             token={token}
@@ -907,26 +907,96 @@ function AuthScreen({
   );
 }
 
-function OverviewPanel({ overview }: { overview: Overview }) {
-  const cards = [
-    ["凭据", overview.credentials],
-    ["域名区域", overview.zones],
-    ["切换组", `${overview.enabled_groups}/${overview.groups}`],
-    ["源站", overview.origins],
-    ["不可用", overview.unhealthy_origins],
-    ["探针", overview.agents]
+function eventTone(severity: string): "info" | "warning" | "success" | "danger" {
+  if (severity === "error" || severity === "critical") return "danger";
+  if (severity === "warning") return "warning";
+  if (severity === "success") return "success";
+  return "info";
+}
+
+function OverviewPanel({ overview, token, act, setSection }: { overview: Overview; token: string; act: ActionRunner; setSection: (section: Section) => void }) {
+  const kpis: { label: string; value: string | number; icon: typeof Activity; danger?: boolean }[] = [
+    { label: "凭据", value: overview.credentials, icon: KeyRound },
+    { label: "域名区域", value: overview.zones, icon: Globe2 },
+    { label: "切换组", value: `${overview.enabled_groups}/${overview.groups}`, icon: ListRestart },
+    { label: "源站", value: overview.origins, icon: Server },
+    { label: "不可用", value: overview.unhealthy_origins, icon: PowerOff, danger: overview.unhealthy_origins > 0 },
+    { label: "探针", value: overview.agents, icon: RadioTower }
   ];
+  const healthy = Math.max(0, overview.origins - overview.unhealthy_origins);
+  const healthPct = overview.origins > 0 ? Math.round((healthy / overview.origins) * 100) : 100;
+  const circumference = 2 * Math.PI * 38;
+  const healthyDash = (healthPct / 100) * circumference;
+
   return (
     <section className="stack">
-      <div className="metrics">
-        {cards.map(([label, value]) => (
-          <div className="metric" key={label}>
-            <span>{label}</span>
-            <strong>{value}</strong>
-          </div>
-        ))}
+      <div className="ovKpis">
+        {kpis.map((kpi) => {
+          const Icon = kpi.icon;
+          return (
+            <div className={`metric ovKpi${kpi.danger ? " ovDanger" : ""}`} key={kpi.label}>
+              <span><Icon size={14} /> {kpi.label}</span>
+              <strong>{kpi.value}</strong>
+            </div>
+          );
+        })}
       </div>
-      <EventsPanel events={overview.recent_events} compact />
+
+      <div className="ovMain">
+        <section className="panel ovEvents">
+          <div className="ovCardHead">
+            <h2>最近事件</h2>
+            <button type="button" className="ghost compactBtn" onClick={() => setSection("events")}>查看全部</button>
+          </div>
+          <div className="ovEventList">
+            {overview.recent_events.length === 0 && <p className="ovEmpty">暂无事件</p>}
+            {overview.recent_events.map((event) => (
+              <div className="ovEvent" key={event.id}>
+                <span className={`ovDot ${eventTone(event.severity)}`} />
+                <div className="ovEventBody">
+                  <strong>{eventTypeText(event.type)}</strong>
+                  <span>{event.message}</span>
+                </div>
+                <time>{fmtTime(event.created_at)}</time>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <div className="ovSide">
+          <section className="panel ovHealth">
+            <div className="ovCardHead"><h2>源站健康度</h2></div>
+            <div className="ovRing">
+              <svg width="92" height="92" viewBox="0 0 92 92" role="img" aria-label={`源站健康度 ${healthPct}%`}>
+                <circle cx="46" cy="46" r="38" fill="none" stroke="var(--border)" strokeWidth="10" />
+                <circle cx="46" cy="46" r="38" fill="none" stroke="#22c55e" strokeWidth="10" strokeLinecap="round" strokeDasharray={`${healthyDash} ${circumference}`} transform="rotate(-90 46 46)" />
+                <text x="46" y="44" textAnchor="middle" fontSize="20" fontWeight="500" fill="var(--foreground)">{healthPct}%</text>
+                <text x="46" y="60" textAnchor="middle" fontSize="11" fill="var(--muted-foreground)">健康</text>
+              </svg>
+              <div className="ovRingLegend">
+                <div><span className="ovDot ovHealthyDot" />健康 <b>{healthy}</b></div>
+                <div><span className="ovDot danger" />不可用 <b className={overview.unhealthy_origins > 0 ? "danger" : ""}>{overview.unhealthy_origins}</b></div>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel ovQuick">
+            <div className="ovCardHead"><h2>快捷操作</h2></div>
+            <button type="button" className="secondary ovQuickBtn" onClick={() => act(() => apiFetch("/api/groups/run", token, { method: "POST" }), "健康检查已完成")}>
+              <Play size={16} /><span>立即健康检查</span>
+            </button>
+            <button type="button" className="secondary ovQuickBtn" onClick={() => setSection("groups")}>
+              <ListRestart size={16} /><span>前往故障切换</span>
+            </button>
+            <button type="button" className="secondary ovQuickBtn" onClick={() => setSection("records")}>
+              <Cloud size={16} /><span>解析记录</span>
+            </button>
+            <button type="button" className="secondary ovQuickBtn" onClick={() => setSection("events")}>
+              <DatabaseZap size={16} /><span>查看全部事件</span>
+            </button>
+          </section>
+        </div>
+      </div>
     </section>
   );
 }
