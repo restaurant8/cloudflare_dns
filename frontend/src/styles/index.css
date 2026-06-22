@@ -2,6 +2,7 @@
 @import 'tw-animate-css';
 @import './theme.css';
 @import './legacy.css';
+@import './skin.css';
 
 @custom-variant dark (&:is(.dark *));
 

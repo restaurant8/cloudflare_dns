@@ -1,0 +1,216 @@
+/*
+ * skin.css — unified shadcn-style design language for the legacy panels.
+ * Loaded after legacy.css; overrides the shared primitives (buttons, inputs,
+ * cards, tables, badges, modals) with equal/again specificity so it wins by
+ * source order. No layout/structure changes — visual refinement only.
+ */
+
+/* ---- Buttons -------------------------------------------------------- */
+.legacy-ui button {
+  font-weight: 500;
+  border-radius: 8px;
+  min-height: 36px;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+}
+.legacy-ui button:not(:disabled):hover {
+  filter: none;
+  opacity: 0.9;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+}
+.legacy-ui button:not(:disabled):active,
+.legacy-ui button.buttonClicked:not(:disabled) {
+  transform: scale(0.98);
+}
+.legacy-ui button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* Secondary / outline buttons */
+.legacy-ui button.secondary,
+.legacy-ui button.compactBtn {
+  background: var(--card);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+}
+.legacy-ui button.secondary:not(:disabled):hover,
+.legacy-ui button.compactBtn:not(:disabled):hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  opacity: 1;
+}
+
+/* Ghost buttons */
+.legacy-ui button.ghost {
+  box-shadow: none;
+}
+.legacy-ui button.ghost:not(:disabled):hover {
+  background: var(--accent);
+  color: var(--foreground);
+  opacity: 1;
+}
+
+/* Small pill buttons */
+.legacy-ui button.miniBtn {
+  font-weight: 500;
+  border: 1px solid transparent;
+}
+
+/* Icon action buttons — subtle outline, uniform across tables */
+.legacy-ui button.icon,
+.legacy-ui button.secondaryIcon {
+  background: transparent;
+  color: var(--muted-foreground);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-height: 32px;
+  width: 32px;
+  box-shadow: none;
+}
+.legacy-ui button.icon:not(:disabled):hover,
+.legacy-ui button.secondaryIcon:not(:disabled):hover {
+  background: var(--accent);
+  color: var(--foreground);
+  opacity: 1;
+}
+
+/* Destructive buttons */
+.legacy-ui button.dangerBtn {
+  background: transparent;
+  color: var(--destructive);
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+.legacy-ui button.dangerBtn:not(:disabled):hover {
+  background: color-mix(in oklab, var(--destructive) 12%, transparent);
+  border-color: color-mix(in oklab, var(--destructive) 35%, var(--border));
+  color: var(--destructive);
+  opacity: 1;
+}
+
+/* ---- Form controls -------------------------------------------------- */
+.legacy-ui input:not([type="checkbox"]):not([type="radio"]),
+.legacy-ui select,
+.legacy-ui textarea {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-height: 36px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.legacy-ui textarea {
+  min-height: 104px;
+}
+.legacy-ui input:not([type="checkbox"]):not([type="radio"]):focus,
+.legacy-ui input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+.legacy-ui select:focus,
+.legacy-ui select:focus-visible,
+.legacy-ui textarea:focus,
+.legacy-ui textarea:focus-visible {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 30%, transparent);
+}
+.legacy-ui label {
+  font-weight: 500;
+}
+.legacy-ui .selectedZoneLabel {
+  border-radius: 8px;
+}
+
+/* ---- Typography ----------------------------------------------------- */
+.legacy-ui h2 {
+  font-weight: 500;
+}
+.legacy-ui .panel h2,
+.legacy-ui .panelTitle h2 {
+  font-size: 16px;
+  font-weight: 500;
+}
+.legacy-ui strong {
+  font-weight: 600;
+}
+.legacy-ui .confirmRecordBox span {
+  font-weight: 500;
+}
+
+/* ---- Cards / panels ------------------------------------------------- */
+.legacy-ui .panel {
+  border-radius: 10px;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+  padding: 18px 20px;
+}
+
+/* ---- KPI metric cards ---------------------------------------------- */
+.legacy-ui .metric {
+  background: var(--secondary);
+  border: none;
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.legacy-ui .metric strong {
+  font-size: 24px;
+  font-weight: 500;
+}
+
+/* ---- Tables --------------------------------------------------------- */
+.legacy-ui th {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+.legacy-ui tbody tr:hover td {
+  background: color-mix(in oklab, var(--muted) 55%, transparent);
+}
+
+/* ---- Badges / status ------------------------------------------------ */
+.legacy-ui .badge,
+.legacy-ui .status,
+.legacy-ui .originBadge {
+  font-weight: 500;
+  border-radius: 8px;
+  min-width: 0;
+  padding: 2px 9px;
+  font-size: 12px;
+}
+.legacy-ui .badge {
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+
+/* ---- Zone pills ----------------------------------------------------- */
+.legacy-ui button.zonePill {
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted-foreground);
+  box-shadow: none;
+  border-radius: 999px;
+}
+.legacy-ui button.zonePill:not(:disabled):hover {
+  background: var(--accent);
+  color: var(--foreground);
+  opacity: 1;
+}
+.legacy-ui button.zonePill.active {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
+}
+
+/* ---- Modals --------------------------------------------------------- */
+.legacy-ui .modalBackdrop {
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+.legacy-ui .modalPanel {
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+}
+
+/* ---- Toast / notice ------------------------------------------------- */
+.legacy-ui .notice {
+  font-weight: 500;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+}
