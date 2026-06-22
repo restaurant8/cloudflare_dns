@@ -346,3 +346,71 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ---- Failover groups: visual tidy-up (layer 2) --------------------- */
+.legacy-ui .groupGrid {
+  gap: 16px;
+}
+.legacy-ui .groupCard {
+  border-left-width: 3px;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+}
+.legacy-ui .groupHead h2,
+.legacy-ui .groupHead .groupRoleBadge,
+.legacy-ui .collectionCollapsedSummary span,
+.legacy-ui .collectionCollapsedSummary strong,
+.legacy-ui .globalOriginItem strong {
+  font-weight: 500;
+}
+
+/* Dark-mode color fixes — text that previously sat on a flipping token
+ * background (invisible/low-contrast in dark mode). */
+.legacy-ui .collectionHead strong,
+.legacy-ui .groupHostname {
+  color: var(--foreground);
+}
+.legacy-ui .collectionCollapsedSummary strong {
+  background: var(--secondary);
+  color: var(--foreground);
+}
+.legacy-ui .originBadge.current {
+  color: #fff;
+}
+.legacy-ui .originBadge.global,
+.legacy-ui .snippetTags span {
+  color: #075985;
+}
+.legacy-ui .snippetTags span {
+  font-weight: 500;
+}
+.legacy-ui .successText {
+  color: #16a34a;
+}
+.legacy-ui .warningText,
+.legacy-ui .agentSecret .warningText {
+  color: #b45309;
+}
+
+/* Code blocks were using var(--foreground) as a background, which flips to
+ * near-white in dark mode and hides the text. Pin them to a dark surface in
+ * both themes (conventional for code). */
+.legacy-ui .snippetCodeBlock,
+.legacy-ui .snippetCodeHead,
+.legacy-ui .sshCodeBlock {
+  background: #0f172a;
+}
+.legacy-ui .snippetCodeHead {
+  color: #94a3b8;
+}
+.legacy-ui .snippetCodeBlock pre,
+.legacy-ui .sshCodeBlock,
+.legacy-ui .sshCodeBlock pre {
+  color: #e2e8f0;
+}
+.legacy-ui .commandBox {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
