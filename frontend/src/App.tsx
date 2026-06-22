@@ -30,6 +30,24 @@ import {
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
 import type { Agent, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarInset,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarRail,
+  SidebarTrigger
+} from "@/components/ui/sidebar";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
@@ -672,18 +690,20 @@ export default function App() {
 
   if (setupRequired === null) {
     return (
-      <div className="loadingState">
-        <div className="loadingBox">
-          <strong>{bootError ? "后端连接失败" : "加载中"}</strong>
-          {bootError && (
-            <>
-              <p>{bootError}</p>
-              <button onClick={() => loadSetup().catch((error) => setBootError(error instanceof Error ? error.message : "无法连接后端 API"))}>
-                <RefreshCw size={16} />
-                <span>重试</span>
-              </button>
-            </>
-          )}
+      <div className="legacy-ui">
+        <div className="loadingState">
+          <div className="loadingBox">
+            <strong>{bootError ? "后端连接失败" : "加载中"}</strong>
+            {bootError && (
+              <>
+                <p>{bootError}</p>
+                <button onClick={() => loadSetup().catch((error) => setBootError(error instanceof Error ? error.message : "无法连接后端 API"))}>
+                  <RefreshCw size={16} />
+                  <span>重试</span>
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -694,58 +714,80 @@ export default function App() {
   }
 
   return (
-    <div className="shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <ShieldCheck size={28} />
-          <div>
-            <strong>DNS 故障切换</strong>
-            <span>Cloudflare</span>
-          </div>
-        </div>
-        <nav>
-          {nav.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button key={item.id} className={section === item.id ? "active" : ""} onClick={() => setSection(item.id)}>
-                <Icon size={18} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-        <button className="ghost logout" onClick={logout}>
-          <LogOut size={18} />
-          <span>退出登录</span>
-        </button>
-      </aside>
+    <SidebarProvider>
+      <Sidebar collapsible="icon">
+        <SidebarHeader>
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton size="lg" className="data-[slot=sidebar-menu-button]:!p-1.5">
+                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+                  <ShieldCheck className="size-5" />
+                </div>
+                <div className="grid flex-1 text-start text-sm leading-tight">
+                  <span className="truncate font-semibold">DNS 故障切换</span>
+                  <span className="truncate text-xs text-muted-foreground">Cloudflare</span>
+                </div>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarHeader>
+        <SidebarContent>
+          <SidebarGroup>
+            <SidebarGroupLabel>导航</SidebarGroupLabel>
+            <SidebarMenu>
+              {nav.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <SidebarMenuItem key={item.id}>
+                    <SidebarMenuButton isActive={section === item.id} tooltip={item.label} onClick={() => setSection(item.id)}>
+                      <Icon />
+                      <span>{item.label}</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
+            </SidebarMenu>
+          </SidebarGroup>
+        </SidebarContent>
+        <SidebarFooter>
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton tooltip="退出登录" onClick={logout}>
+                <LogOut />
+                <span>退出登录</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarFooter>
+        <SidebarRail />
+      </Sidebar>
 
-      <main>
-        <header className="topbar">
-          <div>
-            <h1>{nav.find((item) => item.id === section)?.label}</h1>
-            <p>
+      <SidebarInset>
+        <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center gap-2 border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+          <SidebarTrigger className="-ms-1" />
+          <Separator orientation="vertical" className="me-1 h-6" />
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-sm font-semibold">{nav.find((item) => item.id === section)?.label}</h1>
+            <p className="truncate text-xs text-muted-foreground">
               {sectionSubtitle}
-              <span className="liveRefreshText">
-                实时更新{liveUpdatedAt ? ` · ${fmtTime(liveUpdatedAt)}` : ""}
-              </span>
+              <span className="ms-2">实时更新{liveUpdatedAt ? ` · ${fmtTime(liveUpdatedAt)}` : ""}</span>
             </p>
           </div>
-          <div className="actions">
-            <button className="secondary" disabled={busy} onClick={() => act(() => loadAll(), "已刷新")}>
-              <RefreshCw size={16} />
-              <span>刷新</span>
-            </button>
-            <button disabled={busy} onClick={() => act(() => apiFetch("/api/groups/run", token, { method: "POST" }), "健康检查已完成")}>
-              <Play size={16} />
-              <span>立即检查</span>
-            </button>
-          </div>
+          <ThemeToggle />
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => act(() => loadAll(), "已刷新")}>
+            <RefreshCw className="size-4" />
+            <span className="hidden sm:inline">刷新</span>
+          </Button>
+          <Button size="sm" disabled={busy} onClick={() => act(() => apiFetch("/api/groups/run", token, { method: "POST" }), "健康检查已完成")}>
+            <Play className="size-4" />
+            <span className="hidden sm:inline">立即检查</span>
+          </Button>
         </header>
 
-        {message && <div className={`notice ${messageTone}`} aria-live="polite">{message}</div>}
+        <main className="legacy-ui flex-1 p-4 md:p-6">
+          {message && <div className={`notice ${messageTone}`} aria-live="polite">{message}</div>}
 
-        {section === "overview" && <OverviewPanel overview={overview} />}
+          {section === "overview" && <OverviewPanel overview={overview} />}
         {section === "cloudflare" && (
           <CloudflarePanel
             token={token}
@@ -786,8 +828,9 @@ export default function App() {
         {section === "settings" && systemSettings && <SettingsPanel token={token} settings={systemSettings} act={act} />}
         {section === "account" && <AccountPanel token={token} onPasswordChanged={logout} />}
         {section === "events" && <EventsPanel events={events} />}
-      </main>
-    </div>
+        </main>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }
 
@@ -824,7 +867,8 @@ function AuthScreen({
   }
 
   return (
-    <main className="auth">
+    <div className="legacy-ui">
+      <main className="auth">
       <form className="authBox" onSubmit={submit}>
         <div className="brand authBrand">
           <ShieldCheck size={32} />
@@ -858,7 +902,8 @@ function AuthScreen({
           <span>{setupRequired ? "创建" : "登录"}</span>
         </button>
       </form>
-    </main>
+      </main>
+    </div>
   );
 }
 
