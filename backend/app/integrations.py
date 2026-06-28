@@ -107,6 +107,24 @@ def update_xboard_settings(db: Session, updates: dict[str, Any]) -> dict[str, An
     return xboard_settings(db)
 
 
+def _raise_for_status_with_body(response: httpx.Response, label: str) -> None:
+    """Like response.raise_for_status() but keeps the upstream body in the message.
+
+    httpx's default error only carries the status code and URL, so the real
+    reason returned by azpanel/Xboard (e.g. quota exceeded, bad resource_id)
+    is lost. Surfacing the body makes failures debuggable from this side.
+    """
+    if response.is_success:
+        return
+    body = (response.text or "").strip()
+    if len(body) > 500:
+        body = body[:500] + "…"
+    detail = f": {body}" if body else ""
+    raise RuntimeError(
+        f"{label} returned HTTP {response.status_code} for {response.request.url}{detail}"
+    )
+
+
 def _extract_payload(data: Any) -> dict[str, Any]:
     if isinstance(data, dict):
         nested = data.get("data")
@@ -165,7 +183,7 @@ def call_azpanel_change_ip(db: Session, resource: AzPanelResource, reason: str |
         headers={"Authorization": f"Bearer {token}", "X-Cloudflare-Dns-Token": token},
         timeout=settings["timeout_seconds"],
     )
-    response.raise_for_status()
+    _raise_for_status_with_body(response, "azpanel change-ip")
     data = _extract_payload(response.json())
     new_ip = _extract_ip(data)
     if not new_ip:
@@ -404,7 +422,7 @@ def call_xboard_update_node_ip(db: Session, node: XboardNodeBinding, new_ip: str
         headers={"Authorization": f"Bearer {token}", "X-Cloudflare-Dns-Token": token},
         timeout=settings["timeout_seconds"],
     )
-    response.raise_for_status()
+    _raise_for_status_with_body(response, "Xboard node update")
     data = _extract_payload(response.json())
     return data
 
