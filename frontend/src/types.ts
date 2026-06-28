@@ -262,6 +262,7 @@ export type AzPanelResource = {
   account_id: string | null;
   region: string | null;
   ip_version: string;
+  ip_change_method: string;
   origin_id: number | null;
   current_ip: string | null;
   port: number;

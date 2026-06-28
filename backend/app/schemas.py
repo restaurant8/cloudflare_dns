@@ -494,6 +494,7 @@ class AzPanelResourceBase(BaseModel):
     account_id: str | None = Field(default=None, max_length=120)
     region: str | None = Field(default=None, max_length=120)
     ip_version: Literal["ipv4", "ipv6"] = "ipv4"
+    ip_change_method: Literal["eip", "stop_start"] = "eip"
     origin_id: int | None = None
     current_ip: str | None = Field(default=None, max_length=120)
     port: int = Field(default=22, ge=1, le=65535)
@@ -515,6 +516,7 @@ class AzPanelResourceUpdate(BaseModel):
     account_id: str | None = Field(default=None, max_length=120)
     region: str | None = Field(default=None, max_length=120)
     ip_version: Literal["ipv4", "ipv6"] | None = None
+    ip_change_method: Literal["eip", "stop_start"] | None = None
     origin_id: int | None = None
     current_ip: str | None = Field(default=None, max_length=120)
     port: int | None = Field(default=None, ge=1, le=65535)

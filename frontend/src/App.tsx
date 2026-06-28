@@ -65,7 +65,7 @@ type ExternalIpSourceDraft = { name: string; base_url: string; token: string; de
 type SnippetDraft = { title: string; category: string; address: string; username: string; port: string; tags: string; content: string; code: string };
 type SshSettingsDraft = { enabled: boolean; external_url: string };
 type AzPanelSettingsDraft = { enabled: boolean; base_url: string; api_token: string; timeout_seconds: number; default_cooldown_seconds: number };
-type AzPanelResourceDraft = { name: string; provider: string; resource_id: string; account_id: string; region: string; ip_version: string; origin_id: number | ""; current_ip: string; port: number; enabled: boolean; auto_change_on_blocked: boolean; auto_update_origin: boolean; cooldown_seconds: number; remark: string };
+type AzPanelResourceDraft = { name: string; provider: string; resource_id: string; account_id: string; region: string; ip_version: string; ip_change_method: string; origin_id: number | ""; current_ip: string; port: number; enabled: boolean; auto_change_on_blocked: boolean; auto_update_origin: boolean; cooldown_seconds: number; remark: string };
 type XboardSettingsDraft = { enabled: boolean; base_url: string; api_token: string; timeout_seconds: number };
 type XboardNodeDraft = { name: string; xboard_node_id: number; node_type: string; host: string; port: number | ""; origin_id: number | ""; azpanel_resource_id: number | ""; enabled: boolean; auto_update_after_change: boolean; remark: string };
 type AgentEditDraft = { name: string };
@@ -3741,6 +3741,7 @@ function AzPanelPanel({
     account_id: "",
     region: "",
     ip_version: "ipv4",
+    ip_change_method: "eip",
     origin_id: "",
     current_ip: "",
     port: 22,
@@ -3779,6 +3780,7 @@ function AzPanelPanel({
       account_id: resourceDraft.account_id.trim() || null,
       region: resourceDraft.region.trim() || null,
       ip_version: resourceDraft.ip_version,
+      ip_change_method: resourceDraft.ip_change_method || "eip",
       origin_id: resourceDraft.origin_id === "" ? null : Number(resourceDraft.origin_id),
       current_ip: resourceDraft.current_ip.trim() || null,
       port: resourceDraft.port,
@@ -3881,6 +3883,7 @@ function AzPanelPanel({
       account_id: resource.account_id || "",
       region: resource.region || "",
       ip_version: resource.ip_version,
+      ip_change_method: resource.ip_change_method || "eip",
       origin_id: resource.origin_id || "",
       current_ip: resource.current_ip || "",
       port: resource.port,
@@ -3988,6 +3991,15 @@ function AzPanelPanel({
             IP 类型
             <input value={resourceDraft.ip_version === "ipv6" ? "IPv6" : "IPv4"} readOnly />
           </label>
+          {resourceDraft.provider === "aws" && (
+            <label>
+              换 IP 方式
+              <select value={resourceDraft.ip_change_method} onChange={(event) => setResourceDraft((current) => ({ ...current, ip_change_method: event.target.value }))}>
+                <option value="eip">弹性 IP（秒切不停机，占 EIP 配额）</option>
+                <option value="stop_start">关机再开机（换自动公网 IP，约停机 1~2 分钟，不占配额，仅 IPv4）</option>
+              </select>
+            </label>
+          )}
           <label>
             绑定源站
             <select value={resourceDraft.origin_id} onChange={(event) => setResourceDraft((current) => ({ ...current, origin_id: event.target.value ? Number(event.target.value) : "" }))}>

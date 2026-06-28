@@ -102,6 +102,11 @@ def _migrate_existing_schema() -> None:
             if "notify_level" not in existing:
                 connection.execute(text("ALTER TABLE telegram_notifications ADD COLUMN notify_level VARCHAR(20) NOT NULL DEFAULT 'important'"))
 
+        if "azpanel_resources" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("azpanel_resources")}
+            if "ip_change_method" not in existing:
+                connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN ip_change_method VARCHAR(20) NOT NULL DEFAULT 'eip'"))
+
 
 def _origin_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":

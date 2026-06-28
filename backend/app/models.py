@@ -273,6 +273,7 @@ class AzPanelResource(Base, TimestampMixin):
     account_id: Mapped[str | None] = mapped_column(String(120))
     region: Mapped[str | None] = mapped_column(String(120))
     ip_version: Mapped[str] = mapped_column(String(10), default="ipv4", nullable=False)
+    ip_change_method: Mapped[str] = mapped_column(String(20), default="eip", nullable=False)
     origin_id: Mapped[int | None] = mapped_column(ForeignKey("origins.id", ondelete="SET NULL"))
     current_ip: Mapped[str | None] = mapped_column(String(120))
     port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)

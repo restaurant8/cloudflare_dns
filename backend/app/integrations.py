@@ -172,6 +172,7 @@ def call_azpanel_change_ip(db: Session, resource: AzPanelResource, reason: str |
         "account_id": resource.account_id,
         "region": resource.region,
         "ip_version": resource.ip_version,
+        "method": getattr(resource, "ip_change_method", "eip") or "eip",
         "current_ip": resource.current_ip,
         "port": resource.port,
         "reason": reason or "manual",
