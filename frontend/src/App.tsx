@@ -4317,14 +4317,18 @@ function XboardPanel({
 }
 
 function IpChangeJobsPanel({ jobs }: { jobs: IpChangeJob[] }) {
+  const COLLAPSED_COUNT = 12;
+  const [expanded, setExpanded] = useState(false);
+  const hasMore = jobs.length > COLLAPSED_COUNT;
+  const visibleJobs = expanded ? jobs : jobs.slice(0, COLLAPSED_COUNT);
   return (
     <div className="panel">
       <div className="panelTitle">
         <h2>最近换 IP 记录</h2>
         <p>用于判断自动换 IP 是否真的触发，以及 azpanel 返回了什么状态。</p>
       </div>
-      <div className="eventList">
-        {jobs.slice(0, 12).map((job) => (
+      <div className="eventList" style={expanded ? { maxHeight: 460, overflowY: "auto" } : undefined}>
+        {visibleJobs.map((job) => (
           <div className="eventItem" key={job.id}>
             <div>
               <strong>#{job.id} · {statusText(job.status)}</strong>
@@ -4336,6 +4340,11 @@ function IpChangeJobsPanel({ jobs }: { jobs: IpChangeJob[] }) {
         ))}
         {jobs.length === 0 && <div className="emptyCell">暂无换 IP 记录</div>}
       </div>
+      {hasMore && (
+        <button type="button" className="ghost compactBtn" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "收起" : `展开全部（${jobs.length}）`}
+        </button>
+      )}
     </div>
   );
 }
