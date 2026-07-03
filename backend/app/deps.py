@@ -1,13 +1,18 @@
+import logging
+
 from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from .cloudflare_access import verify_access_jwt
+from .config import get_settings
 from .database import get_db
 from .models import Agent, User
 from .runtime_settings import get_runtime_settings
-from .security import verify_access_token, verify_token_hash
+from .security import hash_token, verify_access_token
 
 
+logger = logging.getLogger(__name__)
 bearer = HTTPBearer(auto_error=False)
 
 
@@ -17,7 +22,20 @@ def cloudflare_access_allowed(headers, cookies, db: Session) -> bool:
         return True
     email = headers.get("cf-access-authenticated-user-email")
     assertion = headers.get("cf-access-jwt-assertion") or cookies.get("CF_Authorization")
-    return bool(email and assertion)
+    if not (email and assertion):
+        return False
+    app_settings = get_settings()
+    team_domain = app_settings.cloudflare_access_team_domain.strip()
+    audience = app_settings.cloudflare_access_aud.strip()
+    if team_domain and audience:
+        return verify_access_jwt(assertion, team_domain, audience)
+    # No team domain/AUD configured: fall back to the legacy presence check, but make
+    # the missing verification visible instead of silently trusting spoofable headers.
+    logger.warning(
+        "Cloudflare Access is enabled but CLOUDFLARE_ACCESS_TEAM_DOMAIN/AUD are unset; "
+        "the JWT signature is NOT being verified."
+    )
+    return True
 
 
 def require_cloudflare_access(request: Request, db: Session) -> None:
@@ -48,8 +66,13 @@ def get_agent(
 ) -> Agent:
     if not x_agent_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少探针令牌")
-    agents = db.query(Agent).filter(Agent.enabled.is_(True)).all()
-    for agent in agents:
-        if verify_token_hash(x_agent_token, agent.token_hash):
-            return agent
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="探针令牌无效")
+    # token_hash is a deterministic sha256, so look it up directly instead of
+    # scanning every enabled agent.
+    agent = (
+        db.query(Agent)
+        .filter(Agent.enabled.is_(True), Agent.token_hash == hash_token(x_agent_token))
+        .first()
+    )
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="探针令牌无效")
+    return agent

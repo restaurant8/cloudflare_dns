@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -11,6 +12,9 @@ from .failover import evaluate_failover_groups
 from .health import mark_stale_agents, run_local_checks
 from .runtime_settings import get_runtime_settings
 from .routes import routers
+
+
+logger = logging.getLogger(__name__)
 
 
 def _run_scheduler_tick() -> int:
@@ -36,8 +40,8 @@ async def scheduler_loop(stop_event: asyncio.Event) -> None:
         try:
             timeout_seconds = await asyncio.to_thread(_run_scheduler_tick)
         except Exception:
-            # The next loop will retry; API event logging may not be available if DB init failed.
-            pass
+            # The next loop will retry; keep the reason visible instead of failing silently.
+            logger.exception("scheduler tick failed; retrying in %ss", timeout_seconds)
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=timeout_seconds)
         except asyncio.TimeoutError:
@@ -57,6 +61,7 @@ async def lifespan(app: FastAPI):
 
 
 settings = get_settings()
+settings.check_production_secrets()
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(

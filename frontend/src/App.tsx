@@ -424,6 +424,10 @@ export default function App() {
   const [liveUpdatedAt, setLiveUpdatedAt] = useState<string | null>(null);
   const messageTimer = useRef<number | null>(null);
   const pendingActionButton = useRef<{ element: HTMLButtonElement; startedAt: number } | null>(null);
+  const sectionRef = useRef<Section>(section);
+  useEffect(() => {
+    sectionRef.current = section;
+  }, [section]);
 
   const [overview, setOverview] = useState<Overview>(emptyOverview);
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -516,30 +520,45 @@ export default function App() {
 
   async function loadLiveStatus(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCollections, nextGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelResources, nextIpChangeJobs, nextSnippets, nextAgents, nextEvents] = await Promise.all([
+    const current = sectionRef.current;
+    // Overview + events are cheap and drive the header/overview badges, so refresh
+    // them every tick. Everything else is only fetched for the section in view to
+    // avoid hammering ~11 endpoints regardless of what the user is looking at.
+    const [nextOverview, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
-      apiFetch<FailoverCollection[]>("/api/groups/collections", activeToken),
-      apiFetch<FailoverGroup[]>("/api/groups", activeToken),
-      apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
-      apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
-      apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken),
-      apiFetch<AzPanelResource[]>("/api/integrations/azpanel/resources", activeToken),
-      apiFetch<IpChangeJob[]>("/api/integrations/ip-change-jobs", activeToken),
-      apiFetch<SavedSnippet[]>("/api/snippets", activeToken),
-      apiFetch<Agent[]>("/api/agents", activeToken),
       apiFetch<EventItem[]>("/api/events?limit=100", activeToken)
     ]);
     setOverview(nextOverview);
-    setFailoverCollections(nextCollections);
-    setGroups(nextGroups);
-    setTargetPool(nextTargetPool);
-    setExternalIpSources(nextExternalIpSources);
-    setExternalIpItems(nextExternalIpItems);
-    setAzPanelResources(nextAzPanelResources);
-    setIpChangeJobs(nextIpChangeJobs);
-    setSnippets(nextSnippets);
-    setAgents(nextAgents);
     setEvents(nextEvents);
+
+    if (current === "groups") {
+      const [nextCollections, nextGroups] = await Promise.all([
+        apiFetch<FailoverCollection[]>("/api/groups/collections", activeToken),
+        apiFetch<FailoverGroup[]>("/api/groups", activeToken)
+      ]);
+      setFailoverCollections(nextCollections);
+      setGroups(nextGroups);
+    } else if (current === "targetPool") {
+      setTargetPool(await apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken));
+    } else if (current === "externalIps") {
+      const [nextExternalIpSources, nextExternalIpItems] = await Promise.all([
+        apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
+        apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken)
+      ]);
+      setExternalIpSources(nextExternalIpSources);
+      setExternalIpItems(nextExternalIpItems);
+    } else if (current === "azpanel") {
+      const [nextAzPanelResources, nextIpChangeJobs] = await Promise.all([
+        apiFetch<AzPanelResource[]>("/api/integrations/azpanel/resources", activeToken),
+        apiFetch<IpChangeJob[]>("/api/integrations/ip-change-jobs", activeToken)
+      ]);
+      setAzPanelResources(nextAzPanelResources);
+      setIpChangeJobs(nextIpChangeJobs);
+    } else if (current === "snippets") {
+      setSnippets(await apiFetch<SavedSnippet[]>("/api/snippets", activeToken));
+    } else if (current === "agents") {
+      setAgents(await apiFetch<Agent[]>("/api/agents", activeToken));
+    }
     setLiveUpdatedAt(new Date().toISOString());
   }
 
@@ -654,6 +673,13 @@ export default function App() {
     }, liveRefreshIntervalMs);
     return () => window.clearInterval(timer);
   }, [token]);
+
+  useEffect(() => {
+    // Live polling only refreshes the section in view, so pull fresh data as soon
+    // as the user switches sections instead of waiting for the next tick.
+    if (!token) return;
+    loadLiveStatus(token).catch(() => undefined);
+  }, [section, token]);
 
   useEffect(() => {
     if (selectedZoneId) {
