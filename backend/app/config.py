@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     login_max_failures: int = 5
     login_failure_window_seconds: int = 15 * 60
     login_lockout_seconds: int = 15 * 60
+    # Steady-state Cloudflare DNS drift check frequency for the scheduler; each
+    # check costs API calls per group, so it is throttled independently of the
+    # probe interval.
+    dns_consistency_check_interval_seconds: int = 300
+    # Retention for unbounded history tables, pruned periodically by the scheduler.
+    probe_result_retention_days: int = 7
+    event_retention_days: int = 90
+    ip_change_job_retention_days: int = 180
     cloudflare_access_enabled: int = 0
     # When set, Cloudflare Access JWTs are cryptographically verified against the
     # team's JWKS. Leave empty to fall back to the legacy header-presence check.

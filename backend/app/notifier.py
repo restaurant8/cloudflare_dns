@@ -1,4 +1,7 @@
 import json
+import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 from html import escape
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -6,9 +9,20 @@ from typing import Any
 import httpx
 from sqlalchemy.orm import Session
 
+from .database import SessionLocal
 from .events import add_event
 from .models import TelegramNotification, Webhook
 from .security import decrypt_secret, sign_webhook_payload
+
+
+logger = logging.getLogger(__name__)
+
+# Deliveries run on a small background pool so a dead webhook endpoint or a slow
+# Telegram API cannot stall the scheduler tick (previously 3 sync retries × 10s
+# timeout per target, inside the probe/failover loop).
+_delivery_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")
+# Seconds to sleep before each attempt (first attempt immediate).
+_DELIVERY_BACKOFF_SECONDS = (0, 2, 5)
 
 
 EVENT_NAMES = {
@@ -164,6 +178,101 @@ def should_send_telegram(channel: TelegramNotification, event_type: str, payload
     return telegram_event_priority(event_type, payload) >= minimum_priority
 
 
+def _attempt_with_backoff(deliver_once) -> str | None:
+    """Run ``deliver_once`` up to len(_DELIVERY_BACKOFF_SECONDS) times.
+
+    Returns None on success, or the last error message after all attempts.
+    """
+    last_error: str | None = None
+    for delay in _DELIVERY_BACKOFF_SECONDS:
+        if delay:
+            time.sleep(delay)
+        try:
+            deliver_once()
+            return None
+        except Exception as exc:  # pragma: no cover - network dependent
+            last_error = str(exc)
+    return last_error
+
+
+def _post_webhook_once(url: str, body: bytes, headers: dict[str, str]) -> None:
+    response = httpx.post(url, content=body, headers=headers, timeout=10)
+    response.raise_for_status()
+
+
+def _post_telegram_once(token: str, chat_id: str, text: str) -> None:
+    response = httpx.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("ok", False):
+        raise RuntimeError(result.get("description") or "Telegram API 返回失败")
+
+
+def _record_webhook_result(webhook_id: int, name: str, error: str | None) -> None:
+    try:
+        with SessionLocal() as db:
+            webhook = db.get(Webhook, webhook_id)
+            if webhook is not None:
+                if error is None:
+                    webhook.last_sent_at = datetime.utcnow()
+                    webhook.last_error = None
+                else:
+                    webhook.last_error = error
+                    add_event(
+                        db,
+                        "webhook.failed",
+                        "warning",
+                        f"Webhook {name} 发送失败",
+                        {"webhook_id": webhook_id, "error": error},
+                    )
+            db.commit()
+    except Exception:  # pragma: no cover - depends on db state
+        logger.exception("failed to record webhook delivery result for %s", name)
+
+
+def _record_telegram_result(channel_id: int, name: str, error: str | None) -> None:
+    try:
+        with SessionLocal() as db:
+            channel = db.get(TelegramNotification, channel_id)
+            if channel is not None:
+                if error is None:
+                    channel.last_sent_at = datetime.utcnow()
+                    channel.last_error = None
+                else:
+                    channel.last_error = error
+                    add_event(
+                        db,
+                        "telegram.failed",
+                        "warning",
+                        f"Telegram 通知 {name} 发送失败",
+                        {"telegram_id": channel_id, "error": error},
+                    )
+            db.commit()
+    except Exception:  # pragma: no cover - depends on db state
+        logger.exception("failed to record telegram delivery result for %s", name)
+
+
+def _deliver_webhooks(specs: list[tuple[int, str, str, dict[str, str]]], body: bytes) -> None:
+    for webhook_id, name, url, headers in specs:
+        error = _attempt_with_backoff(lambda: _post_webhook_once(url, body, headers))
+        _record_webhook_result(webhook_id, name, error)
+
+
+def _deliver_telegram(specs: list[tuple[int, str, str, str, str]]) -> None:
+    for channel_id, name, token, chat_id, text in specs:
+        error = _attempt_with_backoff(lambda: _post_telegram_once(token, chat_id, text))
+        _record_telegram_result(channel_id, name, error)
+
+
 def send_webhooks(db: Session, event_type: str, payload: dict[str, Any]) -> None:
     send_telegram_notifications(db, event_type, payload)
     webhooks = db.query(Webhook).filter(Webhook.enabled.is_(True)).all()
@@ -171,29 +280,13 @@ def send_webhooks(db: Session, event_type: str, payload: dict[str, Any]) -> None
         return
 
     body = json.dumps({"type": event_type, "payload": payload}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    specs: list[tuple[int, str, str, dict[str, str]]] = []
     for webhook in webhooks:
         headers = {"Content-Type": "application/json", "User-Agent": "cloudflare-dns-failover/1.0"}
         if webhook.secret:
             headers["X-Failover-Signature"] = sign_webhook_payload(_decrypt_or_plaintext(webhook.secret), body)
-        last_error = None
-        for _ in range(3):
-            try:
-                response = httpx.post(webhook.url, content=body, headers=headers, timeout=10)
-                response.raise_for_status()
-                webhook.last_sent_at = datetime.utcnow()
-                webhook.last_error = None
-                break
-            except Exception as exc:  # pragma: no cover - network dependent
-                last_error = str(exc)
-        else:
-            webhook.last_error = last_error
-            add_event(
-                db,
-                "webhook.failed",
-                "warning",
-                f"Webhook {webhook.name} 发送失败",
-                {"webhook_id": webhook.id, "error": last_error},
-            )
+        specs.append((webhook.id, webhook.name, webhook.url, headers))
+    _delivery_pool.submit(_deliver_webhooks, specs, body)
 
 
 def send_telegram_notifications(db: Session, event_type: str, payload: dict[str, Any]) -> None:
@@ -201,11 +294,19 @@ def send_telegram_notifications(db: Session, event_type: str, payload: dict[str,
     if not channels:
         return
 
+    specs: list[tuple[int, str, str, str, str]] = []
     for channel in channels:
         if not should_send_telegram(channel, event_type, payload):
             continue
         text = render_telegram_message(event_type, payload)
-        send_telegram_channel(db, channel, event_type, payload, text=text)
+        try:
+            token = decrypt_secret(channel.bot_token_encrypted)
+        except Exception as exc:
+            channel.last_error = f"解密 Bot Token 失败: {exc}"
+            continue
+        specs.append((channel.id, channel.name, token, str(channel.chat_id), text))
+    if specs:
+        _delivery_pool.submit(_deliver_telegram, specs)
 
 
 def send_telegram_channel(
@@ -215,36 +316,20 @@ def send_telegram_channel(
     payload: dict[str, Any],
     text: str | None = None,
 ) -> None:
-    last_error = None
+    """Synchronous single-channel send, used by the panel's "send test" action so
+    the user gets immediate success/failure feedback."""
     message_text = text or render_telegram_message(event_type, payload)
-    for _ in range(3):
-        try:
-            token = decrypt_secret(channel.bot_token_encrypted)
-            response = httpx.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={
-                    "chat_id": channel.chat_id,
-                    "text": message_text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                },
-                timeout=10,
-            )
-            response.raise_for_status()
-            result = response.json()
-            if not result.get("ok", False):
-                raise RuntimeError(result.get("description") or "Telegram API 返回失败")
-            channel.last_sent_at = datetime.utcnow()
-            channel.last_error = None
-            break
-        except Exception as exc:  # pragma: no cover - network dependent
-            last_error = str(exc)
+    token = decrypt_secret(channel.bot_token_encrypted)
+    error = _attempt_with_backoff(lambda: _post_telegram_once(token, str(channel.chat_id), message_text))
+    if error is None:
+        channel.last_sent_at = datetime.utcnow()
+        channel.last_error = None
     else:
-        channel.last_error = last_error
+        channel.last_error = error
         add_event(
             db,
             "telegram.failed",
             "warning",
             f"Telegram 通知 {channel.name} 发送失败",
-            {"telegram_id": channel.id, "error": last_error},
+            {"telegram_id": channel.id, "error": error},
         )

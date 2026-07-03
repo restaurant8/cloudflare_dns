@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,11 +11,15 @@ from .database import SessionLocal, init_db
 from .external_ips import sync_due_external_ip_sources
 from .failover import evaluate_failover_groups
 from .health import mark_stale_agents, run_local_checks
+from .retention import prune_old_rows
 from .runtime_settings import get_runtime_settings
 from .routes import routers
 
 
 logger = logging.getLogger(__name__)
+
+_PRUNE_INTERVAL_SECONDS = 3600
+_last_prune_at: datetime | None = None
 
 
 def _run_scheduler_tick() -> int:
@@ -23,13 +28,24 @@ def _run_scheduler_tick() -> int:
     This does blocking TCP/DNS probes, so it must be called from a worker thread
     (via asyncio.to_thread) to avoid freezing the API event loop.
     """
+    global _last_prune_at
     with SessionLocal() as db:
         runtime_settings = get_runtime_settings(db)
         mark_stale_agents(db)
         check_cache = {}
         run_local_checks(db, check_cache=check_cache)
         sync_due_external_ip_sources(db)
-        evaluate_failover_groups(db)
+        # commit_per_group keeps external side effects (Cloudflare writes, azpanel
+        # IP changes) recorded even if a later group fails mid-tick.
+        evaluate_failover_groups(
+            db,
+            commit_per_group=True,
+            consistency_check_interval_seconds=get_settings().dns_consistency_check_interval_seconds,
+        )
+        now = datetime.utcnow()
+        if _last_prune_at is None or (now - _last_prune_at).total_seconds() >= _PRUNE_INTERVAL_SECONDS:
+            _last_prune_at = now
+            prune_old_rows(db)
         db.commit()
         return runtime_settings.check_interval_seconds
 

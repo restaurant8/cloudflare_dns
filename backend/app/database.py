@@ -11,6 +11,10 @@ settings = get_settings()
 connect_args = {}
 if settings.database_url.startswith("sqlite"):
     connect_args["check_same_thread"] = False
+    # Background notification delivery writes results from worker threads while the
+    # scheduler transaction may still be open; give SQLite time to wait for the
+    # write lock instead of failing immediately with "database is locked".
+    connect_args["timeout"] = 30
     db_path = settings.database_url.replace("sqlite:///", "", 1)
     if db_path and db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)

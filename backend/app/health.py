@@ -508,11 +508,16 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
     foreign_status = _aggregate_source_health(source_health, foreign_source_keys)
     china_status = _aggregate_source_health(source_health, china_source_keys)
 
+    # China-first semantics: an origin serves China traffic, so it counts as
+    # healthy as soon as the China probes reach it — even if local/foreign probes
+    # fail. This deliberately differs from target-pool items, which keep a
+    # foreign-first view (they are candidate IPs being scouted, and the panel
+    # itself cannot verify them when only China can connect).
     if china_status == "healthy":
         origin.status = "healthy"
         origin.last_error = None
     elif foreign_status == "healthy":
-        if china_status in {"healthy", "not_configured"}:
+        if china_status == "not_configured":
             origin.status = "healthy"
             origin.last_error = None
         elif china_status == "unknown":
@@ -526,10 +531,10 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
         origin.status = "unknown"
         origin.last_error = "等待本地或国外探针探测结果"
     else:
-        if china_status == "healthy":
-            origin.status = "regional_issue"
-            origin.last_error = "国内探针正常，但本地和国外探针不可达，可能是海外线路或本地探测异常"
-        elif china_status == "unknown":
+        # china_status == "healthy" is impossible here (handled at the top), so the
+        # remaining cases are: waiting for China probes, no China probes configured,
+        # or everything down.
+        if china_status == "unknown":
             origin.status = "unknown"
             origin.last_error = "国外探测不可达，等待国内探针确认"
         elif china_status == "not_configured":
@@ -783,15 +788,12 @@ def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
     elif china_status == "not_configured":
         origin.status = "unhealthy"
         origin.last_error = source_errors.get("foreign") or "展开 IP 池本地和国外探针均不可达"
-    elif foreign_healthy and not china_healthy:
+    elif foreign_healthy:
+        # China probes are configured but reach no IP while foreign probes do —
+        # the pool is effectively blocked. (china_healthy is always empty here:
+        # with China probes configured, final_healthy == china_healthy.)
         origin.status = "blocked"
         origin.last_error = "展开 IP 池国外有可用 IP，但国内探针均不可达，疑似被墙"
-    elif not foreign_healthy and china_healthy:
-        origin.status = "regional_issue"
-        origin.last_error = "展开 IP 池国内探针有可用 IP，但本地和国外探针不可达"
-    elif foreign_healthy and china_healthy:
-        origin.status = "unhealthy"
-        origin.last_error = "展开 IP 池没有国内和国外同时可达的 IP"
     else:
         origin.status = "machine_down"
         origin.last_error = "展开 IP 池国内、国外探针均不可达"

@@ -139,12 +139,22 @@ def _extract_ip(data: dict[str, Any]) -> str | None:
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    # Text fallback: only trust the message when it contains exactly one distinct IP.
+    # Messages like "changed from 1.2.3.4 to 5.6.7.8" are ambiguous — picking the
+    # first match would propagate the OLD ip to origins and Xboard nodes.
     message = " ".join(str(data.get(key, "")) for key in ("message", "msg", "content"))
+    candidates: list[str] = []
     for match in IP_RE.findall(message):
         try:
-            return parse_target(match).value
+            info = parse_target(match)
         except ValueError:
             continue
+        if info.target_type not in {"ipv4", "ipv6"}:
+            continue
+        if info.value not in candidates:
+            candidates.append(info.value)
+    if len(candidates) == 1:
+        return candidates[0]
     return None
 
 
@@ -468,9 +478,15 @@ def change_resource_ip(
     resource: AzPanelResource,
     trigger_type: str = "manual",
     reason: str | None = None,
-) -> IpChangeJob:
+) -> IpChangeJob | None:
     now = datetime.utcnow()
     if _resource_on_cooldown(resource, now):
+        # Auto triggers fire every scheduler tick while an origin stays blocked, so
+        # recording a "skipped" job each time floods ip_change_jobs (~60 rows per
+        # 30-min cooldown) and drowns out real success/failure history. Manual
+        # attempts still get a visible skipped record as user feedback.
+        if trigger_type == "auto_blocked":
+            return None
         last_attempt_at = getattr(resource, "last_attempt_at", None) or resource.last_change_at or now
         remaining = max(resource.cooldown_seconds, 60) - int((now - last_attempt_at).total_seconds())
         job = IpChangeJob(

@@ -62,24 +62,28 @@ def record_type_for_target_type(target_type: str) -> str:
 
 
 def tcp_check(target: str, port: int, timeout: float) -> TcpCheckResult:
-    started = time.perf_counter()
     try:
         addresses = socket.getaddrinfo(target, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
         return TcpCheckResult(False, None, f"resolve failed: {exc}", None)
 
     last_error = None
+    last_elapsed: float | None = None
     for family, socktype, proto, _, sockaddr in addresses:
         sock = socket.socket(family, socktype, proto)
         sock.settimeout(timeout)
+        # RTT is measured per connect attempt, excluding DNS resolution and any
+        # earlier failed address families (a dual-stack host with broken IPv6
+        # should not inflate the IPv4 RTT by a full timeout).
+        attempt_started = time.perf_counter()
         try:
             sock.connect(sockaddr)
-            elapsed = (time.perf_counter() - started) * 1000
+            elapsed = (time.perf_counter() - attempt_started) * 1000
             resolved_ip = sockaddr[0]
             return TcpCheckResult(True, round(elapsed, 2), None, resolved_ip)
         except OSError as exc:
             last_error = str(exc)
+            last_elapsed = (time.perf_counter() - attempt_started) * 1000
         finally:
             sock.close()
-    elapsed = (time.perf_counter() - started) * 1000
-    return TcpCheckResult(False, round(elapsed, 2), last_error or "connect failed", None)
+    return TcpCheckResult(False, round(last_elapsed, 2) if last_elapsed is not None else None, last_error or "connect failed", None)

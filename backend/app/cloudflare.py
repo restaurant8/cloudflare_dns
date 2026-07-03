@@ -14,14 +14,28 @@ class CloudflareClient:
     def __init__(self, token: str, base_url: str = "https://api.cloudflare.com/client/v4"):
         self.token = token
         self.base_url = base_url.rstrip("/")
+        self._client: httpx.Client | None = None
+
+    @property
+    def _http(self) -> httpx.Client:
+        # One connection pool per client instance: paginated listings plus the
+        # update/delete calls in a publish cycle reuse the same TLS connection
+        # instead of paying a handshake per request.
+        if self._client is None:
+            self._client = httpx.Client(timeout=20)
+        return self._client
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
     def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         headers = kwargs.pop("headers", {})
         headers["Authorization"] = f"Bearer {self.token}"
         headers["Content-Type"] = "application/json"
         url = f"{self.base_url}{path}"
-        with httpx.Client(timeout=20) as client:
-            response = client.request(method, url, headers=headers, **kwargs)
+        response = self._http.request(method, url, headers=headers, **kwargs)
         try:
             payload = response.json()
         except ValueError:

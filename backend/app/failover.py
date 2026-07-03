@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 
 from sqlalchemy.orm import Session, selectinload
@@ -21,6 +22,8 @@ from .runtime_settings import get_runtime_settings
 from .security import decrypt_secret
 from .sync import MANAGED_RECORD_TYPES, sync_zone_records
 
+
+logger = logging.getLogger(__name__)
 
 MANAGED_RECORD_COMMENT_PREFIX = "managed by cloudflare-dns-failover"
 NO_HEALTHY_ORIGIN_MESSAGE = "没有可用的健康源站"
@@ -85,21 +88,28 @@ def _normalized_record_name(value: str | None) -> str:
 
 
 def _managed_dns_records(client: CloudflareClient, cf_zone_id: str, hostname: str | None = None) -> list[dict]:
-    normalized_hostname = _normalized_record_name(hostname) if hostname else None
-    records = [
-        record
-        for record in client.list_dns_records(cf_zone_id)
-        if record.get("type") in MANAGED_RECORD_TYPES
-    ]
-    if normalized_hostname is None:
-        return records
-    filtered = [record for record in records if _normalized_record_name(record.get("name")) == normalized_hostname]
-    if filtered:
-        return filtered
-    return [
+    if hostname is None:
+        return [
+            record
+            for record in client.list_dns_records(cf_zone_id)
+            if record.get("type") in MANAGED_RECORD_TYPES
+        ]
+    # Query by name first: listing the whole zone on every consistency check is
+    # 10x+ the API calls on large zones. Fall back to a full listing only when the
+    # name filter finds nothing (e.g. trailing-dot/case mismatches).
+    normalized_hostname = _normalized_record_name(hostname)
+    named = [
         record
         for record in client.list_dns_records(cf_zone_id, name=hostname)
         if record.get("type") in MANAGED_RECORD_TYPES
+    ]
+    if named:
+        return named
+    return [
+        record
+        for record in client.list_dns_records(cf_zone_id)
+        if record.get("type") in MANAGED_RECORD_TYPES
+        and _normalized_record_name(record.get("name")) == normalized_hostname
     ]
 
 
@@ -445,7 +455,24 @@ def publish_expanded_origin(
     }
 
 
-def evaluate_failover_groups(db: Session) -> int:
+# In-memory timestamps of the last successful DNS consistency verification per
+# group. Only used to throttle the steady-state Cloudflare API polling; losing it
+# on restart just means one extra check.
+_consistency_checked_at: dict[int, datetime] = {}
+
+
+def evaluate_failover_groups(
+    db: Session,
+    commit_per_group: bool = False,
+    consistency_check_interval_seconds: int = 0,
+) -> int:
+    """Evaluate all enabled groups and publish DNS changes where needed.
+
+    ``commit_per_group`` commits after each group so external side effects
+    (Cloudflare writes, azpanel IP changes) stay recorded even if a later group
+    fails — used by the scheduler. ``consistency_check_interval_seconds`` throttles
+    the steady-state Cloudflare drift check (0 = check every call).
+    """
     groups = (
         db.query(FailoverGroup)
         .options(
@@ -460,111 +487,146 @@ def evaluate_failover_groups(db: Session) -> int:
     now = datetime.utcnow()
     settings = get_runtime_settings(db)
     for group in groups:
-        if _should_probe_group_before_switch(group):
-            run_local_checks(db, group_id=group.id, include_all=False)
-
-        # Trigger an automatic IP change for every blocked/down origin in the group,
-        # not just the currently published one. Otherwise an origin that gets blocked
-        # and then failed away from would never have its IP replaced, because it is no
-        # longer the "current" origin on subsequent cycles. Each attempt is still gated
-        # by the resource's auto_change_on_blocked flag and cooldown.
-        for group_origin in group.origins:
-            if group_origin.enabled and group_origin.status in {"blocked", "machine_down", "unhealthy"}:
-                trigger_ip_change_for_origin(db, group_origin, f"{group.hostname} origin {group_origin.target} is {group_origin.status}")
-
-        desired = choose_desired_origin(group.origins, group.current_origin_id)
-        if desired is None:
-            if _has_pending_origin_checks(group):
-                group.last_error = WAITING_FOR_PROBES_MESSAGE
-                continue
-            group.last_error = NO_HEALTHY_ORIGIN_MESSAGE
-            if _should_notify_no_healthy(group, now, settings.no_healthy_notification_interval_seconds):
-                group.no_healthy_notified_at = now
-                payload = {"group_id": group.id, "hostname": group.hostname, "origins": _origin_status_summaries(group)}
-                add_event(db, "failover.no_healthy_origin", "error", f"{group.hostname} 没有可用的健康源站", payload)
-                send_webhooks(db, "failover.no_healthy_origin", payload)
-            continue
-        group.no_healthy_notified_at = None
-        if group.last_error in RECOVERABLE_GROUP_ERRORS:
-            group.last_error = None
-        if desired.id == group.current_origin_id and not group.last_error:
-            desired_expanded_ip = selected_healthy_ip(desired)
-            try:
-                dns_matches = current_dns_matches_origin(db, group, desired)
-            except Exception as exc:
-                message = str(exc)
-                group.last_error = message
-                payload = {"group_id": group.id, "hostname": group.hostname, "error": message}
-                add_event(db, "dns.consistency_check_failed", "error", f"{group.hostname} DNS 一致性检查失败: {message}", payload)
-                send_webhooks(db, "dns.consistency_check_failed", payload)
-                continue
-            expanded_metadata_mismatch = is_expanded_origin(desired) and published_ips(desired) != ([desired_expanded_ip] if desired_expanded_ip else [])
-            if expanded_metadata_mismatch or not dns_matches:
-                try:
-                    record = publish_origin(db, group, desired)
-                except Exception as exc:
-                    message = str(exc)
-                    failed_hostname = getattr(exc, "hostname", group.hostname)
-                    group.last_error = message
-                    payload = {"group_id": group.id, "hostname": failed_hostname, "error": message}
-                    add_event(db, "dns.publish_failed", "error", f"{group.hostname} 发布 DNS 失败: {message}", payload)
-                    send_webhooks(db, "dns.publish_failed", payload)
-                else:
-                    published_hostnames = record.get("hostnames") or [group.hostname]
-                    hostname_label = ", ".join(str(item) for item in published_hostnames)
-                    payload = {
-                        "group_id": group.id,
-                        "hostname": hostname_label,
-                        "hostnames": published_hostnames,
-                        "old_origin_id": desired.id,
-                        "new_origin_id": desired.id,
-                        "record_id": record["id"],
-                        "record_type": record["type"],
-                        "content": record["content"],
-                    }
-                    message = f"{group.hostname} 已修正 DNS 记录为 {record['type']} {record['content']}"
-                    add_event(db, "dns.switched", "info", message, payload)
-                    send_webhooks(db, "dns.switched", payload)
-            continue
-        if group.last_switch_at:
-            elapsed = (now - group.last_switch_at).total_seconds()
-            if elapsed < group.min_switch_interval_seconds and desired.id != group.current_origin_id:
-                continue
-        old_origin_id = group.current_origin_id
         try:
-            record = publish_origin(db, group, desired)
+            switched = _evaluate_single_group(db, group, now, settings, consistency_check_interval_seconds)
+        except Exception:
+            # One broken group (bad credential, unexpected API shape…) must not stop
+            # failover for every other group in this tick.
+            logger.exception("failover evaluation failed for group %s (%s)", group.id, group.hostname)
+            db.rollback()
+            continue
+        if switched:
+            switches += 1
+        if commit_per_group:
+            db.commit()
+    return switches
+
+
+def _evaluate_single_group(
+    db: Session,
+    group: FailoverGroup,
+    now: datetime,
+    settings,
+    consistency_check_interval_seconds: int,
+) -> bool:
+    if _should_probe_group_before_switch(group):
+        run_local_checks(db, group_id=group.id, include_all=False)
+
+    # Trigger an automatic IP change for every blocked/down origin in the group,
+    # not just the currently published one. Otherwise an origin that gets blocked
+    # and then failed away from would never have its IP replaced, because it is no
+    # longer the "current" origin on subsequent cycles. Each attempt is still gated
+    # by the resource's auto_change_on_blocked flag and cooldown.
+    # "unhealthy" is included on purpose: origins with probe_mode=china_only report
+    # a GFW block as "unhealthy" (they have no foreign probes to tell the two apart).
+    for group_origin in group.origins:
+        if group_origin.enabled and group_origin.status in {"blocked", "machine_down", "unhealthy"}:
+            trigger_ip_change_for_origin(db, group_origin, f"{group.hostname} origin {group_origin.target} is {group_origin.status}")
+
+    desired = choose_desired_origin(group.origins, group.current_origin_id)
+    if desired is None:
+        if _has_pending_origin_checks(group):
+            group.last_error = WAITING_FOR_PROBES_MESSAGE
+            return False
+        group.last_error = NO_HEALTHY_ORIGIN_MESSAGE
+        if _should_notify_no_healthy(group, now, settings.no_healthy_notification_interval_seconds):
+            group.no_healthy_notified_at = now
+            payload = {"group_id": group.id, "hostname": group.hostname, "origins": _origin_status_summaries(group)}
+            add_event(db, "failover.no_healthy_origin", "error", f"{group.hostname} 没有可用的健康源站", payload)
+            send_webhooks(db, "failover.no_healthy_origin", payload)
+        return False
+    group.no_healthy_notified_at = None
+    if group.last_error in RECOVERABLE_GROUP_ERRORS:
+        group.last_error = None
+    if desired.id == group.current_origin_id and not group.last_error:
+        desired_expanded_ip = selected_healthy_ip(desired)
+        expanded_metadata_mismatch = is_expanded_origin(desired) and published_ips(desired) != ([desired_expanded_ip] if desired_expanded_ip else [])
+        checked_at = _consistency_checked_at.get(group.id)
+        consistency_due = (
+            consistency_check_interval_seconds <= 0
+            or checked_at is None
+            or (now - checked_at).total_seconds() >= consistency_check_interval_seconds
+        )
+        # The local metadata mismatch is free to detect and always repaired; the
+        # Cloudflare drift check costs API calls and is throttled in steady state.
+        if not expanded_metadata_mismatch and not consistency_due:
+            return False
+        try:
+            dns_matches = current_dns_matches_origin(db, group, desired)
         except Exception as exc:
             message = str(exc)
-            if group.last_error != message:
+            group.last_error = message
+            payload = {"group_id": group.id, "hostname": group.hostname, "error": message}
+            add_event(db, "dns.consistency_check_failed", "error", f"{group.hostname} DNS 一致性检查失败: {message}", payload)
+            send_webhooks(db, "dns.consistency_check_failed", payload)
+            return False
+        _consistency_checked_at[group.id] = now
+        if expanded_metadata_mismatch or not dns_matches:
+            try:
+                record = publish_origin(db, group, desired)
+            except Exception as exc:
+                message = str(exc)
                 failed_hostname = getattr(exc, "hostname", group.hostname)
                 group.last_error = message
                 payload = {"group_id": group.id, "hostname": failed_hostname, "error": message}
                 add_event(db, "dns.publish_failed", "error", f"{group.hostname} 发布 DNS 失败: {message}", payload)
                 send_webhooks(db, "dns.publish_failed", payload)
-            continue
+            else:
+                published_hostnames = record.get("hostnames") or [group.hostname]
+                hostname_label = ", ".join(str(item) for item in published_hostnames)
+                payload = {
+                    "group_id": group.id,
+                    "hostname": hostname_label,
+                    "hostnames": published_hostnames,
+                    "old_origin_id": desired.id,
+                    "new_origin_id": desired.id,
+                    "record_id": record["id"],
+                    "record_type": record["type"],
+                    "content": record["content"],
+                }
+                message = f"{group.hostname} 已修正 DNS 记录为 {record['type']} {record['content']}"
+                add_event(db, "dns.switched", "info", message, payload)
+                send_webhooks(db, "dns.switched", payload)
+        return False
+    if group.last_switch_at:
+        elapsed = (now - group.last_switch_at).total_seconds()
+        if elapsed < group.min_switch_interval_seconds and desired.id != group.current_origin_id:
+            return False
+    old_origin_id = group.current_origin_id
+    try:
+        record = publish_origin(db, group, desired)
+    except Exception as exc:
+        message = str(exc)
+        if group.last_error != message:
+            failed_hostname = getattr(exc, "hostname", group.hostname)
+            group.last_error = message
+            payload = {"group_id": group.id, "hostname": failed_hostname, "error": message}
+            add_event(db, "dns.publish_failed", "error", f"{group.hostname} 发布 DNS 失败: {message}", payload)
+            send_webhooks(db, "dns.publish_failed", payload)
+        return False
 
-        group.current_origin_id = desired.id
-        group.last_switch_at = now
-        group.last_error = None
-        switches += 1
-        published_hostnames = record.get("hostnames") or [group.hostname]
-        hostname_label = ", ".join(str(item) for item in published_hostnames)
-        payload = {
-            "group_id": group.id,
-            "hostname": hostname_label,
-            "hostnames": published_hostnames,
-            "old_origin_id": old_origin_id,
-            "new_origin_id": desired.id,
-            "record_id": record["id"],
-            "record_type": record["type"],
-            "content": record["content"],
-        }
-        add_event(
-            db,
-            "dns.switched",
-            "info",
-            f"{group.hostname} 已切换到 {record['type']} {record['content']}",
-            payload,
-        )
-        send_webhooks(db, "dns.switched", payload)
-    return switches
+    group.current_origin_id = desired.id
+    group.last_switch_at = now
+    group.last_error = None
+    _consistency_checked_at[group.id] = now
+    published_hostnames = record.get("hostnames") or [group.hostname]
+    hostname_label = ", ".join(str(item) for item in published_hostnames)
+    payload = {
+        "group_id": group.id,
+        "hostname": hostname_label,
+        "hostnames": published_hostnames,
+        "old_origin_id": old_origin_id,
+        "new_origin_id": desired.id,
+        "record_id": record["id"],
+        "record_type": record["type"],
+        "content": record["content"],
+    }
+    add_event(
+        db,
+        "dns.switched",
+        "info",
+        f"{group.hostname} 已切换到 {record['type']} {record['content']}",
+        payload,
+    )
+    send_webhooks(db, "dns.switched", payload)
+    return True
