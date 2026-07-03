@@ -374,8 +374,21 @@ button.zonePill.active {
   border: 1px solid #dbe6ef;
   border-radius: 6px;
   display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
   min-height: 38px;
   padding: 0 10px;
+}
+
+.zoneIdChip {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+}
+
+.zoneIdChip code {
+  color: #26374a;
+  font-size: 12px;
 }
 
 .searchBar span,

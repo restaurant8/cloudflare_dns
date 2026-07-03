@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  Check,
   ChevronDown,
   ChevronRight,
   Cloud,
@@ -1087,8 +1088,16 @@ function RecordsPanel({
   const [recordAdd, setRecordAdd] = useState<DnsRecordEditDraft>({ name: "", type: "A", content: "", ttl: 60, proxied: false });
   const [editRecord, setEditRecord] = useState<DnsRecord | null>(null);
   const [recordEdit, setRecordEdit] = useState<DnsRecordEditDraft>({ name: "", type: "A", content: "", ttl: 60, proxied: false });
+  const [zoneIdCopied, setZoneIdCopied] = useState(false);
   const filteredZones = zones.filter((zone) => zoneMatches(zone, zoneQuery));
   const selectedZone = zones.find((zone) => zone.id === selectedZoneId);
+
+  async function copyZoneId(zoneId: string) {
+    if (!zoneId) return;
+    await navigator.clipboard.writeText(zoneId);
+    setZoneIdCopied(true);
+    window.setTimeout(() => setZoneIdCopied(false), 1800);
+  }
   const normalizedQuery = query.trim().toLowerCase();
   const filteredRecords = normalizedQuery
     ? records.filter((record) =>
@@ -1225,7 +1234,22 @@ function RecordsPanel({
         </div>
       </div>
       <div className="toolbar">
-        <div className="selectedZoneLabel">当前域名：{selectedZone ? selectedZone.name : "未选择"}</div>
+        <div className="selectedZoneLabel">
+          当前域名：{selectedZone ? selectedZone.name : "未选择"}
+          {selectedZone && (
+            <span className="zoneIdChip">
+              区域ID：<code className="mono">{selectedZone.cf_zone_id}</code>
+              <button
+                type="button"
+                className="icon secondaryIcon"
+                title={zoneIdCopied ? "已复制" : "复制区域ID"}
+                onClick={() => copyZoneId(selectedZone.cf_zone_id)}
+              >
+                {zoneIdCopied ? <Check size={14} /> : <Copy size={14} />}
+              </button>
+            </span>
+          )}
+        </div>
         <button disabled={!selectedZoneId} onClick={openAddRecord}>
           <Plus size={16} />
           <span>添加解析</span>
