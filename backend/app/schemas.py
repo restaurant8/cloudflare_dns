@@ -269,6 +269,8 @@ class OriginCreate(BaseModel):
     enabled: bool = True
     # 可选：创建后把这个 azpanel 云资源绑定到新源站，源站被墙时自动换 IP
     azpanel_resource_id: int | None = None
+    # 可选：azpanel 远端资源的 key，还没添加为本地云资源时自动创建并绑定
+    azpanel_remote_key: str | None = Field(default=None, max_length=512)
 
 
 class OriginBulkCreate(BaseModel):

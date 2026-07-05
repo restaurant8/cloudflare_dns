@@ -9,8 +9,8 @@ from ..dns_utils import normalize_hostname, parse_target
 from ..events import add_event
 from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records, zone_for_hostname
 from ..health import run_local_checks
-from ..integrations import sync_resource_current_ip_to_origin
-from ..models import Agent, AzPanelResource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
+from ..integrations import azpanel_settings, sync_resource_current_ip_to_origin
+from ..models import Agent, AzPanelRemoteResource, AzPanelResource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
 from ..origin_expansion import (
     DIRECT_PUBLISH_MODE,
@@ -738,6 +738,54 @@ def delete_group(group_id: int, _: User = Depends(get_current_user), db: Session
     return Message(message="切换组已删除")
 
 
+def _resource_from_remote_key(db: Session, remote_key: str, port: int) -> AzPanelResource:
+    """Resolve an azpanel remote-resource key into a local AzPanelResource.
+
+    Reuses an existing local resource for the same machine (so picking an
+    already-added machine rebinds instead of duplicating it); otherwise creates
+    one with auto-change defaults from the cached remote listing.
+    """
+    remote = db.query(AzPanelRemoteResource).filter(AzPanelRemoteResource.key == remote_key).one_or_none()
+    if remote is None:
+        raise HTTPException(status_code=404, detail="azpanel 远端资源不存在，请重新刷新资源")
+    candidates = (
+        db.query(AzPanelResource)
+        .filter(
+            AzPanelResource.provider == remote.provider,
+            AzPanelResource.resource_id == remote.resource_id,
+            AzPanelResource.ip_version == remote.ip_version,
+        )
+        .all()
+    )
+    existing = next(
+        (
+            item
+            for item in candidates
+            if (item.account_id or "") == (remote.account_id or "") and (item.region or "") == (remote.region or "")
+        ),
+        None,
+    )
+    if existing is not None:
+        return existing
+    resource = AzPanelResource(
+        name=remote.name,
+        provider=remote.provider,
+        resource_id=remote.resource_id,
+        account_id=remote.account_id or None,
+        region=remote.region or None,
+        ip_version=remote.ip_version,
+        current_ip=remote.current_ip,
+        port=port,
+        enabled=True,
+        auto_change_on_blocked=True,
+        auto_update_origin=True,
+        cooldown_seconds=azpanel_settings(db)["default_cooldown_seconds"],
+        remark=remote.remark,
+    )
+    db.add(resource)
+    return resource
+
+
 @router.post("/{group_id}/origins", response_model=OriginOut)
 def create_origin(group_id: int, payload: OriginCreate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
     group = db.get(FailoverGroup, group_id)
@@ -748,6 +796,8 @@ def create_origin(group_id: int, payload: OriginCreate, _: User = Depends(get_cu
         resource = db.get(AzPanelResource, payload.azpanel_resource_id)
         if resource is None:
             raise HTTPException(status_code=404, detail="azpanel 云资源不存在")
+    elif payload.azpanel_remote_key:
+        resource = _resource_from_remote_key(db, payload.azpanel_remote_key, payload.port)
     origin = _origin_from_payload(db, group, payload)
     duplicate = (
         db.query(Origin)

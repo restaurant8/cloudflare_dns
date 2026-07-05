@@ -414,12 +414,21 @@ def list_azpanel_remote_resources(db: Session, provider: str | None = None) -> l
             return cached_items
         raise
     data = _extract_payload(payload)
-    raw_items = data.get("resources") or data.get("items") or data.get("data")
+    # 空列表是有效结果（azpanel 侧已全部删除），不能用 or 链跳过，
+    # 否则会错误地回退到过时的本地缓存。
+    raw_items: Any = None
+    for key in ("resources", "items", "data"):
+        value = data.get(key)
+        if isinstance(value, list):
+            raw_items = value
+            break
+        if isinstance(value, dict):
+            raw_items = list(value.values())
+            break
     if raw_items is None and isinstance(payload, list):
         raw_items = payload
-    if isinstance(raw_items, dict):
-        raw_items = list(raw_items.values())
     if not isinstance(raw_items, list):
+        # 只有响应结构无法识别时才回退到缓存
         return cached_items
     normalized = [_normalize_remote_resource(item) for item in raw_items if isinstance(item, dict)]
     remote_items = _cache_remote_resources(db, [item for item in normalized if item is not None])

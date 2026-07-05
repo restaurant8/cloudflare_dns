@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.database import Base
-from app.models import Agent, AzPanelResource, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
+from app.models import Agent, AzPanelRemoteResource, AzPanelResource, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, resolved_ips
 from app.routes.groups import add_group_hostname, create_collection, create_global_origin, create_group, create_origin, delete_global_origin, delete_group_hostname, update_global_origin, update_group, update_origin
 from app.schemas import FailoverCollectionCreate, FailoverGlobalOriginCreate, FailoverGlobalOriginUpdate, FailoverGroupCreate, FailoverGroupUpdate, FailoverHostnameCreate, OriginCreate, OriginOut, OriginUpdate
@@ -645,6 +645,103 @@ def test_create_origin_rejects_missing_azpanel_resource():
         create_origin(
             group.id,
             OriginCreate(target="192.0.2.99", port=22, priority=10, azpanel_resource_id=999),
+            user,
+            db,
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+def test_create_origin_from_remote_key_creates_and_binds_resource():
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com")
+    db.add(group)
+    db.flush()
+    remote = AzPanelRemoteResource(
+        key="aws|acct|ap-northeast-1|i-9|ipv4",
+        name="jp-node",
+        provider="aws",
+        resource_id="i-9",
+        account_id="acct",
+        region="ap-northeast-1",
+        ip_version="ipv4",
+        current_ip="203.0.113.50",
+        port=31111,
+    )
+    db.add(remote)
+    db.commit()
+
+    origin = create_origin(
+        group.id,
+        OriginCreate(target="203.0.113.50", port=31111, priority=10, azpanel_remote_key=remote.key),
+        user,
+        db,
+    )
+
+    resource = db.query(AzPanelResource).one()
+    assert resource.origin_id == origin.id
+    assert resource.provider == "aws"
+    assert resource.resource_id == "i-9"
+    assert resource.current_ip == "203.0.113.50"
+    assert resource.port == 31111
+    assert resource.enabled is True
+    assert resource.auto_change_on_blocked is True
+    assert resource.auto_update_origin is True
+
+
+def test_create_origin_from_remote_key_reuses_existing_local_resource():
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com")
+    db.add(group)
+    db.flush()
+    existing = AzPanelResource(
+        name="jp-node",
+        provider="aws",
+        resource_id="i-9",
+        account_id="acct",
+        region="ap-northeast-1",
+        ip_version="ipv4",
+        current_ip="203.0.113.50",
+        port=31111,
+    )
+    remote = AzPanelRemoteResource(
+        key="aws|acct|ap-northeast-1|i-9|ipv4",
+        name="jp-node",
+        provider="aws",
+        resource_id="i-9",
+        account_id="acct",
+        region="ap-northeast-1",
+        ip_version="ipv4",
+        current_ip="203.0.113.50",
+        port=31111,
+    )
+    db.add_all([existing, remote])
+    db.commit()
+
+    origin = create_origin(
+        group.id,
+        OriginCreate(target="203.0.113.50", port=31111, priority=10, azpanel_remote_key=remote.key),
+        user,
+        db,
+    )
+
+    assert db.query(AzPanelResource).count() == 1
+    assert existing.origin_id == origin.id
+
+
+def test_create_origin_rejects_unknown_remote_key():
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com")
+    db.add(group)
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        create_origin(
+            group.id,
+            OriginCreate(target="192.0.2.99", port=22, priority=10, azpanel_remote_key="missing-key"),
             user,
             db,
         )

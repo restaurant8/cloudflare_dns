@@ -53,7 +53,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
 type ProbeMode = "default" | "local_only" | "china_only" | "any";
-type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; azpanel_resource_id: number | "" };
+type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean };
 type GlobalOriginDraft = OriginAddDraft;
 type CollectionDraft = { name: string };
@@ -383,8 +383,8 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, azpanel_resource_id: "" };
-const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, azpanel_resource_id: "" };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, azpanel_resource_id: "", azpanel_remote_key: "" };
+const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, azpanel_resource_id: "", azpanel_remote_key: "" };
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
@@ -1901,12 +1901,46 @@ function GroupsPanel({
   const [originEdits, setOriginEdits] = useState<Record<number, OriginEditDraft>>({});
   const [collapsedCollectionIds, setCollapsedCollectionIds] = useState<Set<string>>(new Set());
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<number>>(new Set());
+  const [azRemoteResources, setAzRemoteResources] = useState<AzPanelRemoteResource[]>([]);
   const addingGlobalCollection = addingGlobalCollectionId ? collections.find((collection) => collection.id === addingGlobalCollectionId) : undefined;
   const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
   const addingHostnameGroup = addingHostnameGroupId ? groups.find((group) => group.id === addingHostnameGroupId) : undefined;
   const enabledPoolItems = targetPool.filter((item) => item.enabled);
   const healthyExternalItems = externalIpItems.filter((item) => item.status === "healthy");
-  const bindableAzResources = azPanelResources.filter((item) => item.enabled);
+  // 未绑定的排前面，方便直接选到还没占用的机器
+  const bindableAzResources = [...azPanelResources.filter((item) => item.enabled)].sort(
+    (left, right) => Number(Boolean(left.origin_id)) - Number(Boolean(right.origin_id))
+  );
+  const originLabelById = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const group of groups) {
+      for (const origin of group.origins) {
+        map.set(origin.id, `${group.hostname} · ${origin.target}`);
+      }
+    }
+    return map;
+  }, [groups]);
+  // azpanel 上还没添加为本地云资源的机器，选中后添加时自动创建并绑定
+  const unaddedRemoteResources = useMemo(
+    () =>
+      azRemoteResources.filter(
+        (remote) =>
+          !azPanelResources.some(
+            (local) =>
+              local.provider === remote.provider &&
+              local.resource_id === remote.resource_id &&
+              local.ip_version === remote.ip_version &&
+              (local.account_id || "") === (remote.account_id || "") &&
+              (local.region || "") === (remote.region || "")
+          )
+      ),
+    [azRemoteResources, azPanelResources]
+  );
+  const azSelectValue = originAdd.azpanel_remote_key
+    ? `remote-${originAdd.azpanel_remote_key}`
+    : originAdd.azpanel_resource_id !== ""
+      ? `local-${originAdd.azpanel_resource_id}`
+      : "";
   const addTargetType = inferDraftTargetType(originAdd.target);
   const globalAddTargetType = inferDraftTargetType(globalOriginAdd.target);
   const selectedPoolItemId = enabledPoolItems.find((item) => item.target === originAdd.target && item.port === originAdd.port)?.id || "";
@@ -1976,7 +2010,8 @@ function GroupsPanel({
       probe_mode: "default",
       remark: "",
       enabled: true,
-      azpanel_resource_id: ""
+      azpanel_resource_id: "",
+      azpanel_remote_key: ""
     });
   }
 
@@ -2024,7 +2059,8 @@ function GroupsPanel({
         probe_mode: normalizeProbeMode(origin.probe_mode),
         remark: origin.remark || "",
         enabled: origin.enabled,
-        azpanel_resource_id: ""
+        azpanel_resource_id: "",
+        azpanel_remote_key: ""
       }
     }));
   }
@@ -2065,7 +2101,8 @@ function GroupsPanel({
       probe_mode: "default",
       remark: "",
       enabled: true,
-      azpanel_resource_id: ""
+      azpanel_resource_id: "",
+      azpanel_remote_key: ""
     });
   }
 
@@ -2081,27 +2118,68 @@ function GroupsPanel({
       preferred_agent_id: current.preferred_agent_id,
       remark: item.remark || "",
       enabled: true,
-      azpanel_resource_id: ""
+      azpanel_resource_id: "",
+      azpanel_remote_key: ""
     }));
   }
 
-  function selectAzPanelResource(resourceId: number | "") {
-    if (resourceId === "") {
-      setOriginAdd((current) => ({ ...current, azpanel_resource_id: "" }));
+  function selectAzPanelResource(value: string) {
+    if (!value) {
+      setOriginAdd((current) => ({ ...current, azpanel_resource_id: "", azpanel_remote_key: "" }));
       return;
     }
-    const resource = azPanelResources.find((item) => item.id === resourceId);
-    if (!resource) return;
+    if (value.startsWith("local-")) {
+      const resource = azPanelResources.find((item) => item.id === Number(value.slice("local-".length)));
+      if (!resource) return;
+      setOriginAdd((current) => ({
+        ...current,
+        target: resource.current_ip || current.target,
+        port: resource.port || current.port || 22,
+        publish_mode: "direct",
+        expanded_ip_priorities: {},
+        remark: current.remark || resource.name,
+        enabled: true,
+        azpanel_resource_id: resource.id,
+        azpanel_remote_key: ""
+      }));
+      return;
+    }
+    const key = value.slice("remote-".length);
+    const remote = azRemoteResources.find((item) => item.key === key);
+    if (!remote) return;
     setOriginAdd((current) => ({
       ...current,
-      target: resource.current_ip || current.target,
-      port: resource.port || current.port || 22,
+      target: remote.current_ip || current.target,
+      port: remote.port || current.port || 22,
       publish_mode: "direct",
       expanded_ip_priorities: {},
-      remark: current.remark || resource.name,
+      remark: current.remark || remote.name,
       enabled: true,
-      azpanel_resource_id: resource.id
+      azpanel_resource_id: "",
+      azpanel_remote_key: key
     }));
+  }
+
+  async function refreshAzRemoteResources() {
+    let fetched: AzPanelRemoteResource[] = [];
+    await act(
+      async () => {
+        // 两个厂商各自拉取：一边失败（例如没配置/没缓存）不影响另一边的结果
+        const results = await Promise.allSettled([
+          apiFetch<AzPanelRemoteResource[]>("/api/integrations/azpanel/remote-resources?provider=azure", token),
+          apiFetch<AzPanelRemoteResource[]>("/api/integrations/azpanel/remote-resources?provider=aws", token)
+        ]);
+        const succeeded = results.filter(
+          (result): result is PromiseFulfilledResult<AzPanelRemoteResource[]> => result.status === "fulfilled"
+        );
+        if (succeeded.length === 0) {
+          throw (results[0] as PromiseRejectedResult).reason;
+        }
+        fetched = succeeded.flatMap((result) => result.value);
+      },
+      "azpanel 资源已刷新",
+      () => setAzRemoteResources(fetched)
+    );
   }
 
   function selectGlobalPoolItem(itemId: number) {
@@ -2138,7 +2216,8 @@ function GroupsPanel({
             probe_mode: originAdd.probe_mode,
             remark: originAdd.remark.trim() || null,
             enabled: originAdd.enabled,
-            azpanel_resource_id: originAdd.azpanel_resource_id === "" ? null : originAdd.azpanel_resource_id
+            azpanel_resource_id: originAdd.azpanel_resource_id === "" ? null : originAdd.azpanel_resource_id,
+            azpanel_remote_key: originAdd.azpanel_remote_key || null
           })
         });
       },
@@ -3001,23 +3080,49 @@ function GroupsPanel({
             </label>
             <label>
               从 azpanel 云资源选择（自动绑定换 IP）
-              <select
-                value={originAdd.azpanel_resource_id}
-                onChange={(event) => selectAzPanelResource(event.target.value ? Number(event.target.value) : "")}
-                disabled={bindableAzResources.length === 0}
-              >
-                <option value="">{bindableAzResources.length > 0 ? "不绑定云资源" : "暂无已启用的云资源"}</option>
-                {bindableAzResources.map((item) => (
-                  <option value={item.id} key={item.id}>
-                    {item.name} · {item.provider.toUpperCase()} · {item.current_ip ? `${item.current_ip}:${item.port}` : "未记录 IP"}{item.origin_id ? " · 已绑定其他源站" : ""}
+              <div className="selectWithAction">
+                <select
+                  value={azSelectValue}
+                  onChange={(event) => selectAzPanelResource(event.target.value)}
+                  disabled={bindableAzResources.length === 0 && unaddedRemoteResources.length === 0}
+                >
+                  <option value="">
+                    {bindableAzResources.length > 0 || unaddedRemoteResources.length > 0 ? "不绑定云资源" : "暂无云资源，点右侧刷新从 azpanel 拉取"}
                   </option>
-                ))}
-              </select>
+                  {unaddedRemoteResources.length > 0 && (
+                    <optgroup label="azpanel 上未添加的机器（选中会自动新增云资源）">
+                      {unaddedRemoteResources.map((item) => (
+                        <option value={`remote-${item.key}`} key={`remote-${item.key}`}>
+                          {item.name} · {item.provider.toUpperCase()} · {item.current_ip ? `${item.current_ip}:${item.port}` : "未记录 IP"}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {bindableAzResources.length > 0 && (
+                    <optgroup label="已添加的云资源">
+                      {bindableAzResources.map((item) => (
+                        <option value={`local-${item.id}`} key={`local-${item.id}`}>
+                          {item.name} · {item.provider.toUpperCase()} · {item.current_ip ? `${item.current_ip}:${item.port}` : "未记录 IP"} · {item.origin_id ? `已绑定 ${originLabelById.get(item.origin_id) || "其他源站"}` : "未绑定"}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+                <button type="button" className="secondary" title="从 azpanel 拉取最新资源列表" onClick={refreshAzRemoteResources}>
+                  <RefreshCw size={15} />
+                  <span>刷新</span>
+                </button>
+              </div>
             </label>
             <label>
               备用 IP / IPv6 / 域名
-              <input placeholder="例如 192.0.2.10 或 backup.example.com" value={originAdd.target} onChange={(event) => setOriginAdd((current) => ({ ...current, target: event.target.value, azpanel_resource_id: "" }))} />
+              <input placeholder="例如 192.0.2.10 或 backup.example.com" value={originAdd.target} onChange={(event) => setOriginAdd((current) => ({ ...current, target: event.target.value, azpanel_resource_id: "", azpanel_remote_key: "" }))} />
             </label>
+            {originAdd.azpanel_remote_key !== "" && (
+              <div className="originHint">
+                添加后会自动在「自动换 IP」里新增这台机器并绑定到此备用目标：源站疑似被墙时自动调用 azpanel 换 IP，新 IP 会同步回源站。
+              </div>
+            )}
             {originAdd.azpanel_resource_id !== "" && (
               <div className="originHint">
                 添加后会把选中的云资源绑定到这个备用目标：源站疑似被墙时自动调用 azpanel 换 IP，新 IP 会同步回源站；机器宕机不会换 IP。若该资源之前绑定了其他源站，会改绑到这里。

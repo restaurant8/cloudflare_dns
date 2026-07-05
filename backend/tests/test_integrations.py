@@ -366,3 +366,31 @@ def test_remote_resource_prune_keeps_other_provider_cache(monkeypatch):
 
     providers = sorted(row.provider for row in db.query(AzPanelRemoteResource).all())
     assert providers == ["aws", "azure"]
+
+def test_remote_resource_refresh_with_empty_list_clears_cache(monkeypatch):
+    db = make_session()
+    update_azpanel_settings(db, {"base_url": "https://az.example.com", "api_token": "secret-token"})
+
+    def make_response(resources):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                # azpanel 实际返回的嵌套结构
+                return {"status": "success", "data": {"resources": resources}}
+
+        return Response()
+
+    seeded = [{"provider": "aws", "name": "old-node", "resource_id": "i-1", "current_ip": "203.0.113.9"}]
+    monkeypatch.setattr("app.integrations.httpx.get", lambda *args, **kwargs: make_response(seeded))
+    assert len(list_azpanel_remote_resources(db, "aws")) == 1
+    db.commit()
+
+    # azpanel 侧机器全部删除：空列表是有效结果，必须清空而不是回退到缓存
+    monkeypatch.setattr("app.integrations.httpx.get", lambda *args, **kwargs: make_response([]))
+    resources = list_azpanel_remote_resources(db, "aws")
+    db.commit()
+
+    assert resources == []
+    assert db.query(AzPanelRemoteResource).count() == 0
