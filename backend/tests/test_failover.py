@@ -500,7 +500,8 @@ def test_evaluate_probes_group_before_switching_from_failed_current(monkeypatch)
     assert group.current_origin_id == backup.id
 
 
-def test_evaluate_triggers_ip_change_when_current_machine_down(monkeypatch):
+def test_evaluate_does_not_trigger_ip_change_when_machine_down(monkeypatch):
+    # 机器挂了换 IP 也救不回来：只有疑似被墙才自动换 IP。
     db = make_session()
     group, current = setup_group(db, "192.0.2.10")
     current.status = "machine_down"
@@ -517,7 +518,49 @@ def test_evaluate_triggers_ip_change_when_current_machine_down(monkeypatch):
 
     evaluate_failover_groups(db)
 
-    assert calls == [(current.id, f"{group.hostname} origin {current.target} is machine_down")]
+    assert calls == []
+
+
+def test_evaluate_does_not_trigger_ip_change_for_default_mode_unhealthy(monkeypatch):
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    current.status = "unhealthy"
+    group.current_origin_id = current.id
+    db.commit()
+    calls = []
+
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.failover.trigger_ip_change_for_origin",
+        lambda db_arg, origin_arg, reason: calls.append((origin_arg.id, reason)),
+    )
+
+    evaluate_failover_groups(db)
+
+    assert calls == []
+
+
+def test_evaluate_triggers_ip_change_for_china_only_unhealthy(monkeypatch):
+    # china_only 策略没有国外探针区分被墙和宕机，unhealthy 仍按疑似被墙处理。
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    current.status = "unhealthy"
+    current.probe_mode = "china_only"
+    group.current_origin_id = current.id
+    db.commit()
+    calls = []
+
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.failover.trigger_ip_change_for_origin",
+        lambda db_arg, origin_arg, reason: calls.append((origin_arg.id, reason)),
+    )
+
+    evaluate_failover_groups(db)
+
+    assert calls == [(current.id, f"{group.hostname} origin {current.target} is unhealthy")]
 
 
 def test_evaluate_triggers_ip_change_for_blocked_non_current_origin(monkeypatch):

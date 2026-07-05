@@ -267,6 +267,8 @@ class OriginCreate(BaseModel):
     probe_mode: Literal["default", "local_only", "china_only", "any"] = "default"
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool = True
+    # 可选：创建后把这个 azpanel 云资源绑定到新源站，源站被墙时自动换 IP
+    azpanel_resource_id: int | None = None
 
 
 class OriginBulkCreate(BaseModel):

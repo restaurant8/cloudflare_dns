@@ -281,3 +281,88 @@ def test_trigger_ip_change_syncs_mismatched_resource_ip_before_changing(monkeypa
     assert origin.status == "unknown"
     assert origin.last_checked_at is None
     assert origin.probe_states == []
+
+def test_remote_resource_refresh_prunes_resources_deleted_on_azpanel(monkeypatch):
+    db = make_session()
+    update_azpanel_settings(db, {"base_url": "https://az.example.com", "api_token": "secret-token"})
+
+    def make_response(resources):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"resources": resources}
+
+        return Response()
+
+    first_batch = [
+        {
+            "provider": "aws",
+            "name": "tokyo-node",
+            "resource_id": "i-123",
+            "account_id": "aws-main",
+            "region": "ap-northeast-1",
+            "current_ip": "203.0.113.10",
+        },
+        {
+            "provider": "aws",
+            "name": "osaka-node",
+            "resource_id": "i-456",
+            "account_id": "aws-main",
+            "region": "ap-northeast-3",
+            "current_ip": "203.0.113.11",
+        },
+    ]
+    monkeypatch.setattr("app.integrations.httpx.get", lambda *args, **kwargs: make_response(first_batch))
+    assert len(list_azpanel_remote_resources(db, "aws")) == 2
+    db.commit()
+
+    # osaka-node 在 azpanel 侧被删除，刷新后应从列表和缓存里消失
+    second_batch = [first_batch[0]]
+    monkeypatch.setattr("app.integrations.httpx.get", lambda *args, **kwargs: make_response(second_batch))
+    resources = list_azpanel_remote_resources(db, "aws")
+    db.commit()
+
+    assert [item["resource_id"] for item in resources] == ["i-123"]
+    cached_rows = db.query(AzPanelRemoteResource).all()
+    assert [row.resource_id for row in cached_rows] == ["i-123"]
+
+    # azpanel 挂掉时仍回退到（已清理过的）本地缓存
+    def failing_get(*args, **kwargs):
+        raise RuntimeError("azpanel unavailable")
+
+    monkeypatch.setattr("app.integrations.httpx.get", failing_get)
+    fallback = list_azpanel_remote_resources(db, "aws")
+
+    assert [item["resource_id"] for item in fallback] == ["i-123"]
+    assert fallback[0]["cached"] is True
+
+
+def test_remote_resource_prune_keeps_other_provider_cache(monkeypatch):
+    db = make_session()
+    update_azpanel_settings(db, {"base_url": "https://az.example.com", "api_token": "secret-token"})
+
+    def make_response(resources):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"resources": resources}
+
+        return Response()
+
+    azure_batch = [{"provider": "azure", "name": "az-node", "resource_id": "vm-1", "current_ip": "203.0.113.20"}]
+    monkeypatch.setattr("app.integrations.httpx.get", lambda *args, **kwargs: make_response(azure_batch))
+    list_azpanel_remote_resources(db, "azure")
+    db.commit()
+
+    # 只刷新 AWS 不应清掉 Azure 的缓存
+    aws_batch = [{"provider": "aws", "name": "aws-node", "resource_id": "i-789", "current_ip": "203.0.113.30"}]
+    monkeypatch.setattr("app.integrations.httpx.get", lambda *args, **kwargs: make_response(aws_batch))
+    list_azpanel_remote_resources(db, "aws")
+    db.commit()
+
+    providers = sorted(row.provider for row in db.query(AzPanelRemoteResource).all())
+    assert providers == ["aws", "azure"]

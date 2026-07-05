@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, selectinload
 from .cloudflare import CloudflareClient, CloudflareError
 from .dns_utils import record_type_for_target_type
 from .events import add_event
-from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, run_local_checks
+from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, PROBE_MODE_CHINA_ONLY, origin_probe_mode, run_local_checks
 from .integrations import trigger_ip_change_for_origin
 from .models import DnsRecord, FailoverGroup, FailoverHostname, Origin, Zone
 from .notifier import send_webhooks
@@ -512,15 +512,22 @@ def _evaluate_single_group(
     if _should_probe_group_before_switch(group):
         run_local_checks(db, group_id=group.id, include_all=False)
 
-    # Trigger an automatic IP change for every blocked/down origin in the group,
-    # not just the currently published one. Otherwise an origin that gets blocked
-    # and then failed away from would never have its IP replaced, because it is no
+    # Trigger an automatic IP change for every blocked origin in the group, not
+    # just the currently published one. Otherwise an origin that gets blocked and
+    # then failed away from would never have its IP replaced, because it is no
     # longer the "current" origin on subsequent cycles. Each attempt is still gated
     # by the resource's auto_change_on_blocked flag and cooldown.
-    # "unhealthy" is included on purpose: origins with probe_mode=china_only report
-    # a GFW block as "unhealthy" (they have no foreign probes to tell the two apart).
+    # Only a GFW block is fixable by rotating the IP: a machine that is down stays
+    # down on a new IP, so machine_down/unhealthy do NOT trigger a change. The one
+    # exception is probe_mode=china_only, which has no foreign probes to tell the
+    # two apart and reports a suspected block as "unhealthy".
     for group_origin in group.origins:
-        if group_origin.enabled and group_origin.status in {"blocked", "machine_down", "unhealthy"}:
+        if not group_origin.enabled:
+            continue
+        suspected_block = group_origin.status == "blocked" or (
+            group_origin.status == "unhealthy" and origin_probe_mode(group_origin) == PROBE_MODE_CHINA_ONLY
+        )
+        if suspected_block:
             trigger_ip_change_for_origin(db, group_origin, f"{group.hostname} origin {group_origin.target} is {group_origin.status}")
 
     desired = choose_desired_origin(group.origins, group.current_origin_id)

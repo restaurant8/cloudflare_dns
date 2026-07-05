@@ -4,11 +4,14 @@ from types import SimpleNamespace
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+import pytest
+from fastapi import HTTPException
+
 from app.database import Base
-from app.models import Agent, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
+from app.models import Agent, AzPanelResource, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, resolved_ips
-from app.routes.groups import add_group_hostname, create_collection, create_global_origin, create_group, delete_global_origin, delete_group_hostname, update_global_origin, update_group, update_origin
-from app.schemas import FailoverCollectionCreate, FailoverGlobalOriginCreate, FailoverGlobalOriginUpdate, FailoverGroupCreate, FailoverGroupUpdate, FailoverHostnameCreate, OriginOut, OriginUpdate
+from app.routes.groups import add_group_hostname, create_collection, create_global_origin, create_group, create_origin, delete_global_origin, delete_group_hostname, update_global_origin, update_group, update_origin
+from app.schemas import FailoverCollectionCreate, FailoverGlobalOriginCreate, FailoverGlobalOriginUpdate, FailoverGroupCreate, FailoverGroupUpdate, FailoverHostnameCreate, OriginCreate, OriginOut, OriginUpdate
 from app.security import encrypt_secret
 
 
@@ -599,3 +602,51 @@ def test_origin_output_hides_disabled_agent_probe_state():
 
     assert {state.agent_name for state in output.probe_states} == {None, "上海"}
     assert "杭州" not in {state.agent_name for state in output.probe_states}
+
+
+def test_create_origin_binds_azpanel_resource_and_syncs_ip():
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com")
+    db.add(group)
+    db.flush()
+    resource = AzPanelResource(
+        name="az-node",
+        provider="azure",
+        resource_id="vm-1",
+        current_ip="203.0.113.5",
+        port=443,
+        auto_update_origin=True,
+    )
+    db.add(resource)
+    db.commit()
+
+    origin = create_origin(
+        group.id,
+        OriginCreate(target="192.0.2.99", port=443, priority=10, azpanel_resource_id=resource.id),
+        user,
+        db,
+    )
+
+    assert resource.origin_id == origin.id
+    # 绑定后云资源的当前 IP 立即同步到新源站，保持一致
+    assert origin.target == "203.0.113.5"
+    assert origin.port == 443
+
+
+def test_create_origin_rejects_missing_azpanel_resource():
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com")
+    db.add(group)
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        create_origin(
+            group.id,
+            OriginCreate(target="192.0.2.99", port=22, priority=10, azpanel_resource_id=999),
+            user,
+            db,
+        )
+
+    assert exc_info.value.status_code == 404

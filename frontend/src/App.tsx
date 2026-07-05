@@ -53,7 +53,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
 type ProbeMode = "default" | "local_only" | "china_only" | "any";
-type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean };
+type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; azpanel_resource_id: number | "" };
 type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean };
 type GlobalOriginDraft = OriginAddDraft;
 type CollectionDraft = { name: string };
@@ -383,8 +383,8 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true };
-const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, azpanel_resource_id: "" };
+const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, azpanel_resource_id: "" };
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
@@ -835,7 +835,7 @@ export default function App() {
           />
         )}
         {section === "groups" && (
-          <GroupsPanel token={token} collections={failoverCollections} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} agents={agents} act={act} />
+          <GroupsPanel token={token} collections={failoverCollections} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={act} />
         )}
         {section === "targetPool" && (
           <TargetPoolPanel token={token} targetPool={targetPool} groups={groups} act={act} />
@@ -1871,6 +1871,7 @@ function GroupsPanel({
   groups,
   targetPool,
   externalIpItems,
+  azPanelResources,
   agents,
   act
 }: {
@@ -1879,6 +1880,7 @@ function GroupsPanel({
   groups: FailoverGroup[];
   targetPool: TargetPoolItem[];
   externalIpItems: ExternalIpItem[];
+  azPanelResources: AzPanelResource[];
   agents: Agent[];
   act: ActionRunner;
 }) {
@@ -1904,6 +1906,7 @@ function GroupsPanel({
   const addingHostnameGroup = addingHostnameGroupId ? groups.find((group) => group.id === addingHostnameGroupId) : undefined;
   const enabledPoolItems = targetPool.filter((item) => item.enabled);
   const healthyExternalItems = externalIpItems.filter((item) => item.status === "healthy");
+  const bindableAzResources = azPanelResources.filter((item) => item.enabled);
   const addTargetType = inferDraftTargetType(originAdd.target);
   const globalAddTargetType = inferDraftTargetType(globalOriginAdd.target);
   const selectedPoolItemId = enabledPoolItems.find((item) => item.target === originAdd.target && item.port === originAdd.port)?.id || "";
@@ -1972,7 +1975,8 @@ function GroupsPanel({
       preferred_agent_id: "",
       probe_mode: "default",
       remark: "",
-      enabled: true
+      enabled: true,
+      azpanel_resource_id: ""
     });
   }
 
@@ -2019,7 +2023,8 @@ function GroupsPanel({
         preferred_agent_id: origin.preferred_agent_id || "",
         probe_mode: normalizeProbeMode(origin.probe_mode),
         remark: origin.remark || "",
-        enabled: origin.enabled
+        enabled: origin.enabled,
+        azpanel_resource_id: ""
       }
     }));
   }
@@ -2059,7 +2064,8 @@ function GroupsPanel({
       preferred_agent_id: "",
       probe_mode: "default",
       remark: "",
-      enabled: true
+      enabled: true,
+      azpanel_resource_id: ""
     });
   }
 
@@ -2074,7 +2080,27 @@ function GroupsPanel({
       expanded_ip_priorities: {},
       preferred_agent_id: current.preferred_agent_id,
       remark: item.remark || "",
-      enabled: true
+      enabled: true,
+      azpanel_resource_id: ""
+    }));
+  }
+
+  function selectAzPanelResource(resourceId: number | "") {
+    if (resourceId === "") {
+      setOriginAdd((current) => ({ ...current, azpanel_resource_id: "" }));
+      return;
+    }
+    const resource = azPanelResources.find((item) => item.id === resourceId);
+    if (!resource) return;
+    setOriginAdd((current) => ({
+      ...current,
+      target: resource.current_ip || current.target,
+      port: resource.port || current.port || 22,
+      publish_mode: "direct",
+      expanded_ip_priorities: {},
+      remark: current.remark || resource.name,
+      enabled: true,
+      azpanel_resource_id: resource.id
     }));
   }
 
@@ -2111,7 +2137,8 @@ function GroupsPanel({
             preferred_agent_id: originAdd.preferred_agent_id === "" ? null : originAdd.preferred_agent_id,
             probe_mode: originAdd.probe_mode,
             remark: originAdd.remark.trim() || null,
-            enabled: originAdd.enabled
+            enabled: originAdd.enabled,
+            azpanel_resource_id: originAdd.azpanel_resource_id === "" ? null : originAdd.azpanel_resource_id
           })
         });
       },
@@ -2243,7 +2270,8 @@ function GroupsPanel({
       expanded_ip_priorities: {},
       preferred_agent_id: current.preferred_agent_id,
       remark: item.name || "",
-      enabled: true
+      enabled: true,
+      azpanel_resource_id: ""
     }));
   }
 
@@ -2972,9 +3000,29 @@ function GroupsPanel({
               </select>
             </label>
             <label>
-              备用 IP / IPv6 / 域名
-              <input placeholder="例如 192.0.2.10 或 backup.example.com" value={originAdd.target} onChange={(event) => setOriginAdd((current) => ({ ...current, target: event.target.value }))} />
+              从 azpanel 云资源选择（自动绑定换 IP）
+              <select
+                value={originAdd.azpanel_resource_id}
+                onChange={(event) => selectAzPanelResource(event.target.value ? Number(event.target.value) : "")}
+                disabled={bindableAzResources.length === 0}
+              >
+                <option value="">{bindableAzResources.length > 0 ? "不绑定云资源" : "暂无已启用的云资源"}</option>
+                {bindableAzResources.map((item) => (
+                  <option value={item.id} key={item.id}>
+                    {item.name} · {item.provider.toUpperCase()} · {item.current_ip ? `${item.current_ip}:${item.port}` : "未记录 IP"}{item.origin_id ? " · 已绑定其他源站" : ""}
+                  </option>
+                ))}
+              </select>
             </label>
+            <label>
+              备用 IP / IPv6 / 域名
+              <input placeholder="例如 192.0.2.10 或 backup.example.com" value={originAdd.target} onChange={(event) => setOriginAdd((current) => ({ ...current, target: event.target.value, azpanel_resource_id: "" }))} />
+            </label>
+            {originAdd.azpanel_resource_id !== "" && (
+              <div className="originHint">
+                添加后会把选中的云资源绑定到这个备用目标：源站疑似被墙时自动调用 azpanel 换 IP，新 IP 会同步回源站；机器宕机不会换 IP。若该资源之前绑定了其他源站，会改绑到这里。
+              </div>
+            )}
             <label>
               备注
               <input placeholder="例如 香港备用、线路 1" value={originAdd.remark} onChange={(event) => setOriginAdd((current) => ({ ...current, remark: event.target.value }))} />
@@ -3983,7 +4031,7 @@ function AzPanelPanel({
       <form className="panel" onSubmit={saveResource}>
         <div className="panelTitle">
           <h2>{editingId ? "修改云资源" : "添加云资源"}</h2>
-          <p>先从 azpanel 获取资源再选择，AWS 加载过的机器会保存到本地缓存。</p>
+          <p>先从 azpanel 获取资源再选择，列表和 azpanel 保持一致；拉取失败时才回退到本地缓存。</p>
         </div>
         <div className="settingsGrid">
           <label>
@@ -3998,7 +4046,7 @@ function AzPanelPanel({
               <RefreshCw size={16} />
               <span>刷新资源</span>
             </button>
-            <small>从 azpanel 拉取可用资源；拉取过的 AWS 机器会保留在本地表。</small>
+            <small>从 azpanel 拉取可用资源；已在 azpanel 删除的资源会自动从列表清理。</small>
           </div>
           <label className="wideField">
             azpanel 资源
@@ -4079,7 +4127,7 @@ function AzPanelPanel({
           </label>
           <label className="inlineCheck">
             <input type="checkbox" checked={resourceDraft.auto_change_on_blocked} onChange={(event) => setResourceDraft((current) => ({ ...current, auto_change_on_blocked: event.target.checked }))} />
-            源站故障自动换 IP
+            源站被墙自动换 IP
           </label>
           <label className="inlineCheck">
             <input type="checkbox" checked={resourceDraft.auto_update_origin} onChange={(event) => setResourceDraft((current) => ({ ...current, auto_update_origin: event.target.checked }))} />
@@ -4098,7 +4146,7 @@ function AzPanelPanel({
       <div className="panel">
         <div className="panelTitle">
           <h2>云资源</h2>
-          <p>手动换 IP 会立即调用 azpanel；自动换 IP 会在绑定的当前源站疑似被墙、机器挂了或本地不可达时触发。</p>
+          <p>手动换 IP 会立即调用 azpanel；自动换 IP 只在绑定源站疑似被墙时触发，机器宕机不会换 IP（换了也救不回来）。</p>
         </div>
         <div className="poolList">
           {resources.map((resource) => (

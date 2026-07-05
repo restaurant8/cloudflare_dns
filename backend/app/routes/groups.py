@@ -9,7 +9,8 @@ from ..dns_utils import normalize_hostname, parse_target
 from ..events import add_event
 from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records, zone_for_hostname
 from ..health import run_local_checks
-from ..models import Agent, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
+from ..integrations import sync_resource_current_ip_to_origin
+from ..models import Agent, AzPanelResource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
 from ..origin_expansion import (
     DIRECT_PUBLISH_MODE,
@@ -742,6 +743,11 @@ def create_origin(group_id: int, payload: OriginCreate, _: User = Depends(get_cu
     group = db.get(FailoverGroup, group_id)
     if group is None:
         raise HTTPException(status_code=404, detail="切换组不存在")
+    resource = None
+    if payload.azpanel_resource_id is not None:
+        resource = db.get(AzPanelResource, payload.azpanel_resource_id)
+        if resource is None:
+            raise HTTPException(status_code=404, detail="azpanel 云资源不存在")
     origin = _origin_from_payload(db, group, payload)
     duplicate = (
         db.query(Origin)
@@ -751,6 +757,13 @@ def create_origin(group_id: int, payload: OriginCreate, _: User = Depends(get_cu
     if duplicate:
         raise HTTPException(status_code=409, detail=f"{origin.target}:{origin.port} 已经在备用目标池中")
     db.add(origin)
+    if resource is not None:
+        db.flush()
+        resource.origin_id = origin.id
+        try:
+            sync_resource_current_ip_to_origin(db, resource)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"云资源当前 IP 无法同步到源站: {exc}") from exc
     db.commit()
     db.refresh(origin)
     return origin

@@ -291,6 +291,27 @@ def _list_cached_remote_resources(db: Session, provider: str | None = None) -> l
     return [_remote_resource_from_cache(row) for row in rows]
 
 
+def _prune_stale_remote_resources(db: Session, provider: str | None, fresh_items: list[dict[str, Any]]) -> int:
+    """Drop cached rows (scoped to ``provider``) that azpanel no longer reports.
+
+    Without this the picker keeps accumulating every resource ever seen, so
+    machines deleted on the azpanel side stay in the dropdown forever.
+    """
+    keep = {_remote_resource_identity(item) for item in fresh_items}
+    query = db.query(AzPanelRemoteResource)
+    if provider:
+        query = query.filter(AzPanelRemoteResource.provider == provider)
+    removed = 0
+    for row in query.all():
+        identity = (row.provider, row.account_id or "", row.region or "", row.resource_id, row.ip_version)
+        if identity not in keep:
+            db.delete(row)
+            removed += 1
+    if removed:
+        db.flush()
+    return removed
+
+
 def _cache_remote_resources(db: Session, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     now = datetime.utcnow()
     saved: list[dict[str, Any]] = []
@@ -403,10 +424,12 @@ def list_azpanel_remote_resources(db: Session, provider: str | None = None) -> l
     normalized = [_normalize_remote_resource(item) for item in raw_items if isinstance(item, dict)]
     remote_items = _cache_remote_resources(db, [item for item in normalized if item is not None])
     _sync_local_resources_from_remote_items(db, remote_items)
-    merged = {_remote_resource_identity(item): item for item in cached_items}
-    merged.update({_remote_resource_identity(item): item for item in remote_items})
+    # The cache mirrors azpanel: on a successful fetch it is rewritten to exactly
+    # the fresh listing and only serves as a fallback when azpanel is unreachable.
+    # Merging old cached rows back in here would resurrect deleted machines.
+    _prune_stale_remote_resources(db, provider if provider in {"azure", "aws"} else None, remote_items)
     return sorted(
-        list(merged.values()),
+        remote_items,
         key=lambda item: (item["provider"], item.get("region") or "", item["name"], item["resource_id"], item["ip_version"]),
     )
 
