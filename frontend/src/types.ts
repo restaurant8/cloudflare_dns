@@ -94,6 +94,19 @@ export type FailoverHostname = {
   created_at: string;
 };
 
+export type FailoverTimeRule = {
+  id: number;
+  group_id: number;
+  origin_id: number;
+  name: string;
+  timezone: string;
+  weekdays: number[];
+  start_time: string;
+  end_time: string;
+  enabled: boolean;
+  last_active?: boolean | null;
+};
+
 export type FailoverGlobalOrigin = {
   id: number;
   collection_id: number;
@@ -161,6 +174,7 @@ export type FailoverGroup = {
   current_record_id: string | null;
   last_switch_at: string | null;
   last_error: string | null;
+  time_rule: FailoverTimeRule | null;
   hostnames: FailoverHostname[];
   origins: Origin[];
 };

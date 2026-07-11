@@ -59,6 +59,14 @@ REGION_NAMES = {
     "foreign": "国外",
 }
 
+SWITCH_REASON_NAMES = {
+    "time_rule": "分时入口",
+    "time_rule_fallback": "分时入口故障降级",
+    "priority": "常规优先级",
+    "health_failover": "健康故障切换",
+    "consistency_repair": "DNS 一致性修复",
+}
+
 SHANGHAI_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
 
 TELEGRAM_LEVEL_PRIORITIES = {
@@ -125,6 +133,11 @@ def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
                 _line("旧源站 ID", payload.get("old_origin_id")),
             ]
         )
+        switch_reason = payload.get("switch_reason")
+        if switch_reason:
+            lines.append(_line("切换原因", SWITCH_REASON_NAMES.get(str(switch_reason), switch_reason)))
+        if payload.get("time_rule_id"):
+            lines.append(_line("分时规则 ID", payload.get("time_rule_id")))
     elif event_type == "origin.status_changed":
         lines.extend(
             [

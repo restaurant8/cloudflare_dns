@@ -12,12 +12,16 @@ def test_render_telegram_dns_switch_template():
             "content": "2001:db8::1",
             "new_origin_id": 2,
             "old_origin_id": 1,
+            "switch_reason": "time_rule",
+            "time_rule_id": 7,
         },
     )
 
     assert "DNS 已切换" in message
     assert "www.example.com" in message
     assert "AAAA 2001:db8::1" in message
+    assert "分时入口" in message
+    assert "分时规则 ID" in message
 
 
 def test_render_telegram_escapes_html():

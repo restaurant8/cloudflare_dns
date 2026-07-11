@@ -7,7 +7,7 @@ from app.database import Base
 from app.dns_utils import parse_target
 from app.cloudflare import CloudflareError
 from app.failover import choose_desired_origin, evaluate_failover_groups, publish_origin, validate_group_hostname_records
-from app.models import CloudflareCredential, FailoverGroup, FailoverHostname, Origin, Zone
+from app.models import CloudflareCredential, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, selected_healthy_ip, set_expanded_ip_priorities, set_healthy_ips, set_published_ips
 from app.security import encrypt_secret
 
@@ -97,6 +97,50 @@ def setup_group(db, target: str, current_record_id: str | None = "record-1"):
     db.refresh(group)
     db.refresh(origin_model)
     return group, origin_model
+
+
+def add_time_rule(
+    db,
+    group: FailoverGroup,
+    rule_origin: Origin,
+    *,
+    start_minute: int = 9 * 60,
+    end_minute: int = 17 * 60,
+    weekdays_mask: int = 1 << 0,
+    timezone: str = "UTC",
+    last_active: bool = False,
+):
+    rule = FailoverTimeRule(
+        group_id=group.id,
+        origin_id=rule_origin.id,
+        name="scheduled",
+        timezone=timezone,
+        weekdays_mask=weekdays_mask,
+        start_minute=start_minute,
+        end_minute=end_minute,
+        enabled=True,
+        last_active=last_active,
+    )
+    db.add(rule)
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+def capture_dns_switches(monkeypatch):
+    events = []
+
+    def fake_publish_origin(_db, _group, origin_model):
+        return {"id": "record-1", "type": "A", "content": origin_model.target}
+
+    def fake_add_event(_db, event_type, _severity, _message, payload):
+        if event_type == "dns.switched":
+            events.append(payload)
+
+    monkeypatch.setattr("app.failover.publish_origin", fake_publish_origin)
+    monkeypatch.setattr("app.failover.add_event", fake_add_event)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
+    return events
 
 
 def test_publish_origin_updates_record_type_for_ipv6(monkeypatch):
@@ -383,6 +427,12 @@ def test_publish_origin_reclaims_orphaned_app_managed_records(monkeypatch):
 def test_evaluate_republishes_current_origin_when_dns_drifted(monkeypatch):
     FakeCloudflareClient.records = [{"id": "record-1", "name": "www.example.com", "type": "A", "content": "192.0.2.99", "ttl": 60, "proxied": False}]
     monkeypatch.setattr("app.failover.CloudflareClient", FakeCloudflareClient)
+    events = []
+    monkeypatch.setattr(
+        "app.failover.add_event",
+        lambda _db, event_type, _severity, _message, payload: events.append(payload) if event_type == "dns.switched" else None,
+    )
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
     db = make_session()
     group, origin_model = setup_group(db, "192.0.2.20", current_record_id="record-1")
     group.current_origin_id = origin_model.id
@@ -394,6 +444,8 @@ def test_evaluate_republishes_current_origin_when_dns_drifted(monkeypatch):
     assert switches == 0
     assert FakeCloudflareClient.records[0]["content"] == "192.0.2.20"
     assert FakeCloudflareClient.records[0]["type"] == "A"
+    assert events[-1]["switch_reason"] == "consistency_repair"
+    assert events[-1]["time_rule_id"] is None
 
 
 def test_publish_origin_publishes_each_hostname_into_its_own_zone(monkeypatch):
@@ -702,6 +754,259 @@ def test_pending_origin_checks_do_not_send_no_healthy_notification(monkeypatch):
     assert switches == 0
     assert sent == []
     assert group.last_error == "等待源站探测结果"
+
+
+def test_active_time_rule_overrides_priority_and_bypasses_cooldown(monkeypatch):
+    db = make_session()
+    group, primary = setup_group(db, "192.0.2.10")
+    primary.priority = 1
+    scheduled = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=100,
+    )
+    db.add(scheduled)
+    db.flush()
+    group.current_origin_id = primary.id
+    now = datetime(2026, 7, 6, 10, 0)
+    group.last_switch_at = now
+    group.min_switch_interval_seconds = 3600
+    db.commit()
+    rule = add_time_rule(db, group, scheduled)
+    events = capture_dns_switches(monkeypatch)
+
+    switches = evaluate_failover_groups(db, now=now)
+
+    assert switches == 1
+    assert group.current_origin_id == scheduled.id
+    assert rule.last_active is True
+    assert events[-1]["switch_reason"] == "time_rule"
+    assert events[-1]["time_rule_id"] == rule.id
+
+
+def test_time_rule_outside_window_uses_normal_priority(monkeypatch):
+    db = make_session()
+    group, primary = setup_group(db, "192.0.2.10")
+    primary.priority = 1
+    scheduled = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=100,
+    )
+    db.add(scheduled)
+    db.flush()
+    group.current_origin_id = scheduled.id
+    db.commit()
+    rule = add_time_rule(db, group, scheduled)
+    events = capture_dns_switches(monkeypatch)
+
+    switches = evaluate_failover_groups(db, now=datetime(2026, 7, 6, 18, 0))
+
+    assert switches == 1
+    assert group.current_origin_id == primary.id
+    assert rule.last_active is False
+    assert events[-1]["switch_reason"] == "priority"
+    assert events[-1]["time_rule_id"] is None
+
+
+def test_active_time_rule_falls_back_when_scheduled_origin_is_unhealthy(monkeypatch):
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    current.priority = 20
+    normal_best = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=10,
+    )
+    scheduled = Origin(
+        group_id=group.id,
+        target="192.0.2.30",
+        target_type="ipv4",
+        port=443,
+        status="machine_down",
+        priority=100,
+    )
+    db.add_all([normal_best, scheduled])
+    db.flush()
+    group.current_origin_id = current.id
+    db.commit()
+    rule = add_time_rule(db, group, scheduled)
+    events = capture_dns_switches(monkeypatch)
+
+    switches = evaluate_failover_groups(db, now=datetime(2026, 7, 6, 10, 0))
+
+    assert switches == 1
+    assert group.current_origin_id == normal_best.id
+    assert events[-1]["switch_reason"] == "time_rule_fallback"
+    assert events[-1]["time_rule_id"] == rule.id
+
+
+def test_leaving_time_rule_window_is_a_boundary_and_bypasses_cooldown(monkeypatch):
+    db = make_session()
+    group, primary = setup_group(db, "192.0.2.10")
+    primary.priority = 1
+    scheduled = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=100,
+    )
+    db.add(scheduled)
+    db.flush()
+    group.current_origin_id = scheduled.id
+    now = datetime(2026, 7, 6, 17, 0)
+    group.last_switch_at = now
+    group.min_switch_interval_seconds = 3600
+    db.commit()
+    rule = add_time_rule(db, group, scheduled, last_active=True)
+    events = capture_dns_switches(monkeypatch)
+
+    switches = evaluate_failover_groups(db, now=now)
+
+    assert switches == 1
+    assert group.current_origin_id == primary.id
+    assert rule.last_active is False
+    assert events[-1]["switch_reason"] == "priority"
+    assert events[-1]["time_rule_id"] == rule.id
+
+
+def test_scheduled_origin_recovery_inside_window_bypasses_cooldown(monkeypatch):
+    db = make_session()
+    group, primary = setup_group(db, "192.0.2.10")
+    primary.priority = 1
+    scheduled = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=100,
+    )
+    db.add(scheduled)
+    db.flush()
+    group.current_origin_id = primary.id
+    now = datetime(2026, 7, 6, 10, 0)
+    group.last_switch_at = now
+    group.min_switch_interval_seconds = 3600
+    db.commit()
+    add_time_rule(db, group, scheduled, last_active=True)
+    events = capture_dns_switches(monkeypatch)
+
+    switches = evaluate_failover_groups(db, now=now)
+
+    assert switches == 1
+    assert group.current_origin_id == scheduled.id
+    assert events[-1]["switch_reason"] == "time_rule"
+
+
+def test_failed_window_exit_publish_retries_without_waiting_for_cooldown(monkeypatch):
+    db = make_session()
+    group, primary = setup_group(db, "192.0.2.10")
+    primary.priority = 1
+    scheduled = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=100,
+    )
+    db.add(scheduled)
+    db.flush()
+    group.current_origin_id = scheduled.id
+    now = datetime(2026, 7, 6, 17, 0)
+    group.last_switch_at = now
+    group.min_switch_interval_seconds = 3600
+    db.commit()
+    rule = add_time_rule(db, group, scheduled, last_active=True)
+    attempts = []
+
+    def flaky_publish(_db, _group, origin_model):
+        attempts.append(origin_model.id)
+        if len(attempts) == 1:
+            raise ValueError("temporary publish failure")
+        return {"id": "record-1", "type": "A", "content": origin_model.target}
+
+    monkeypatch.setattr("app.failover.publish_origin", flaky_publish)
+    monkeypatch.setattr("app.failover.add_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
+
+    assert evaluate_failover_groups(db, now=now) == 0
+    assert rule.last_active is False
+    assert group.last_error == "temporary publish failure"
+
+    assert evaluate_failover_groups(db, now=now) == 1
+    assert attempts == [primary.id, primary.id]
+    assert group.current_origin_id == primary.id
+    assert group.last_error is None
+
+
+def test_ordinary_healthy_priority_change_still_obeys_cooldown(monkeypatch):
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    current.priority = 10
+    preferred = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=1,
+    )
+    db.add(preferred)
+    now = datetime(2026, 7, 6, 10, 0)
+    group.current_origin_id = current.id
+    group.last_switch_at = now
+    group.min_switch_interval_seconds = 3600
+    db.commit()
+    events = capture_dns_switches(monkeypatch)
+
+    switches = evaluate_failover_groups(db, now=now)
+
+    assert switches == 0
+    assert group.current_origin_id == current.id
+    assert events == []
+
+
+def test_failed_current_origin_escapes_cooldown(monkeypatch):
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    current.status = "machine_down"
+    current.priority = 1
+    backup = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=10,
+    )
+    db.add(backup)
+    now = datetime(2026, 7, 6, 10, 0)
+    group.current_origin_id = current.id
+    group.last_switch_at = now
+    group.min_switch_interval_seconds = 3600
+    db.commit()
+    events = capture_dns_switches(monkeypatch)
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+
+    switches = evaluate_failover_groups(db, now=now)
+
+    assert switches == 1
+    assert group.current_origin_id == backup.id
+    assert events[-1]["switch_reason"] == "health_failover"
+    assert events[-1]["time_rule_id"] is None
 
 
 def test_validate_group_hostname_records_rejects_cname_conflict():

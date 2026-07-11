@@ -1,5 +1,6 @@
 import logging
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session, selectinload
 
@@ -21,6 +22,7 @@ from .origin_expansion import (
 from .runtime_settings import get_runtime_settings
 from .security import decrypt_secret
 from .sync import MANAGED_RECORD_TYPES, sync_zone_records
+from .time_routing import is_time_rule_active
 
 
 logger = logging.getLogger(__name__)
@@ -37,8 +39,20 @@ class DnsPublishError(ValueError):
         self.hostname = hostname
 
 
+@dataclass(frozen=True)
+class OriginSelection:
+    origin: Origin | None
+    switch_reason: str
+    time_rule_id: int | None
+    time_rule_boundary: bool
+
+
+def _origin_is_available(origin: Origin | None) -> bool:
+    return bool(origin is not None and origin.enabled and origin.status == ORIGIN_AVAILABLE_STATUS)
+
+
 def choose_desired_origin(origins: list[Origin], current_origin_id: int | None = None) -> Origin | None:
-    healthy = [origin for origin in origins if origin.enabled and origin.status == ORIGIN_AVAILABLE_STATUS]
+    healthy = [origin for origin in origins if _origin_is_available(origin)]
     if not healthy:
         return None
     best_priority = min(origin.priority for origin in healthy)
@@ -49,13 +63,52 @@ def choose_desired_origin(origins: list[Origin], current_origin_id: int | None =
     return sorted(candidates, key=lambda item: item.id)[0]
 
 
+def _choose_group_origin(group: FailoverGroup, now: datetime) -> OriginSelection:
+    rule = getattr(group, "time_rule", None)
+    if rule is None:
+        return OriginSelection(
+            origin=choose_desired_origin(group.origins, group.current_origin_id),
+            switch_reason="priority",
+            time_rule_id=None,
+            time_rule_boundary=False,
+        )
+
+    rule_active = is_time_rule_active(rule, now)
+    time_rule_boundary = bool(rule.last_active) != rule_active
+    rule.last_active = rule_active
+    rule_context_id = rule.id if rule_active or time_rule_boundary else None
+
+    if rule_active:
+        time_rule_origin = next((origin for origin in group.origins if origin.id == rule.origin_id), None)
+        if _origin_is_available(time_rule_origin):
+            return OriginSelection(
+                origin=time_rule_origin,
+                switch_reason="time_rule",
+                time_rule_id=rule.id,
+                time_rule_boundary=time_rule_boundary,
+            )
+        return OriginSelection(
+            origin=choose_desired_origin(group.origins, group.current_origin_id),
+            switch_reason="time_rule_fallback",
+            time_rule_id=rule.id,
+            time_rule_boundary=time_rule_boundary,
+        )
+
+    return OriginSelection(
+        origin=choose_desired_origin(group.origins, group.current_origin_id),
+        switch_reason="priority",
+        time_rule_id=rule_context_id,
+        time_rule_boundary=time_rule_boundary,
+    )
+
+
 def _current_origin(group: FailoverGroup) -> Origin | None:
     return next((origin for origin in group.origins if origin.id == group.current_origin_id), None)
 
 
 def _should_probe_group_before_switch(group: FailoverGroup) -> bool:
     current = _current_origin(group)
-    return current is None or not current.enabled or current.status != ORIGIN_AVAILABLE_STATUS
+    return not _origin_is_available(current)
 
 
 def _origin_status_summaries(group: FailoverGroup) -> list[dict]:
@@ -465,6 +518,7 @@ def evaluate_failover_groups(
     db: Session,
     commit_per_group: bool = False,
     consistency_check_interval_seconds: int = 0,
+    now: datetime | None = None,
 ) -> int:
     """Evaluate all enabled groups and publish DNS changes where needed.
 
@@ -479,12 +533,16 @@ def evaluate_failover_groups(
             selectinload(FailoverGroup.origins),
             selectinload(FailoverGroup.hostnames).selectinload(FailoverHostname.zone),
             selectinload(FailoverGroup.zone),
+            selectinload(FailoverGroup.time_rule),
         )
         .filter(FailoverGroup.enabled.is_(True))
         .all()
     )
     switches = 0
-    now = datetime.utcnow()
+    if now is None:
+        now = datetime.utcnow()
+    elif now.tzinfo is not None:
+        now = now.astimezone(timezone.utc).replace(tzinfo=None)
     settings = get_runtime_settings(db)
     for group in groups:
         try:
@@ -530,7 +588,8 @@ def _evaluate_single_group(
         if suspected_block:
             trigger_ip_change_for_origin(db, group_origin, f"{group.hostname} origin {group_origin.target} is {group_origin.status}")
 
-    desired = choose_desired_origin(group.origins, group.current_origin_id)
+    selection = _choose_group_origin(group, now)
+    desired = selection.origin
     if desired is None:
         if _has_pending_origin_checks(group):
             group.last_error = WAITING_FOR_PROBES_MESSAGE
@@ -590,6 +649,8 @@ def _evaluate_single_group(
                     "record_id": record["id"],
                     "record_type": record["type"],
                     "content": record["content"],
+                    "switch_reason": "consistency_repair",
+                    "time_rule_id": selection.time_rule_id,
                 }
                 message = f"{group.hostname} 已修正 DNS 记录为 {record['type']} {record['content']}"
                 add_event(db, "dns.switched", "info", message, payload)
@@ -597,7 +658,13 @@ def _evaluate_single_group(
         return False
     if group.last_switch_at:
         elapsed = (now - group.last_switch_at).total_seconds()
-        if elapsed < group.min_switch_interval_seconds and desired.id != group.current_origin_id:
+        current_unavailable = not _origin_is_available(_current_origin(group))
+        time_rule_override = selection.switch_reason == "time_rule"
+        # A previous publish error must remain immediately retryable. In particular,
+        # after a failed window-exit publish ``last_active`` already reflects the new
+        # window state, so the next tick is no longer a boundary by itself.
+        bypass_switch_interval = selection.time_rule_boundary or time_rule_override or current_unavailable or bool(group.last_error)
+        if elapsed < group.min_switch_interval_seconds and desired.id != group.current_origin_id and not bypass_switch_interval:
             return False
     old_origin_id = group.current_origin_id
     try:
@@ -618,6 +685,10 @@ def _evaluate_single_group(
     _consistency_checked_at[group.id] = now
     published_hostnames = record.get("hostnames") or [group.hostname]
     hostname_label = ", ".join(str(item) for item in published_hostnames)
+    switch_reason = selection.switch_reason
+    old_origin = next((origin for origin in group.origins if origin.id == old_origin_id), None)
+    if switch_reason == "priority" and old_origin_id is not None and not _origin_is_available(old_origin):
+        switch_reason = "health_failover"
     payload = {
         "group_id": group.id,
         "hostname": hostname_label,
@@ -627,6 +698,8 @@ def _evaluate_single_group(
         "record_id": record["id"],
         "record_type": record["type"],
         "content": record["content"],
+        "switch_reason": switch_reason,
+        "time_rule_id": selection.time_rule_id,
     }
     add_event(
         db,

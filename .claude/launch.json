@@ -2,21 +2,9 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "xboard",
-      "runtimeExecutable": "cmd",
-      "runtimeArgs": ["/c", "echo xboard-already-running && ping -n 100000 127.0.0.1 > NUL"],
-      "port": 7001
-    },
-    {
-      "name": "backend",
-      "runtimeExecutable": "cmd",
-      "runtimeArgs": ["/c", "cd backend && python -m uvicorn app.main:app --port 8000"],
-      "port": 8000
-    },
-    {
       "name": "frontend",
-      "runtimeExecutable": "cmd",
-      "runtimeArgs": ["/c", "cd frontend && npm run dev"],
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": ["-c", "cd /Users/s/Documents/cloudflare_dns/frontend && /Users/s/Library/pnpm/bin/node node_modules/vite/bin/vite.js --port 5173"],
       "port": 5173
     }
   ]

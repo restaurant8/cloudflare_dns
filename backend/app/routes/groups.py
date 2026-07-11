@@ -10,7 +10,7 @@ from ..events import add_event
 from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records, zone_for_hostname
 from ..health import run_local_checks
 from ..integrations import azpanel_settings, sync_resource_current_ip_to_origin
-from ..models import Agent, AzPanelRemoteResource, AzPanelResource, ExternalIpItem, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
+from ..models import Agent, AzPanelRemoteResource, AzPanelResource, ExternalIpItem, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
 from ..origin_expansion import (
     DIRECT_PUBLISH_MODE,
@@ -32,6 +32,8 @@ from ..schemas import (
     FailoverGroupOut,
     FailoverGroupUpdate,
     FailoverHostnameCreate,
+    FailoverTimeRuleOut,
+    FailoverTimeRuleUpsert,
     Message,
     OriginBulkCreate,
     OriginCreate,
@@ -76,7 +78,26 @@ def _group_query(db: Session):
     return db.query(FailoverGroup).options(
         selectinload(FailoverGroup.hostnames),
         selectinload(FailoverGroup.origins).selectinload(Origin.probe_states).selectinload(ProbeState.agent),
+        selectinload(FailoverGroup.time_rule),
     )
+
+
+def _minute_of_day(value: str) -> int:
+    hour, minute = (int(part) for part in value.split(":"))
+    return hour * 60 + minute
+
+
+def _weekdays_mask(weekdays: list[int]) -> int:
+    return sum(1 << day for day in weekdays)
+
+
+def _delete_time_rule_for_origin(db: Session, origin: Origin) -> None:
+    rule = db.query(FailoverTimeRule).filter(FailoverTimeRule.origin_id == origin.id).one_or_none()
+    if rule is None:
+        return
+    if rule.last_active:
+        origin.group.last_switch_at = None
+    db.delete(rule)
 
 
 def _group_hostname_values(group: FailoverGroup) -> set[str]:
@@ -309,6 +330,7 @@ def sync_global_origins_to_group(db: Session, group: FailoverGroup) -> bool:
         if group.current_origin_id == origin.id:
             group.current_origin_id = None
             group.last_switch_at = None
+        _delete_time_rule_for_origin(db, origin)
         db.delete(origin)
     return current_endpoint_changed
 
@@ -522,6 +544,7 @@ def delete_global_origin(global_origin_id: int, _: User = Depends(get_current_us
         if origin.group.current_origin_id == origin.id:
             origin.group.current_origin_id = None
             origin.group.last_switch_at = None
+        _delete_time_rule_for_origin(db, origin)
         db.delete(origin)
     db.delete(global_origin)
     db.flush()
@@ -626,6 +649,58 @@ def update_group(group_id: int, payload: FailoverGroupUpdate, _: User = Depends(
         evaluate_failover_groups(db)
     db.commit()
     return _group_query(db).filter(FailoverGroup.id == group_id).one()
+
+
+@router.put("/{group_id}/time-rule", response_model=FailoverTimeRuleOut)
+def upsert_time_rule(
+    group_id: int,
+    payload: FailoverTimeRuleUpsert,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    group = _group_query(db).filter(FailoverGroup.id == group_id).one_or_none()
+    if group is None:
+        raise HTTPException(status_code=404, detail="切换组不存在")
+    origin = db.get(Origin, payload.origin_id)
+    if origin is None:
+        raise HTTPException(status_code=404, detail="指定源站不存在")
+    if origin.group_id != group.id:
+        raise HTTPException(status_code=400, detail="指定源站不属于这个切换组")
+
+    rule = group.time_rule
+    if rule is None:
+        rule = FailoverTimeRule(group=group, origin_id=origin.id)
+        db.add(rule)
+    rule.origin_id = origin.id
+    rule.name = payload.name
+    rule.timezone = payload.timezone
+    rule.weekdays_mask = _weekdays_mask(payload.weekdays)
+    rule.start_minute = _minute_of_day(payload.start_time)
+    rule.end_minute = _minute_of_day(payload.end_time)
+    rule.enabled = payload.enabled
+    db.flush()
+    evaluate_failover_groups(db)
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@router.delete("/{group_id}/time-rule", response_model=Message)
+def delete_time_rule(group_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    group = _group_query(db).filter(FailoverGroup.id == group_id).one_or_none()
+    if group is None:
+        raise HTTPException(status_code=404, detail="切换组不存在")
+    rule = group.time_rule
+    if rule is None:
+        raise HTTPException(status_code=404, detail="时间规则不存在")
+    if rule.last_active:
+        group.last_switch_at = None
+    db.delete(rule)
+    db.flush()
+    db.expire(group, ["time_rule"])
+    evaluate_failover_groups(db)
+    db.commit()
+    return Message(message="时间规则已删除")
 
 
 @router.post("/{group_id}/hostnames", response_model=FailoverGroupOut)
@@ -1007,7 +1082,15 @@ def delete_origin(origin_id: int, _: User = Depends(get_current_user), db: Sessi
         raise HTTPException(status_code=404, detail="源站不存在")
     if origin.global_origin_id:
         raise HTTPException(status_code=400, detail="这是业务分组的全局备用，请在全局备用里删除")
+    group = origin.group
+    _delete_time_rule_for_origin(db, origin)
+    if group.current_origin_id == origin.id:
+        group.current_origin_id = None
+        group.last_switch_at = None
     db.delete(origin)
+    db.flush()
+    if group.enabled:
+        evaluate_failover_groups(db)
     db.commit()
     return Message(message="源站已删除")
 

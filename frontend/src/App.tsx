@@ -4,6 +4,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Clock,
   Cloud,
   Copy,
   DatabaseZap,
@@ -59,6 +60,7 @@ type OriginEditDraft = { target: string; port: number; priority: number; publish
 type GlobalOriginDraft = OriginAddDraft;
 type CollectionDraft = { name: string };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | "" };
+type GroupTimeRuleDraft = { enabled: boolean; name: string; origin_id: number | ""; timezone: string; weekdays: number[]; start_time: string; end_time: string };
 type HostnameAddDraft = { hostname: string; adopt_record_id: string };
 type DnsRecordType = "A" | "AAAA" | "CNAME";
 type DnsRecordEditDraft = { name: string; type: DnsRecordType; content: string; ttl: number; proxied: boolean };
@@ -96,6 +98,17 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
 
 const sectionStorageKey = "cloudflareDnsActiveSection";
 const defaultExpandedIpPriority = 100;
+const timeRuleWeekdays = [
+  { value: 0, label: "周一" },
+  { value: 1, label: "周二" },
+  { value: 2, label: "周三" },
+  { value: 3, label: "周四" },
+  { value: 4, label: "周五" },
+  { value: 5, label: "周六" },
+  { value: 6, label: "周日" }
+];
+const defaultTimeRuleWeekdays = timeRuleWeekdays.map((item) => item.value);
+const commonTimeZones = ["Asia/Shanghai", "Asia/Tokyo", "UTC"];
 
 const statusLabels: Record<string, string> = {
   ok: "正常",
@@ -218,6 +231,15 @@ function probeSourceIp(value: string): string | null {
 
 function displayTargetWithRemark(target: string, port: number, remark?: string | null): string {
   return remark?.trim() || `${target}:${port}`;
+}
+
+function formatTimeRuleWeekdays(weekdays: number[]): string {
+  const normalized = [...new Set(weekdays)].filter((day) => day >= 0 && day <= 6).sort((left, right) => left - right);
+  if (normalized.length === 7) return "每天";
+  if (normalized.join(",") === "0,1,2,3,4") return "工作日";
+  if (normalized.join(",") === "5,6") return "周末";
+  if (normalized.length === 0) return "未选择日期";
+  return normalized.map((day) => timeRuleWeekdays.find((item) => item.value === day)?.label || String(day)).join("、");
 }
 
 function originOptions(groups: FailoverGroup[]) {
@@ -1901,6 +1923,8 @@ function GroupsPanel({
   const [originAdd, setOriginAdd] = useState<OriginAddDraft>(defaultOriginAddDraft);
   const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
   const [groupEdits, setGroupEdits] = useState<Record<number, GroupEditDraft>>({});
+  const [editingTimeRuleGroupId, setEditingTimeRuleGroupId] = useState<number | null>(null);
+  const [timeRuleDrafts, setTimeRuleDrafts] = useState<Record<number, GroupTimeRuleDraft>>({});
   const [addingHostnameGroupId, setAddingHostnameGroupId] = useState<number | null>(null);
   const [hostnameAdd, setHostnameAdd] = useState<HostnameAddDraft>({ hostname: "", adopt_record_id: "" });
   const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
@@ -2312,6 +2336,86 @@ function GroupsPanel({
     );
   }
 
+  function beginEditTimeRule(group: FailoverGroup) {
+    const rule = group.time_rule;
+    expandGroup(group.id);
+    setEditingTimeRuleGroupId(group.id);
+    setTimeRuleDrafts((current) => ({
+      ...current,
+      [group.id]: {
+        enabled: rule?.enabled ?? true,
+        name: rule?.name || "晚高峰入口",
+        origin_id: rule?.origin_id ?? "",
+        timezone: rule?.timezone || "Asia/Shanghai",
+        weekdays: rule ? [...rule.weekdays] : [...defaultTimeRuleWeekdays],
+        start_time: rule?.start_time || "18:00",
+        end_time: rule?.end_time || "23:00"
+      }
+    }));
+  }
+
+  function cancelTimeRuleEdit(groupId: number) {
+    setEditingTimeRuleGroupId(null);
+    setTimeRuleDrafts((current) => {
+      const next = { ...current };
+      delete next[groupId];
+      return next;
+    });
+  }
+
+  function toggleTimeRuleWeekday(groupId: number, weekday: number) {
+    setTimeRuleDrafts((current) => {
+      const draft = current[groupId];
+      if (!draft) return current;
+      const weekdays = draft.weekdays.includes(weekday)
+        ? draft.weekdays.filter((item) => item !== weekday)
+        : [...draft.weekdays, weekday].sort((left, right) => left - right);
+      return { ...current, [groupId]: { ...draft, weekdays } };
+    });
+  }
+
+  async function saveTimeRule(group: FailoverGroup) {
+    const draft = timeRuleDrafts[group.id];
+    if (!draft) return;
+    await act(
+      () => {
+        if (!draft.name.trim()) throw new Error("请填写分时入口名称");
+        if (draft.origin_id === "" || !group.origins.some((origin) => origin.id === draft.origin_id)) {
+          throw new Error("请选择这个切换组内的分时入口");
+        }
+        if (draft.weekdays.length === 0) throw new Error("请至少选择一个生效星期");
+        if (!draft.start_time || !draft.end_time) throw new Error("请填写开始和结束时间");
+        if (draft.start_time === draft.end_time) throw new Error("开始和结束时间不能相同");
+        if (!draft.timezone.trim()) throw new Error("请填写时区");
+        return apiFetch(`/api/groups/${group.id}/time-rule`, token, {
+          method: "PUT",
+          body: JSON.stringify({
+            enabled: draft.enabled,
+            name: draft.name.trim(),
+            origin_id: draft.origin_id,
+            timezone: draft.timezone.trim(),
+            weekdays: [...draft.weekdays].sort((left, right) => left - right),
+            start_time: draft.start_time,
+            end_time: draft.end_time
+          })
+        });
+      },
+      "分时入口已保存并应用",
+      () => cancelTimeRuleEdit(group.id)
+    );
+  }
+
+  async function deleteTimeRule(group: FailoverGroup) {
+    if (!group.time_rule || !window.confirm(`确认删除 ${group.time_rule.name || "分时入口"} 吗？\n删除后将始终按普通优先级选择入口。`)) {
+      return;
+    }
+    await act(
+      () => apiFetch(`/api/groups/${group.id}/time-rule`, token, { method: "DELETE" }),
+      "分时入口已删除",
+      () => cancelTimeRuleEdit(group.id)
+    );
+  }
+
   function beginEditOrigin(origin: Origin) {
     setEditingOriginId(origin.id);
     setOriginEdits((current) => ({
@@ -2640,6 +2744,14 @@ function GroupsPanel({
           const primaryPriority = sortedOrigins[0]?.priority;
           const currentOrigin = sortedOrigins.find((origin) => origin.id === group.current_origin_id);
           const currentTarget = currentOrigin ? displayTargetWithRemark(currentOrigin.target, currentOrigin.port, currentOrigin.remark) : "未发布";
+          const timeRuleOrigin = group.time_rule ? sortedOrigins.find((origin) => origin.id === group.time_rule?.origin_id) : undefined;
+          const timeRuleOriginLabel = timeRuleOrigin
+            ? displayTargetWithRemark(timeRuleOrigin.target, timeRuleOrigin.port, timeRuleOrigin.remark)
+            : group.time_rule
+              ? `源站 #${group.time_rule.origin_id}`
+              : "未选择";
+          const timeRuleDraft = timeRuleDrafts[group.id];
+          const isEditingTimeRule = editingTimeRuleGroupId === group.id && Boolean(timeRuleDraft);
           const groupHostnames = group.hostnames && group.hostnames.length > 0 ? [...group.hostnames].sort((left, right) => left.id - right.id) : [];
           const groupLastCheckedAt = sortedOrigins.reduce<string | null>((latest, origin) => {
             if (!origin.last_checked_at) return latest;
@@ -2673,6 +2785,12 @@ function GroupsPanel({
                         )}
                       </span>
                     ))}
+                    {group.time_rule && (
+                      <span className={`timeRuleChip ${group.time_rule.enabled ? "enabled" : "disabled"} ${group.time_rule.last_active ? "active" : ""}`}>
+                        <Clock size={12} />
+                        {group.time_rule.name || "分时入口"} · {formatTimeRuleWeekdays(group.time_rule.weekdays)} {group.time_rule.start_time}–{group.time_rule.end_time}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="rowActions">
@@ -2743,6 +2861,139 @@ function GroupsPanel({
                       </div>
                     </div>
                   )}
+                  <div className={`timeRulePanel ${group.time_rule?.last_active ? "active" : ""} ${group.time_rule && !group.time_rule.enabled ? "disabled" : ""}`}>
+                    <div className="timeRulePanelHead">
+                      <div className="timeRuleHeading">
+                        <Clock size={17} />
+                        <div>
+                          <strong>分时入口</strong>
+                          <span>
+                            {group.time_rule
+                              ? `${group.time_rule.name || "晚高峰入口"} · ${formatTimeRuleWeekdays(group.time_rule.weekdays)} ${group.time_rule.start_time}–${group.time_rule.end_time} · ${group.time_rule.timezone}`
+                              : "未配置；可在指定星期和时间段优先使用一个入口"}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="rowActions timeRuleHeadActions">
+                        {group.time_rule && (
+                          <span className={`timeRuleState ${group.time_rule.last_active ? "active" : group.time_rule.enabled ? "enabled" : "disabled"}`}>
+                            {group.time_rule.last_active ? "时段生效中" : group.time_rule.enabled ? "已启用" : "已停用"}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="secondary compactBtn"
+                          onClick={() => (isEditingTimeRule ? cancelTimeRuleEdit(group.id) : beginEditTimeRule(group))}
+                        >
+                          {isEditingTimeRule ? "取消" : group.time_rule ? "修改分时入口" : "配置分时入口"}
+                        </button>
+                      </div>
+                    </div>
+                    {isEditingTimeRule && timeRuleDraft ? (
+                      <div className="timeRuleForm">
+                        <div className="timeRuleFields">
+                          <label className="inlineCheck timeRuleToggle">
+                            <input
+                              type="checkbox"
+                              checked={timeRuleDraft.enabled}
+                              onChange={(event) => setTimeRuleDrafts((current) => ({ ...current, [group.id]: { ...timeRuleDraft, enabled: event.target.checked } }))}
+                            />
+                            启用这条规则
+                          </label>
+                          <label>
+                            名称
+                            <input
+                              maxLength={120}
+                              placeholder="晚高峰入口"
+                              value={timeRuleDraft.name}
+                              onChange={(event) => setTimeRuleDrafts((current) => ({ ...current, [group.id]: { ...timeRuleDraft, name: event.target.value } }))}
+                            />
+                          </label>
+                          <label className="timeRuleOriginField">
+                            时间段入口
+                            <select
+                              value={timeRuleDraft.origin_id}
+                              onChange={(event) => setTimeRuleDrafts((current) => ({ ...current, [group.id]: { ...timeRuleDraft, origin_id: event.target.value ? Number(event.target.value) : "" } }))}
+                            >
+                              <option value="">{sortedOrigins.length > 0 ? "请选择入口" : "请先添加源站"}</option>
+                              {sortedOrigins.map((origin) => (
+                                <option value={origin.id} key={origin.id}>
+                                  {displayTargetWithRemark(origin.target, origin.port, origin.remark)} · 优先级 {origin.priority} · {origin.enabled ? statusText(origin.status) : "已停用"}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            开始时间
+                            <input
+                              type="time"
+                              value={timeRuleDraft.start_time}
+                              onChange={(event) => setTimeRuleDrafts((current) => ({ ...current, [group.id]: { ...timeRuleDraft, start_time: event.target.value } }))}
+                            />
+                          </label>
+                          <label>
+                            结束时间
+                            <input
+                              type="time"
+                              value={timeRuleDraft.end_time}
+                              onChange={(event) => setTimeRuleDrafts((current) => ({ ...current, [group.id]: { ...timeRuleDraft, end_time: event.target.value } }))}
+                            />
+                          </label>
+                          <label>
+                            时区
+                            <input
+                              list={`time-zone-options-${group.id}`}
+                              placeholder="Asia/Shanghai"
+                              value={timeRuleDraft.timezone}
+                              onChange={(event) => setTimeRuleDrafts((current) => ({ ...current, [group.id]: { ...timeRuleDraft, timezone: event.target.value } }))}
+                            />
+                            <datalist id={`time-zone-options-${group.id}`}>
+                              {commonTimeZones.map((timeZone) => <option value={timeZone} key={timeZone} />)}
+                            </datalist>
+                          </label>
+                        </div>
+                        <fieldset className="timeRuleWeekdays">
+                          <legend>生效星期</legend>
+                          <div>
+                            {timeRuleWeekdays.map((weekday) => (
+                              <label className="timeRuleWeekday" key={weekday.value}>
+                                <input
+                                  type="checkbox"
+                                  checked={timeRuleDraft.weekdays.includes(weekday.value)}
+                                  onChange={() => toggleTimeRuleWeekday(group.id, weekday.value)}
+                                />
+                                {weekday.label}
+                              </label>
+                            ))}
+                          </div>
+                        </fieldset>
+                        <div className="timeRuleHelp">
+                          窗口内优先使用所选入口；该入口不健康时会自动按普通优先级降级。窗口外仍按普通优先级选择，白天常用入口请把优先级数字设为最小。结束时间早于开始时间表示跨午夜，星期按窗口开始日计算。
+                        </div>
+                        <div className="timeRuleActions">
+                          {group.time_rule && (
+                            <button type="button" className="dangerBtn" onClick={() => deleteTimeRule(group)}>
+                              <Trash2 size={15} />
+                              <span>删除规则</span>
+                            </button>
+                          )}
+                          <button type="button" className="secondary" onClick={() => cancelTimeRuleEdit(group.id)}>取消</button>
+                          <button type="button" onClick={() => saveTimeRule(group)}>
+                            <Save size={15} />
+                            <span>保存并应用</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="timeRuleSummary">
+                        <div>
+                          <span>时间段入口</span>
+                          <strong>{group.time_rule ? timeRuleOriginLabel : "未配置"}</strong>
+                        </div>
+                        <p>窗内入口不健康会自动降级；窗外仍按普通优先级选择。</p>
+                      </div>
+                    )}
+                  </div>
                   {group.last_error && <div className="error">{group.last_error}</div>}
                   <div className="originList">
                     {sortedOrigins.map((origin) => {

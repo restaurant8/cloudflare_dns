@@ -1523,6 +1523,230 @@ form.panel {
   padding: 12px;
 }
 
+.groupHead .timeRuleChip {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 800;
+  gap: 5px;
+  margin-top: 0;
+  padding: 4px 8px;
+}
+
+.groupHead .timeRuleChip.enabled {
+  background: var(--secondary);
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+
+.groupHead .timeRuleChip.active {
+  background: #dcfce7;
+  border-color: #86efac;
+  color: #166534;
+}
+
+.timeRulePanel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 3px solid #94a3b8;
+  border-radius: 8px;
+  display: grid;
+  margin: 12px 16px;
+  overflow: hidden;
+}
+
+.timeRulePanel.active {
+  border-left-color: #22c55e;
+}
+
+.timeRulePanel.disabled {
+  border-left-color: var(--border);
+}
+
+.timeRulePanelHead {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 11px 12px;
+}
+
+.timeRuleHeading {
+  align-items: center;
+  display: flex;
+  gap: 9px;
+  min-width: 0;
+}
+
+.timeRuleHeading > svg {
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+
+.timeRuleHeading strong,
+.timeRuleHeading span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.timeRuleHeading strong {
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.timeRuleHeading span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.timeRuleHeadActions {
+  align-items: center;
+}
+
+.timeRuleState {
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 4px 8px;
+}
+
+.timeRuleState.enabled {
+  background: var(--secondary);
+  color: #1d4ed8;
+}
+
+.timeRuleState.active {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.timeRuleState.disabled {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.timeRuleForm {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.timeRuleFields {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.timeRuleToggle {
+  align-self: end;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.timeRuleWeekdays {
+  border: 0;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.timeRuleWeekdays legend {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 800;
+  margin-bottom: 7px;
+}
+
+.timeRuleWeekdays > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.timeRuleWeekday {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--foreground);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 5px;
+  padding: 5px 9px;
+}
+
+.timeRuleWeekday input {
+  min-height: auto;
+  width: auto;
+}
+
+.timeRuleHelp {
+  background: var(--muted);
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 8px 10px;
+}
+
+.timeRuleActions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.timeRuleActions .dangerBtn {
+  margin-right: auto;
+}
+
+.timeRuleSummary {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 9px 12px;
+}
+
+.timeRuleSummary span,
+.timeRuleSummary strong {
+  display: block;
+}
+
+.timeRuleSummary span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.timeRuleSummary strong {
+  color: var(--foreground);
+  font-size: 12px;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+.timeRuleSummary p {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  margin: 0;
+  text-align: right;
+}
+
 .editGrid {
   display: grid;
   gap: 8px;
@@ -2167,6 +2391,7 @@ form.panel {
   .globalOriginEditing,
   .snippetFormGrid,
   .groupSettingsEdit,
+  .timeRuleFields,
   .origin.originEditing,
   .originEditGrid,
   .poolEditGrid,
@@ -2197,6 +2422,20 @@ form.panel {
     padding: 0 10px 12px;
   }
 
+  .timeRulePanel {
+    margin: 10px;
+  }
+
+  .timeRulePanelHead,
+  .timeRuleSummary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .timeRuleSummary p {
+    text-align: left;
+  }
+
   table {
     display: block;
     overflow-x: auto;
@@ -2204,4 +2443,3 @@ form.panel {
 }
 
 }
-

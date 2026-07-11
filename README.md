@@ -11,7 +11,8 @@ A self-hosted Cloudflare DNS failover dashboard for DNS-only A, AAAA, and CNAME 
 - Detects backup targets as IPv4, IPv6, or hostname in the same failover group.
 - Publishes IPv4 targets as A, IPv6 targets as AAAA, and hostname targets as CNAME.
 - Runs TCP health checks from the controller and optional China probe agents.
-- Switches DNS by priority and weight, then fails back automatically when better targets recover.
+- Switches DNS by health and priority, then fails back automatically when better targets recover.
+- Supports a scheduled peak-hours entry while retaining health-based fallback to other origins.
 - Sends Telegram and webhook events for status changes and DNS switches.
 
 ## Quick start

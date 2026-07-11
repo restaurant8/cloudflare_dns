@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
@@ -231,6 +232,78 @@ class FailoverGroupUpdate(BaseModel):
     ttl: int | None = Field(default=None, ge=30, le=86400)
     enabled: bool | None = None
     min_switch_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
+
+
+class FailoverTimeRuleUpsert(BaseModel):
+    origin_id: int
+    name: str = Field(default="晚高峰", min_length=1, max_length=120)
+    timezone: str = Field(default="Asia/Shanghai", min_length=1, max_length=64)
+    weekdays: list[int] = Field(min_length=1, max_length=7)
+    start_time: str
+    end_time: str
+    enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("时间规则名称不能为空")
+        return cleaned
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        cleaned = value.strip()
+        try:
+            ZoneInfo(cleaned)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("时区必须是有效的 IANA 时区名称") from exc
+        return cleaned
+
+    @field_validator("weekdays")
+    @classmethod
+    def validate_weekdays(cls, value: list[int]) -> list[int]:
+        if not value:
+            raise ValueError("至少选择一个星期")
+        if any(day < 0 or day > 6 for day in value):
+            raise ValueError("星期必须在 0（周一）到 6（周日）之间")
+        return sorted(set(value))
+
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def validate_time(cls, value: str) -> str:
+        cleaned = value.strip()
+        parts = cleaned.split(":")
+        if len(parts) != 2 or len(parts[0]) != 2 or len(parts[1]) != 2 or not all(part.isdigit() for part in parts):
+            raise ValueError("时间必须使用 HH:MM 格式")
+        hour, minute = (int(part) for part in parts)
+        if hour > 23 or minute > 59:
+            raise ValueError("时间必须使用 HH:MM 格式")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.start_time == self.end_time:
+            raise ValueError("开始时间和结束时间不能相同")
+        return self
+
+
+class FailoverTimeRuleOut(BaseModel):
+    id: int
+    group_id: int
+    origin_id: int
+    name: str
+    timezone: str
+    weekdays: list[int]
+    start_time: str
+    end_time: str
+    enabled: bool
+    last_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class FailoverCollectionCreate(BaseModel):
@@ -787,6 +860,7 @@ class FailoverGroupOut(BaseModel):
     last_error: str | None
     hostnames: list[FailoverHostnameOut] = []
     origins: list[OriginOut] = []
+    time_rule: FailoverTimeRuleOut | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

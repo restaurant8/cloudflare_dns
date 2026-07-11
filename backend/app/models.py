@@ -128,6 +128,12 @@ class FailoverGroup(Base, TimestampMixin):
     collection: Mapped["FailoverCollection | None"] = relationship("FailoverCollection", back_populates="groups")
     origins: Mapped[list["Origin"]] = relationship("Origin", back_populates="group", cascade="all, delete-orphan")
     hostnames: Mapped[list["FailoverHostname"]] = relationship("FailoverHostname", back_populates="group", cascade="all, delete-orphan")
+    time_rule: Mapped["FailoverTimeRule | None"] = relationship(
+        "FailoverTimeRule",
+        back_populates="group",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class FailoverHostname(Base, TimestampMixin):
@@ -193,6 +199,40 @@ class Origin(Base, TimestampMixin):
     @property
     def expanded_ip_priorities(self) -> dict[str, int]:
         return expanded_ip_priorities(self)
+
+
+class FailoverTimeRule(Base, TimestampMixin):
+    __tablename__ = "failover_time_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("failover_groups.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+    origin_id: Mapped[int] = mapped_column(ForeignKey("origins.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), default="晚高峰", nullable=False)
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai", nullable=False)
+    weekdays_mask: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_minute: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_minute: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    group: Mapped["FailoverGroup"] = relationship("FailoverGroup", back_populates="time_rule")
+    origin: Mapped["Origin"] = relationship("Origin")
+
+    @property
+    def weekdays(self) -> list[int]:
+        return [day for day in range(7) if self.weekdays_mask & (1 << day)]
+
+    @property
+    def start_time(self) -> str:
+        return f"{self.start_minute // 60:02d}:{self.start_minute % 60:02d}"
+
+    @property
+    def end_time(self) -> str:
+        return f"{self.end_minute // 60:02d}:{self.end_minute % 60:02d}"
 
 
 class FailoverGlobalOrigin(Base, TimestampMixin):

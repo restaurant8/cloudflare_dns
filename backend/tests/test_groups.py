@@ -6,12 +6,13 @@ from sqlalchemy.orm import sessionmaker
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.database import Base
-from app.models import Agent, AzPanelRemoteResource, AzPanelResource, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
+from app.models import Agent, AzPanelRemoteResource, AzPanelResource, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, User, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, resolved_ips
-from app.routes.groups import add_group_hostname, create_collection, create_global_origin, create_group, create_origin, delete_global_origin, delete_group_hostname, update_global_origin, update_group, update_origin
-from app.schemas import FailoverCollectionCreate, FailoverGlobalOriginCreate, FailoverGlobalOriginUpdate, FailoverGroupCreate, FailoverGroupUpdate, FailoverHostnameCreate, OriginCreate, OriginOut, OriginUpdate
+from app.routes.groups import add_group_hostname, create_collection, create_global_origin, create_group, create_origin, delete_global_origin, delete_group_hostname, delete_origin, delete_time_rule, update_global_origin, update_group, update_origin, upsert_time_rule
+from app.schemas import FailoverCollectionCreate, FailoverGlobalOriginCreate, FailoverGlobalOriginUpdate, FailoverGroupCreate, FailoverGroupOut, FailoverGroupUpdate, FailoverHostnameCreate, FailoverTimeRuleUpsert, OriginCreate, OriginOut, OriginUpdate
 from app.security import encrypt_secret
 
 
@@ -124,6 +125,184 @@ def test_create_group_adopts_record_by_id_when_name_filter_misses(monkeypatch):
 
     assert group.current_record_id == "record-1"
     assert group.origins[0].target == "192.0.2.10"
+
+
+def test_upsert_time_rule_creates_then_updates_single_group_rule(monkeypatch):
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com")
+    db.add(group)
+    db.flush()
+    first = Origin(group_id=group.id, target="192.0.2.10", target_type="ipv4", port=443)
+    second = Origin(group_id=group.id, target="192.0.2.20", target_type="ipv4", port=443)
+    db.add_all([first, second])
+    db.commit()
+    evaluate_calls = []
+    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda session: evaluate_calls.append(session))
+
+    created = upsert_time_rule(
+        group.id,
+        FailoverTimeRuleUpsert(
+            origin_id=first.id,
+            weekdays=[4, 0, 2, 2],
+            start_time="18:30",
+            end_time="23:15",
+        ),
+        user,
+        db,
+    )
+
+    assert created.name == "晚高峰"
+    assert created.timezone == "Asia/Shanghai"
+    assert created.weekdays == [0, 2, 4]
+    assert created.weekdays_mask == (1 << 0) | (1 << 2) | (1 << 4)
+    assert created.start_minute == 18 * 60 + 30
+    assert created.end_minute == 23 * 60 + 15
+    assert created.start_time == "18:30"
+    assert created.end_time == "23:15"
+    created.last_active = True
+    db.commit()
+
+    updated = upsert_time_rule(
+        group.id,
+        FailoverTimeRuleUpsert(
+            origin_id=second.id,
+            name="夜间线路",
+            timezone="Asia/Tokyo",
+            weekdays=[5, 6],
+            start_time="22:00",
+            end_time="06:00",
+            enabled=False,
+        ),
+        user,
+        db,
+    )
+
+    assert updated.id == created.id
+    assert updated.origin_id == second.id
+    assert updated.name == "夜间线路"
+    assert updated.timezone == "Asia/Tokyo"
+    assert updated.weekdays == [5, 6]
+    assert updated.start_time == "22:00"
+    assert updated.end_time == "06:00"
+    assert updated.enabled is False
+    assert updated.last_active is True
+    assert db.query(FailoverTimeRule).count() == 1
+    output = FailoverGroupOut.model_validate(db.get(FailoverGroup, group.id))
+    assert output.time_rule is not None
+    assert output.time_rule.id == updated.id
+    assert output.time_rule.last_active is True
+    assert len(evaluate_calls) == 2
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"weekdays": []},
+        {"weekdays": [7]},
+        {"timezone": "Mars/Olympus_Mons"},
+        {"start_time": "8:00"},
+        {"start_time": "24:00"},
+        {"end_time": "18:00"},
+    ],
+)
+def test_time_rule_schema_rejects_invalid_schedule(changes):
+    values = {
+        "origin_id": 1,
+        "weekdays": [0],
+        "start_time": "18:00",
+        "end_time": "23:00",
+        **changes,
+    }
+    with pytest.raises(ValidationError):
+        FailoverTimeRuleUpsert(**values)
+
+
+def test_upsert_time_rule_rejects_origin_from_another_group(monkeypatch):
+    db = make_session()
+    zone, user = setup_zone(db)
+    first_group = FailoverGroup(zone_id=zone.id, hostname="a.example.com")
+    second_group = FailoverGroup(zone_id=zone.id, hostname="b.example.com")
+    db.add_all([first_group, second_group])
+    db.flush()
+    foreign_origin = Origin(group_id=second_group.id, target="192.0.2.20", target_type="ipv4", port=443)
+    db.add(foreign_origin)
+    db.commit()
+    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda _db: None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        upsert_time_rule(
+            first_group.id,
+            FailoverTimeRuleUpsert(origin_id=foreign_origin.id, weekdays=[0], start_time="18:00", end_time="23:00"),
+            user,
+            db,
+        )
+
+    assert exc_info.value.status_code == 400
+
+
+def test_delete_active_time_rule_clears_switch_cooldown_and_evaluates(monkeypatch):
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com", last_switch_at=datetime.utcnow())
+    db.add(group)
+    db.flush()
+    origin = Origin(group_id=group.id, target="192.0.2.20", target_type="ipv4", port=443)
+    db.add(origin)
+    db.flush()
+    db.add(
+        FailoverTimeRule(
+            group_id=group.id,
+            origin_id=origin.id,
+            weekdays_mask=0b1111111,
+            start_minute=18 * 60,
+            end_minute=23 * 60,
+            last_active=True,
+        )
+    )
+    db.commit()
+    evaluate_calls = []
+    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda session: evaluate_calls.append(session))
+
+    result = delete_time_rule(group.id, user, db)
+
+    assert result.message == "时间规则已删除"
+    assert db.query(FailoverTimeRule).count() == 0
+    assert db.get(FailoverGroup, group.id).last_switch_at is None
+    assert evaluate_calls == [db]
+
+
+def test_delete_origin_explicitly_removes_its_time_rule_and_re_evaluates_current(monkeypatch):
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com")
+    db.add(group)
+    db.flush()
+    origin = Origin(group_id=group.id, target="192.0.2.20", target_type="ipv4", port=443)
+    db.add(origin)
+    db.flush()
+    db.add(
+        FailoverTimeRule(
+            group_id=group.id,
+            origin_id=origin.id,
+            weekdays_mask=0b1111111,
+            start_minute=18 * 60,
+            end_minute=23 * 60,
+        )
+    )
+    group.current_origin_id = origin.id
+    group.last_switch_at = datetime.utcnow()
+    db.commit()
+    evaluate_calls = []
+    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda session: evaluate_calls.append(session))
+
+    delete_origin(origin.id, user, db)
+
+    assert db.query(FailoverTimeRule).count() == 0
+    db.refresh(group)
+    assert group.current_origin_id is None
+    assert group.last_switch_at is None
+    assert evaluate_calls == [db]
 
 
 def test_add_group_hostname_publishes_current_origin(monkeypatch):
@@ -461,6 +640,16 @@ def test_delete_current_global_origin_republishes_next_backup(monkeypatch):
     db.add_all([current, backup])
     db.flush()
     group.current_origin_id = current.id
+    db.add(
+        FailoverTimeRule(
+            group_id=group.id,
+            origin_id=current.id,
+            weekdays_mask=0b1111111,
+            start_minute=18 * 60,
+            end_minute=23 * 60,
+            last_active=True,
+        )
+    )
     db.commit()
 
     delete_global_origin(global_origin.id, user, db)
@@ -468,6 +657,7 @@ def test_delete_current_global_origin_republishes_next_backup(monkeypatch):
     db.refresh(group)
     assert group.current_origin_id == backup.id
     assert FakeCloudflareClient.records[0]["content"] == "192.0.2.30"
+    assert db.query(FailoverTimeRule).count() == 0
 
 
 def test_update_group_collection_adds_and_removes_global_origin_mirrors():
