@@ -311,7 +311,9 @@ function SidebarInset({ className, ...props }: React.ComponentProps<'div'>) {
     <div
       data-slot='sidebar-inset'
       className={cn(
-        'relative flex w-full flex-1 flex-col bg-background',
+        // min-w-0：作为 flex 子元素必须允许收缩，否则任何一段不能换行的长文本
+        // （长域名/IP/错误信息）都会把整个内容区撑出视口，按钮被裁掉
+        'relative flex w-full min-w-0 flex-1 flex-col bg-background',
         'md:peer-data-[variant=inset]:m-2 md:peer-data-[variant=inset]:ms-0 md:peer-data-[variant=inset]:rounded-xl md:peer-data-[variant=inset]:shadow-sm md:peer-data-[variant=inset]:peer-data-[state=collapsed]:ms-2',
         className
       )}

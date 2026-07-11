@@ -15,9 +15,17 @@
   }
 }
 
+/* 注意：本文件从这里开始整体嵌套在 .legacy-ui { … } 里（块直到文件末尾的
+   单独 "}" 才闭合），靠 CSS nesting 把所有规则限定在 .legacy-ui 作用域内。
+   不要在中途补 "}"，否则后面的规则会泄漏成全局样式且文件语法报错。 */
 .legacy-ui {
   font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  color: var(--foreground);:root {
+  color: var(--foreground);
+  /* 内容区必须允许收缩，长域名/IP/错误信息一律可断行，
+     否则任何一段不能换行的长文本都会把布局撑出视口，按钮被裁掉 */
+  min-width: 0;
+  overflow-wrap: anywhere;
+  :root {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: var(--foreground);
   background: var(--background);
@@ -1149,12 +1157,27 @@ form.panel {
   padding: 10px 12px;
 }
 
+/* 默认两列：正文 + 操作按钮（自动换 IP / Xboard 等列表没有勾选框，
+   若沿用三列模板，正文会落进 auto 列被撑到内容宽度，把按钮挤出屏幕） */
 .poolItem {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+/* IP 池子里带勾选框的行：勾选框 + 正文 + 操作按钮 */
+.poolItem:has(.poolSelectCheck) {
   grid-template-columns: auto minmax(0, 1fr) auto;
 }
 
+/* 来源列表在窄侧栏里：正文和按钮组放不下一行时自动换行堆叠，
+   不能用两列 grid，否则按钮组会把正文挤到几像素宽 */
 .externalSourceItem {
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.externalSourceItem .poolItemMain {
+  flex: 1 1 200px;
 }
 
 .poolSelectCheck {
@@ -1459,6 +1482,7 @@ form.panel {
 
 .rowActions {
   flex-shrink: 0;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -1902,6 +1926,12 @@ form.panel {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* 名称行和按钮行横跨两列，避免和右列信息互相挤压导致按钮溢出卡片 */
+.agentStatusCard > .agentStatusHead,
+.agentStatusCard > .rowActions {
+  grid-column: 1 / -1;
 }
 
 .agentNameEdit {
