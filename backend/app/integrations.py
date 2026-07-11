@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from datetime import datetime
 from typing import Any
 
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from .dns_utils import parse_target
 from .events import add_event
+from .external_ips import mark_external_ip_sources_due
 from .models import AppSetting, AzPanelRemoteResource, AzPanelResource, IpChangeJob, Origin, XboardNodeBinding
 from .notifier import send_webhooks
 from .security import decrypt_secret, encrypt_secret, json_dumps
@@ -23,6 +25,18 @@ XBOARD_ENABLED = "xboard.enabled"
 XBOARD_BASE_URL = "xboard.base_url"
 XBOARD_API_TOKEN = "xboard.api_token"
 XBOARD_TIMEOUT = "xboard.timeout_seconds"
+
+# SynexVM（WHMCS pvewhmcs 面板）按服务直连接口。地址和 Token 都可配置：
+# 全局设置提供默认值，AzPanelResource.api_url / api_token 可按服务覆盖。
+SYNEXVM_ENABLED = "synexvm.enabled"
+SYNEXVM_API_URL = "synexvm.api_url"
+SYNEXVM_API_TOKEN = "synexvm.api_token"
+SYNEXVM_TIMEOUT = "synexvm.timeout_seconds"
+SYNEXVM_WAIT = "synexvm.wait_seconds"
+SYNEXVM_DEFAULT_COOLDOWN = "synexvm.default_cooldown_seconds"
+
+SYNEXVM_DEFAULT_API_URL = "https://www.synexvm.com/modules/servers/pvewhmcs/api.php"
+SYNEXVM_POLL_INTERVAL_SECONDS = 5
 
 IP_RE = re.compile(r"(?:(?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]{2,})")
 
@@ -81,6 +95,17 @@ def xboard_settings(db: Session) -> dict[str, Any]:
     }
 
 
+def synexvm_settings(db: Session) -> dict[str, Any]:
+    return {
+        "enabled": _bool_setting(db, SYNEXVM_ENABLED),
+        "api_url": get_setting(db, SYNEXVM_API_URL, "") or SYNEXVM_DEFAULT_API_URL,
+        "api_token_configured": bool(get_setting(db, SYNEXVM_API_TOKEN)),
+        "timeout_seconds": _int_setting(db, SYNEXVM_TIMEOUT, 30),
+        "wait_seconds": _int_setting(db, SYNEXVM_WAIT, 120),
+        "default_cooldown_seconds": _int_setting(db, SYNEXVM_DEFAULT_COOLDOWN, 1800),
+    }
+
+
 def update_azpanel_settings(db: Session, updates: dict[str, Any]) -> dict[str, Any]:
     if "enabled" in updates and updates["enabled"] is not None:
         set_setting(db, AZPANEL_ENABLED, "1" if updates["enabled"] else "0")
@@ -105,6 +130,22 @@ def update_xboard_settings(db: Session, updates: dict[str, Any]) -> dict[str, An
     if "timeout_seconds" in updates and updates["timeout_seconds"] is not None:
         set_setting(db, XBOARD_TIMEOUT, str(int(updates["timeout_seconds"])))
     return xboard_settings(db)
+
+
+def update_synexvm_settings(db: Session, updates: dict[str, Any]) -> dict[str, Any]:
+    if "enabled" in updates and updates["enabled"] is not None:
+        set_setting(db, SYNEXVM_ENABLED, "1" if updates["enabled"] else "0")
+    if "api_url" in updates and updates["api_url"] is not None:
+        set_setting(db, SYNEXVM_API_URL, str(updates["api_url"]).strip().rstrip("/"))
+    if "api_token" in updates and updates["api_token"] is not None and updates["api_token"] != "":
+        set_setting(db, SYNEXVM_API_TOKEN, encrypt_secret(str(updates["api_token"]).strip()))
+    if "timeout_seconds" in updates and updates["timeout_seconds"] is not None:
+        set_setting(db, SYNEXVM_TIMEOUT, str(int(updates["timeout_seconds"])))
+    if "wait_seconds" in updates and updates["wait_seconds"] is not None:
+        set_setting(db, SYNEXVM_WAIT, str(int(updates["wait_seconds"])))
+    if "default_cooldown_seconds" in updates and updates["default_cooldown_seconds"] is not None:
+        set_setting(db, SYNEXVM_DEFAULT_COOLDOWN, str(int(updates["default_cooldown_seconds"])))
+    return synexvm_settings(db)
 
 
 def _raise_for_status_with_body(response: httpx.Response, label: str) -> None:
@@ -166,6 +207,10 @@ def _xboard_token(db: Session) -> str:
     return _decrypt_setting(get_setting(db, XBOARD_API_TOKEN))
 
 
+def _synexvm_token(db: Session) -> str:
+    return _decrypt_setting(get_setting(db, SYNEXVM_API_TOKEN))
+
+
 def call_azpanel_change_ip(db: Session, resource: AzPanelResource, reason: str | None = None) -> dict[str, Any]:
     settings = azpanel_settings(db)
     if not settings["enabled"]:
@@ -201,6 +246,124 @@ def call_azpanel_change_ip(db: Session, resource: AzPanelResource, reason: str |
         raise RuntimeError("azpanel did not return a new IP")
     data["new_ip"] = new_ip
     return data
+
+
+def _synexvm_connection(db: Session, resource: AzPanelResource) -> tuple[dict[str, Any], str, str]:
+    """解析资源实际使用的 SynexVM 接口地址和 Token（资源覆盖 > 全局设置）。"""
+    settings = synexvm_settings(db)
+    api_url = (resource.api_url or "").strip() or settings["api_url"]
+    token = _decrypt_setting(resource.api_token or "") or _synexvm_token(db)
+    if not api_url:
+        raise RuntimeError("SynexVM API 地址未配置")
+    if not token:
+        raise RuntimeError("SynexVM API Token 未配置（资源和全局设置都为空）")
+    return settings, api_url, token
+
+
+def _synexvm_request(api_url: str, action: str, service_id: str, token: str, timeout: int) -> dict[str, Any]:
+    response = httpx.get(
+        api_url,
+        params={"action": action, "service_id": service_id, "token": token},
+        timeout=timeout,
+        follow_redirects=True,
+    )
+    # 不复用 _raise_for_status_with_body：它会把带 token 的完整 URL 写进错误
+    # 信息，进而进入任务记录 / 事件 / webhook，造成泄漏。
+    if not response.is_success:
+        body = (response.text or "").strip()
+        if len(body) > 500:
+            body = body[:500] + "…"
+        detail = f": {body}" if body else ""
+        raise RuntimeError(f"SynexVM {action} (service {service_id}) 返回 HTTP {response.status_code}{detail}")
+    try:
+        payload = response.json()
+    except Exception:
+        body = (response.text or "").strip()
+        if len(body) > 200:
+            body = body[:200] + "…"
+        raise RuntimeError(f"SynexVM {action} (service {service_id}) 返回的不是 JSON: {body or '空响应'}")
+    if isinstance(payload, dict) and payload.get("success") is False:
+        message = str(payload.get("message") or payload.get("error") or payload)
+        if len(message) > 300:
+            message = message[:300] + "…"
+        raise RuntimeError(f"SynexVM {action} (service {service_id}) 调用失败: {message}")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _synexvm_payload_ip(payload: dict[str, Any], ip_version: str = "ipv4") -> str | None:
+    data = _extract_payload(payload)
+    vm = data.get("vm")
+    if isinstance(vm, dict):
+        data = {**data, **vm}
+    preferred = data.get(ip_version)
+    if isinstance(preferred, str) and preferred.strip():
+        return preferred.strip()
+    return _extract_ip(data)
+
+
+def call_synexvm_status(db: Session, resource: AzPanelResource) -> dict[str, Any]:
+    settings, api_url, token = _synexvm_connection(db, resource)
+    return _synexvm_request(api_url, "status", resource.resource_id, token, settings["timeout_seconds"])
+
+
+def sync_synexvm_resource_status(db: Session, resource: AzPanelResource) -> dict[str, Any]:
+    """查询 status 接口并把面板上的当前 IP 同步到资源和绑定源站。"""
+    payload = call_synexvm_status(db, resource)
+    panel_ip = _synexvm_payload_ip(payload, resource.ip_version)
+    if panel_ip and panel_ip != resource.current_ip:
+        target_info = parse_target(panel_ip)
+        if target_info.target_type not in {"ipv4", "ipv6"}:
+            raise RuntimeError(f"SynexVM status 返回的 IP 无法识别: {panel_ip}")
+        resource.current_ip = target_info.value
+        try:
+            sync_resource_current_ip_to_origin(db, resource)
+        except ValueError as exc:
+            resource.last_error = f"远端 IP 无法同步到源站: {exc}"
+        else:
+            resource.last_error = None
+        db.flush()
+    return payload
+
+
+def call_synexvm_change_ip(db: Session, resource: AzPanelResource, reason: str | None = None) -> dict[str, Any]:
+    settings, api_url, token = _synexvm_connection(db, resource)
+    if not settings["enabled"]:
+        raise RuntimeError("SynexVM integration is disabled")
+
+    old_ip = (resource.current_ip or "").strip()
+    # 本地记录的 IP 可能过期，先问面板拿准确的旧 IP；查不到不阻塞换 IP
+    try:
+        status_payload = _synexvm_request(api_url, "status", resource.resource_id, token, settings["timeout_seconds"])
+        panel_ip = _synexvm_payload_ip(status_payload, resource.ip_version)
+        if panel_ip:
+            old_ip = panel_ip
+    except Exception:
+        pass
+
+    result = _synexvm_request(api_url, "change_ip", resource.resource_id, token, settings["timeout_seconds"])
+    data = _extract_payload(result)
+    new_ip = _synexvm_payload_ip(result, resource.ip_version)
+    if new_ip and new_ip != old_ip:
+        data["new_ip"] = new_ip
+        return data
+
+    # change_ip 响应里没有新 IP（或还是旧 IP）时轮询 status，等新 IP 生效。
+    # IP 切换期间面板可能暂时报错，忽略继续等。
+    deadline = time.monotonic() + max(settings["wait_seconds"], 0)
+    while time.monotonic() < deadline:
+        time.sleep(SYNEXVM_POLL_INTERVAL_SECONDS)
+        try:
+            payload = _synexvm_request(api_url, "status", resource.resource_id, token, settings["timeout_seconds"])
+        except Exception:
+            continue
+        current = _synexvm_payload_ip(payload, resource.ip_version)
+        if current and (not old_ip or current != old_ip):
+            data["new_ip"] = current
+            return data
+    raise RuntimeError(
+        f"SynexVM 已下发换 IP，但 {settings['wait_seconds']} 秒内 status 接口仍未返回新 IP"
+        f"（原 IP {old_ip or '未知'}），请稍后在面板上刷新状态确认"
+    )
 
 
 def _remote_resource_key(item: dict[str, Any]) -> str:
@@ -561,7 +724,10 @@ def change_resource_ip(
     db.flush()
 
     try:
-        result = call_azpanel_change_ip(db, resource, reason=reason)
+        if resource.provider == "synexvm":
+            result = call_synexvm_change_ip(db, resource, reason=reason)
+        else:
+            result = call_azpanel_change_ip(db, resource, reason=reason)
         new_ip = str(result["new_ip"]).strip()
         target_info = parse_target(new_ip)
         resource.current_ip = target_info.value
@@ -610,6 +776,9 @@ def change_resource_ip(
         }
         add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {job.new_ip}", payload)
         send_webhooks(db, "azpanel.ip_changed", payload)
+        # 机器换了 IP，外部 IP 来源（如 nyanpass）要尽快重新同步，
+        # 绑定了这台机器的备用目标才能跟上新 IP
+        mark_external_ip_sources_due(db)
     except Exception as exc:
         message = str(exc)
         resource.last_error = message
@@ -631,8 +800,14 @@ def change_resource_ip(
 
 
 def trigger_ip_change_for_origin(db: Session, origin: Origin, reason: str) -> IpChangeJob | None:
-    if not azpanel_settings(db)["enabled"]:
+    azpanel_enabled = azpanel_settings(db)["enabled"]
+    synexvm_enabled = synexvm_settings(db)["enabled"]
+    if not azpanel_enabled and not synexvm_enabled:
         return None
+
+    def provider_enabled(resource: AzPanelResource) -> bool:
+        return synexvm_enabled if resource.provider == "synexvm" else azpanel_enabled
+
     resources = (
         db.query(AzPanelResource)
         .filter(AzPanelResource.enabled.is_(True), AzPanelResource.auto_change_on_blocked.is_(True))
@@ -640,6 +815,7 @@ def trigger_ip_change_for_origin(db: Session, origin: Origin, reason: str) -> Ip
         .order_by(AzPanelResource.id.asc())
         .all()
     )
+    resources = [resource for resource in resources if provider_enabled(resource)]
     for resource in resources:
         if not resource.auto_update_origin or not resource.current_ip:
             continue
@@ -666,13 +842,18 @@ def trigger_ip_change_for_origin(db: Session, origin: Origin, reason: str) -> Ip
         )
         return None
     if not resources and origin.target_type in {"ipv4", "ipv6"}:
-        resources = (
+        candidates = (
             db.query(AzPanelResource)
             .filter(AzPanelResource.enabled.is_(True), AzPanelResource.auto_change_on_blocked.is_(True))
-            .filter(AzPanelResource.current_ip == origin.target, AzPanelResource.port == origin.port)
+            .filter(AzPanelResource.current_ip == origin.target)
             .order_by(AzPanelResource.id.asc())
             .all()
         )
+        candidates = [resource for resource in candidates if provider_enabled(resource)]
+        # 优先端口也一致的资源；没有再退到只按 IP 匹配——源站可能是外部 IP
+        # 的入口端口（例如 nyanpass 转发端口），和云资源的检查端口本来就不同，
+        # 而公网 IP 已经足够定位到同一台机器。
+        resources = [resource for resource in candidates if resource.port == origin.port] or candidates
     if not resources:
         return None
     return change_resource_ip(db, resources[0], trigger_type="auto_blocked", reason=reason)

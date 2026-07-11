@@ -110,6 +110,10 @@ def _migrate_existing_schema() -> None:
             existing = {column["name"] for column in inspector.get_columns("azpanel_resources")}
             if "ip_change_method" not in existing:
                 connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN ip_change_method VARCHAR(20) NOT NULL DEFAULT 'eip'"))
+            if "api_url" not in existing:
+                connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN api_url VARCHAR(255) NULL"))
+            if "api_token" not in existing:
+                connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN api_token VARCHAR(500) NULL"))
 
 
 def _origin_migration_statements(dialect: str) -> dict[str, str]:
@@ -124,6 +128,8 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
             "healthy_ips_json": "ALTER TABLE origins ADD COLUMN healthy_ips_json TEXT NULL",
             "published_ips_json": "ALTER TABLE origins ADD COLUMN published_ips_json TEXT NULL",
             "expanded_ip_priorities_json": "ALTER TABLE origins ADD COLUMN expanded_ip_priorities_json TEXT NULL",
+            "external_source_id": "ALTER TABLE origins ADD COLUMN external_source_id INT NULL",
+            "external_machine_key": "ALTER TABLE origins ADD COLUMN external_machine_key VARCHAR(255) NULL",
         }
     return {
         "global_origin_id": "ALTER TABLE origins ADD COLUMN global_origin_id INTEGER",
@@ -135,6 +141,8 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
         "healthy_ips_json": "ALTER TABLE origins ADD COLUMN healthy_ips_json TEXT NOT NULL DEFAULT '[]'",
         "published_ips_json": "ALTER TABLE origins ADD COLUMN published_ips_json TEXT NOT NULL DEFAULT '[]'",
         "expanded_ip_priorities_json": "ALTER TABLE origins ADD COLUMN expanded_ip_priorities_json TEXT NOT NULL DEFAULT '{}'",
+        "external_source_id": "ALTER TABLE origins ADD COLUMN external_source_id INTEGER",
+        "external_machine_key": "ALTER TABLE origins ADD COLUMN external_machine_key VARCHAR(255)",
     }
 
 

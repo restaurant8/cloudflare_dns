@@ -10,7 +10,7 @@ from ..events import add_event
 from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records, zone_for_hostname
 from ..health import run_local_checks
 from ..integrations import azpanel_settings, sync_resource_current_ip_to_origin
-from ..models import Agent, AzPanelRemoteResource, AzPanelResource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
+from ..models import Agent, AzPanelRemoteResource, AzPanelResource, ExternalIpItem, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
 from ..origin_expansion import (
     DIRECT_PUBLISH_MODE,
@@ -108,12 +108,25 @@ def _resolve_hostname_zone(db: Session, group: FailoverGroup, hostname: str) -> 
     return candidates[0]
 
 
+def _external_binding_from_item_id(db: Session, item_id: int) -> tuple[int, str]:
+    item = db.get(ExternalIpItem, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="外部 IP 不存在，请先刷新外部 IP 列表")
+    if not item.machine_key:
+        raise HTTPException(status_code=400, detail="该外部 IP 没有机器标识，无法绑定（换 IP 后无法跟踪）")
+    return item.source_id, item.machine_key
+
+
 def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreate) -> Origin:
     target_info = parse_target(payload.target)
     if target_info.record_type == "CNAME" and target_info.value in _group_hostname_values(group):
         raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
     if payload.publish_mode == EXPANDED_PUBLISH_MODE and target_info.target_type != "hostname":
         raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
+    external_source_id = None
+    external_machine_key = None
+    if payload.external_ip_item_id is not None:
+        external_source_id, external_machine_key = _external_binding_from_item_id(db, payload.external_ip_item_id)
     origin = Origin(
         group_id=group.id,
         target=target_info.value,
@@ -125,6 +138,8 @@ def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreat
         probe_mode=_normalize_probe_mode(payload.probe_mode),
         remark=_normalize_remark(payload.remark),
         enabled=payload.enabled,
+        external_source_id=external_source_id,
+        external_machine_key=external_machine_key,
     )
     _apply_expanded_ip_priorities(origin, payload.expanded_ip_priorities if target_info.target_type == "hostname" else {})
     return origin
@@ -847,6 +862,13 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     if origin.global_origin_id:
         raise HTTPException(status_code=400, detail="这是业务分组的全局备用，请在全局备用里修改")
     updates = payload.model_dump(exclude_unset=True)
+    if "external_ip_item_id" in updates:
+        item_id = updates.pop("external_ip_item_id")
+        if item_id is None:
+            origin.external_source_id = None
+            origin.external_machine_key = None
+        else:
+            origin.external_source_id, origin.external_machine_key = _external_binding_from_item_id(db, item_id)
     group = origin.group
     new_target = origin.target
     new_target_type = origin.target_type

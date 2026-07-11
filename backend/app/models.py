@@ -151,6 +151,10 @@ class Origin(Base, TimestampMixin):
     group_id: Mapped[int] = mapped_column(ForeignKey("failover_groups.id", ondelete="CASCADE"), nullable=False)
     global_origin_id: Mapped[int | None] = mapped_column(ForeignKey("failover_global_origins.id", ondelete="SET NULL"))
     preferred_agent_id: Mapped[int | None] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"))
+    # 绑定外部 IP 来源里的一台机器（按 machine_key，IP 变化时 item 会删旧建新，
+    # 不能按 item id 绑定）；来源同步到新 IP 时自动更新本源站的 target
+    external_source_id: Mapped[int | None] = mapped_column(ForeignKey("external_ip_sources.id", ondelete="SET NULL"))
+    external_machine_key: Mapped[str | None] = mapped_column(String(255))
     probe_mode: Mapped[str] = mapped_column(String(20), default="default", nullable=False)
     target: Mapped[str] = mapped_column(String(255), nullable=False)
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -274,6 +278,10 @@ class AzPanelResource(Base, TimestampMixin):
     region: Mapped[str | None] = mapped_column(String(120))
     ip_version: Mapped[str] = mapped_column(String(10), default="ipv4", nullable=False)
     ip_change_method: Mapped[str] = mapped_column(String(20), default="eip", nullable=False)
+    # synexvm 这类按服务直连的接口：每个服务可以有自己的 API 地址和 Token，
+    # 留空则回退到全局 synexvm 设置
+    api_url: Mapped[str | None] = mapped_column(String(255))
+    api_token: Mapped[str | None] = mapped_column(String(500))
     origin_id: Mapped[int | None] = mapped_column(ForeignKey("origins.id", ondelete="SET NULL"))
     current_ip: Mapped[str | None] = mapped_column(String(120))
     port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
@@ -289,6 +297,10 @@ class AzPanelResource(Base, TimestampMixin):
     origin: Mapped["Origin | None"] = relationship("Origin")
     xboard_nodes: Mapped[list["XboardNodeBinding"]] = relationship("XboardNodeBinding", back_populates="azpanel_resource")
     jobs: Mapped[list["IpChangeJob"]] = relationship("IpChangeJob", back_populates="azpanel_resource")
+
+    @property
+    def api_token_configured(self) -> bool:
+        return bool(self.api_token)
 
 
 class AzPanelRemoteResource(Base, TimestampMixin):

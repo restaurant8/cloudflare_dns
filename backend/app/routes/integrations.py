@@ -8,7 +8,10 @@ from ..integrations import (
     change_resource_ip,
     list_azpanel_remote_resources,
     sync_resource_current_ip_to_origin,
+    sync_synexvm_resource_status,
+    synexvm_settings,
     update_azpanel_settings,
+    update_synexvm_settings,
     update_xboard_settings,
     xboard_settings,
 )
@@ -23,12 +26,15 @@ from ..schemas import (
     IpChangeJobOut,
     IpChangeRequest,
     Message,
+    SynexVmSettingsOut,
+    SynexVmSettingsUpdate,
     XboardNodeBindingCreate,
     XboardNodeBindingOut,
     XboardNodeBindingUpdate,
     XboardSettingsOut,
     XboardSettingsUpdate,
 )
+from ..security import encrypt_secret
 
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
@@ -67,6 +73,18 @@ def save_azpanel_settings(payload: AzPanelSettingsUpdate, _: User = Depends(get_
     return settings
 
 
+@router.get("/synexvm/settings", response_model=SynexVmSettingsOut)
+def read_synexvm_settings(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return synexvm_settings(db)
+
+
+@router.patch("/synexvm/settings", response_model=SynexVmSettingsOut)
+def save_synexvm_settings(payload: SynexVmSettingsUpdate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    settings = update_synexvm_settings(db, payload.model_dump(exclude_unset=True))
+    db.commit()
+    return settings
+
+
 @router.get("/azpanel/resources", response_model=list[AzPanelResourceOut])
 def list_azpanel_resources(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(AzPanelResource).order_by(AzPanelResource.created_at.desc()).all()
@@ -88,6 +106,7 @@ def list_remote_azpanel_resources(provider: str | None = None, _: User = Depends
 @router.post("/azpanel/resources", response_model=AzPanelResourceOut)
 def create_azpanel_resource(payload: AzPanelResourceCreate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
     _ensure_origin(db, payload.origin_id)
+    api_token = _normalize_text(payload.api_token)
     resource = AzPanelResource(
         name=payload.name.strip(),
         provider=payload.provider,
@@ -95,6 +114,9 @@ def create_azpanel_resource(payload: AzPanelResourceCreate, _: User = Depends(ge
         account_id=_normalize_text(payload.account_id),
         region=_normalize_text(payload.region),
         ip_version=payload.ip_version,
+        ip_change_method=payload.ip_change_method,
+        api_url=_normalize_text(payload.api_url),
+        api_token=encrypt_secret(api_token) if api_token else None,
         origin_id=payload.origin_id,
         current_ip=_normalize_text(payload.current_ip),
         port=payload.port,
@@ -122,12 +144,18 @@ def update_azpanel_resource(resource_id: int, payload: AzPanelResourceUpdate, _:
     updates = payload.model_dump(exclude_unset=True)
     if "origin_id" in updates:
         _ensure_origin(db, updates["origin_id"])
+    # Token 留空表示不修改（和全局设置的行为一致）
+    api_token = _normalize_text(updates.pop("api_token", None))
+    if api_token:
+        resource.api_token = encrypt_secret(api_token)
     for key, value in updates.items():
         if key in {"name", "resource_id"} and isinstance(value, str):
             value = value.strip()
-        if key in {"account_id", "region", "current_ip", "remark"}:
+        if key in {"account_id", "region", "current_ip", "remark", "api_url"}:
             value = _normalize_text(value)
         setattr(resource, key, value)
+    if resource.provider == "synexvm" and not str(resource.resource_id).strip().isdigit():
+        raise HTTPException(status_code=400, detail="SynexVM 资源的服务 ID（service_id）必须是数字")
     try:
         sync_resource_current_ip_to_origin(db, resource)
     except ValueError as exc:
@@ -145,6 +173,26 @@ def delete_azpanel_resource(resource_id: int, _: User = Depends(get_current_user
     db.delete(resource)
     db.commit()
     return Message(message="azpanel resource deleted")
+
+
+@router.post("/azpanel/resources/{resource_id}/refresh-status", response_model=AzPanelResourceOut)
+def refresh_azpanel_resource_status(resource_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """查询 SynexVM status 接口，把面板当前 IP 同步到资源和绑定源站。"""
+    resource = db.get(AzPanelResource, resource_id)
+    if resource is None:
+        raise HTTPException(status_code=404, detail="azpanel resource not found")
+    if resource.provider != "synexvm":
+        raise HTTPException(status_code=400, detail="只有 SynexVM 资源支持状态查询")
+    try:
+        sync_synexvm_resource_status(db, resource)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    db.commit()
+    db.refresh(resource)
+    return resource
 
 
 @router.post("/azpanel/resources/{resource_id}/change-ip", response_model=IpChangeJobOut)

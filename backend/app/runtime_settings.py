@@ -20,7 +20,7 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "fail_threshold": SettingDefinition(int, 1, 20),
     "recovery_threshold": SettingDefinition(int, 1, 20),
     "no_healthy_notification_interval_seconds": SettingDefinition(int, 60, 86400),
-    "external_ip_sync_interval_seconds": SettingDefinition(int, 60, 86400),
+    "external_ip_sync_interval_seconds": SettingDefinition(int, 10, 86400),
     "access_token_ttl_seconds": SettingDefinition(int, 3600, 31_536_000),
     "access_token_remember_ttl_seconds": SettingDefinition(int, 3600, 31_536_000),
     "login_lockout_enabled": SettingDefinition(int, 0, 1),

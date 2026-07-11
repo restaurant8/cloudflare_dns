@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 from websockets.sync.client import connect
 
 from .dns_utils import parse_target
-from .models import ExternalIpItem, ExternalIpSource
+from .events import add_event
+from .models import ExternalIpItem, ExternalIpSource, Origin
 from .runtime_settings import get_runtime_settings
 from .security import decrypt_secret
 
@@ -160,8 +161,72 @@ def sync_external_ip_source(db: Session, source: ExternalIpSource) -> int:
     source.status = "ok"
     source.last_error = None
     source.last_synced_at = now
+    _sync_bound_origins(db, source, imported_items)
     db.flush()
     return len(imported_items)
+
+
+def _sync_bound_origins(db: Session, source: ExternalIpSource, imported_items: list[ImportedExternalIp]) -> int:
+    """把机器的新 IP 跟随到绑定的故障切换备用目标。
+
+    绑定按 machine_key（而不是 item id）：机器换 IP 后列表项是删旧建新的，
+    只有 machine_key 能跨 IP 变化定位同一台机器。
+    """
+    by_key: dict[str, list[ImportedExternalIp]] = {}
+    for imported in imported_items:
+        if imported.machine_key:
+            by_key.setdefault(imported.machine_key, []).append(imported)
+    origins = (
+        db.query(Origin)
+        .filter(Origin.external_source_id == source.id, Origin.external_machine_key.isnot(None))
+        .all()
+    )
+    updated = 0
+    for origin in origins:
+        candidates = by_key.get(origin.external_machine_key or "")
+        if not candidates:
+            # 机器暂时不在线/没上报不代表被删了，保留绑定等它回来
+            continue
+        # 同一台机器可能同时有 v4/v6，优先跟随源站现有的地址类型
+        chosen = next((item for item in candidates if item.target_type == origin.target_type), candidates[0])
+        if origin.target == chosen.target and origin.target_type == chosen.target_type:
+            continue
+        old_target = origin.target
+        origin.target = chosen.target
+        origin.target_type = chosen.target_type
+        origin.status = "unknown"
+        origin.last_error = "外部 IP 已更换，等待本地和探针探测结果"
+        origin.last_checked_at = None
+        origin.last_rtt_ms = None
+        origin.probe_states.clear()
+        updated += 1
+        add_event(
+            db,
+            "external_ip.origin_synced",
+            "info",
+            f"{chosen.name} 外部 IP 变为 {chosen.target}，已同步到备用目标（原 {old_target}）",
+            {
+                "origin_id": origin.id,
+                "source_id": source.id,
+                "machine_key": origin.external_machine_key,
+                "old_target": old_target,
+                "new_target": chosen.target,
+            },
+        )
+    return updated
+
+
+def mark_external_ip_sources_due(db: Session) -> int:
+    """把所有启用的外部来源标记为到期，下个调度周期立即重新同步。
+
+    云资源换 IP 成功后调用：机器的新 IP 要尽快同步回来，绑定的备用目标才能跟上。
+    """
+    sources = db.query(ExternalIpSource).filter(ExternalIpSource.enabled.is_(True)).all()
+    for source in sources:
+        source.last_synced_at = None
+    if sources:
+        db.flush()
+    return len(sources)
 
 
 def sync_due_external_ip_sources(db: Session) -> int:
@@ -170,7 +235,7 @@ def sync_due_external_ip_sources(db: Session) -> int:
     sources = db.query(ExternalIpSource).filter(ExternalIpSource.enabled.is_(True)).all()
     synced = 0
     for source in sources:
-        interval = max(source.sync_interval_seconds or settings.external_ip_sync_interval_seconds, 60)
+        interval = max(source.sync_interval_seconds or settings.external_ip_sync_interval_seconds, 10)
         if source.last_synced_at and source.last_synced_at > now - timedelta(seconds=interval):
             continue
         try:

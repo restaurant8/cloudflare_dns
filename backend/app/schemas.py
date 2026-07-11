@@ -63,7 +63,7 @@ class SystemSettingsUpdate(BaseModel):
     fail_threshold: int | None = Field(default=None, ge=1, le=20)
     recovery_threshold: int | None = Field(default=None, ge=1, le=20)
     no_healthy_notification_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
-    external_ip_sync_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
+    external_ip_sync_interval_seconds: int | None = Field(default=None, ge=10, le=86400)
     access_token_ttl_seconds: int | None = Field(default=None, ge=3600, le=31_536_000)
     access_token_remember_ttl_seconds: int | None = Field(default=None, ge=3600, le=31_536_000)
     login_lockout_enabled: int | None = Field(default=None, ge=0, le=1)
@@ -271,6 +271,9 @@ class OriginCreate(BaseModel):
     azpanel_resource_id: int | None = None
     # 可选：azpanel 远端资源的 key，还没添加为本地云资源时自动创建并绑定
     azpanel_remote_key: str | None = Field(default=None, max_length=512)
+    # 可选：绑定外部 IP 列表里的机器（按 machine_key 记录），来源同步到
+    # 新 IP 时自动更新这个备用目标
+    external_ip_item_id: int | None = None
 
 
 class OriginBulkCreate(BaseModel):
@@ -287,6 +290,8 @@ class OriginUpdate(BaseModel):
     probe_mode: Literal["default", "local_only", "china_only", "any"] | None = None
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool | None = None
+    # 传 null 表示解除外部 IP 绑定；传 item id 表示改绑到那台机器
+    external_ip_item_id: int | None = None
 
 
 class ProbeStateOut(BaseModel):
@@ -321,6 +326,8 @@ class OriginOut(BaseModel):
     priority: int
     remark: str | None
     enabled: bool
+    external_source_id: int | None = None
+    external_machine_key: str | None = None
     status: str
     last_checked_at: datetime | None
     last_error: str | None
@@ -491,14 +498,31 @@ class AzPanelSettingsUpdate(BaseModel):
         return cleaned
 
 
+def _validate_optional_api_url(value: str | None, label: str) -> str | None:
+    """允许带路径的完整接口地址（例如 …/modules/servers/pvewhmcs/api.php）。"""
+    if value is None:
+        return value
+    cleaned = value.strip().rstrip("/")
+    if not cleaned:
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"{label}必须是有效的 HTTP/HTTPS 地址")
+    return cleaned
+
+
 class AzPanelResourceBase(BaseModel):
     name: str = Field(min_length=1, max_length=160)
-    provider: Literal["azure", "aws"] = "azure"
+    provider: Literal["azure", "aws", "synexvm"] = "azure"
     resource_id: str = Field(min_length=1, max_length=255)
     account_id: str | None = Field(default=None, max_length=120)
     region: str | None = Field(default=None, max_length=120)
     ip_version: Literal["ipv4", "ipv6"] = "ipv4"
     ip_change_method: Literal["eip", "stop_start"] = "eip"
+    # synexvm 专用：按服务覆盖接口地址（留空用全局 SynexVM 设置）
+    api_url: str | None = Field(default=None, max_length=255)
     origin_id: int | None = None
     current_ip: str | None = Field(default=None, max_length=120)
     port: int = Field(default=22, ge=1, le=65535)
@@ -508,19 +532,33 @@ class AzPanelResourceBase(BaseModel):
     cooldown_seconds: int = Field(default=1800, ge=60, le=86400)
     remark: str | None = Field(default=None, max_length=500)
 
+    @field_validator("api_url")
+    @classmethod
+    def validate_api_url(cls, value: str | None) -> str | None:
+        return _validate_optional_api_url(value, "API 地址")
+
+    @model_validator(mode="after")
+    def validate_synexvm_service_id(self):
+        if self.provider == "synexvm" and not self.resource_id.strip().isdigit():
+            raise ValueError("SynexVM 资源的服务 ID（service_id）必须是数字")
+        return self
+
 
 class AzPanelResourceCreate(AzPanelResourceBase):
-    pass
+    # synexvm 专用：按服务覆盖 Token（留空用全局 SynexVM 设置），只写不读
+    api_token: str | None = Field(default=None, max_length=500)
 
 
 class AzPanelResourceUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
-    provider: Literal["azure", "aws"] | None = None
+    provider: Literal["azure", "aws", "synexvm"] | None = None
     resource_id: str | None = Field(default=None, min_length=1, max_length=255)
     account_id: str | None = Field(default=None, max_length=120)
     region: str | None = Field(default=None, max_length=120)
     ip_version: Literal["ipv4", "ipv6"] | None = None
     ip_change_method: Literal["eip", "stop_start"] | None = None
+    api_url: str | None = Field(default=None, max_length=255)
+    api_token: str | None = Field(default=None, max_length=500)
     origin_id: int | None = None
     current_ip: str | None = Field(default=None, max_length=120)
     port: int | None = Field(default=None, ge=1, le=65535)
@@ -530,9 +568,15 @@ class AzPanelResourceUpdate(BaseModel):
     cooldown_seconds: int | None = Field(default=None, ge=60, le=86400)
     remark: str | None = Field(default=None, max_length=500)
 
+    @field_validator("api_url")
+    @classmethod
+    def validate_api_url(cls, value: str | None) -> str | None:
+        return _validate_optional_api_url(value, "API 地址")
+
 
 class AzPanelResourceOut(AzPanelResourceBase):
     id: int
+    api_token_configured: bool = False
     last_attempt_at: datetime | None
     last_change_at: datetime | None
     last_error: str | None
@@ -585,6 +629,33 @@ class XboardSettingsUpdate(BaseModel):
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("Xboard address must be a valid HTTP/HTTPS URL")
         return cleaned
+
+
+class SynexVmSettingsOut(BaseModel):
+    enabled: bool = False
+    api_url: str = ""
+    api_token_configured: bool = False
+    timeout_seconds: int = 30
+    wait_seconds: int = 120
+    default_cooldown_seconds: int = 1800
+
+
+class SynexVmSettingsUpdate(BaseModel):
+    enabled: bool | None = None
+    api_url: str | None = Field(default=None, max_length=255)
+    api_token: str | None = Field(default=None, max_length=500)
+    timeout_seconds: int | None = Field(default=None, ge=5, le=300)
+    # 换 IP 下发后轮询 status 等新 IP 的最长时间；0 表示不等待
+    wait_seconds: int | None = Field(default=None, ge=0, le=900)
+    default_cooldown_seconds: int | None = Field(default=None, ge=60, le=86400)
+
+    @field_validator("api_url")
+    @classmethod
+    def validate_api_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        # 清空表示回退到内置默认地址
+        return _validate_optional_api_url(value, "SynexVM API 地址") or ""
 
 
 class XboardNodeBindingBase(BaseModel):
@@ -655,7 +726,7 @@ class ExternalIpSourceCreate(BaseModel):
     base_url: HttpUrl
     token: str = Field(min_length=1, max_length=500)
     default_port: int = Field(default=22, ge=1, le=65535)
-    sync_interval_seconds: int = Field(default=600, ge=60, le=86400)
+    sync_interval_seconds: int = Field(default=600, ge=10, le=86400)
     enabled: bool = True
 
 
@@ -664,7 +735,7 @@ class ExternalIpSourceUpdate(BaseModel):
     base_url: HttpUrl | None = None
     token: str | None = Field(default=None, min_length=1, max_length=500)
     default_port: int | None = Field(default=None, ge=1, le=65535)
-    sync_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
+    sync_interval_seconds: int | None = Field(default=None, ge=10, le=86400)
     enabled: bool | None = None
 
 

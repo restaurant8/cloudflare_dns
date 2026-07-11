@@ -44,6 +44,8 @@ export type ProbeState = {
 };
 
 export type Origin = {
+  external_source_id: number | null;
+  external_machine_key: string | null;
   id: number;
   group_id: number;
   global_origin_id: number | null;
@@ -254,6 +256,15 @@ export type AzPanelSettings = {
   default_cooldown_seconds: number;
 };
 
+export type SynexVmSettings = {
+  enabled: boolean;
+  api_url: string;
+  api_token_configured: boolean;
+  timeout_seconds: number;
+  wait_seconds: number;
+  default_cooldown_seconds: number;
+};
+
 export type AzPanelResource = {
   id: number;
   name: string;
@@ -263,6 +274,8 @@ export type AzPanelResource = {
   region: string | null;
   ip_version: string;
   ip_change_method: string;
+  api_url: string | null;
+  api_token_configured: boolean;
   origin_id: number | null;
   current_ip: string | null;
   port: number;

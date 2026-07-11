@@ -4,11 +4,14 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.integrations import (
     azpanel_settings,
+    call_synexvm_change_ip,
     change_resource_ip,
     list_azpanel_remote_resources,
     sync_resource_current_ip_to_origin,
+    synexvm_settings,
     trigger_ip_change_for_origin,
     update_azpanel_settings,
+    update_synexvm_settings,
 )
 from app.models import AzPanelRemoteResource, AzPanelResource, CloudflareCredential, FailoverGroup, Origin, ProbeState, User, XboardNodeBinding, Zone
 from app.security import encrypt_secret
@@ -394,3 +397,278 @@ def test_remote_resource_refresh_with_empty_list_clears_cache(monkeypatch):
 
     assert resources == []
     assert db.query(AzPanelRemoteResource).count() == 0
+
+
+def test_synexvm_settings_do_not_expose_token():
+    db = make_session()
+
+    settings = update_synexvm_settings(
+        db,
+        {
+            "enabled": True,
+            "api_url": "https://panel.example.com/modules/servers/pvewhmcs/api.php",
+            "api_token": "secret-token",
+            "timeout_seconds": 20,
+            "wait_seconds": 60,
+            "default_cooldown_seconds": 900,
+        },
+    )
+
+    assert settings["enabled"] is True
+    assert settings["api_url"] == "https://panel.example.com/modules/servers/pvewhmcs/api.php"
+    assert settings["api_token_configured"] is True
+    assert "api_token" not in settings
+    assert synexvm_settings(db)["wait_seconds"] == 60
+
+
+def test_synexvm_settings_fall_back_to_default_api_url():
+    db = make_session()
+
+    assert synexvm_settings(db)["api_url"] == "https://www.synexvm.com/modules/servers/pvewhmcs/api.php"
+
+    # 清空表示回退到内置默认地址，而不是留下无法请求的空串
+    update_synexvm_settings(db, {"api_url": ""})
+    assert synexvm_settings(db)["api_url"] == "https://www.synexvm.com/modules/servers/pvewhmcs/api.php"
+
+
+def test_call_synexvm_change_ip_polls_status_until_ip_changes(monkeypatch):
+    db = make_session()
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok", "wait_seconds": 60})
+    resource = AzPanelResource(
+        name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", current_ip="42.200.231.85", port=22
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+
+    class Response:
+        is_success = True
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    responses = [
+        {"success": True, "vm": {"ipv4": "42.200.231.85", "status": "running"}},  # 换 IP 前先查旧 IP
+        {"success": True, "message": "IP change scheduled"},  # change_ip 本身不带新 IP
+        {"success": True, "vm": {"ipv4": "42.200.231.85", "status": "running"}},  # 第一次轮询还是旧 IP
+        {"success": True, "vm": {"ipv4": "42.200.240.9", "status": "running"}},  # 新 IP 生效
+    ]
+    calls = []
+
+    def fake_get(url, params=None, timeout=None, follow_redirects=None):
+        assert url == "https://www.synexvm.com/modules/servers/pvewhmcs/api.php"
+        assert params["service_id"] == "861"
+        assert params["token"] == "tok"
+        calls.append(params["action"])
+        return Response(responses[len(calls) - 1])
+
+    monkeypatch.setattr("app.integrations.httpx.get", fake_get)
+    monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
+
+    result = call_synexvm_change_ip(db, resource)
+
+    assert result["new_ip"] == "42.200.240.9"
+    assert calls == ["status", "change_ip", "status", "status"]
+
+
+def test_call_synexvm_change_ip_prefers_resource_override(monkeypatch):
+    db = make_session()
+    update_synexvm_settings(db, {"enabled": True, "api_token": "global-tok"})
+    resource = AzPanelResource(
+        name="syn-999",
+        provider="synexvm",
+        resource_id="999",
+        ip_version="ipv4",
+        current_ip="203.0.113.5",
+        port=22,
+        api_url="https://other-panel.example.com/api.php",
+        api_token=encrypt_secret("per-service-tok"),
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+
+    class Response:
+        is_success = True
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    seen = []
+
+    def fake_get(url, params=None, timeout=None, follow_redirects=None):
+        seen.append((url, params["token"], params["action"]))
+        if params["action"] == "change_ip":
+            return Response({"success": True, "new_ip": "203.0.113.99"})
+        return Response({"success": True, "vm": {"ipv4": "203.0.113.5"}})
+
+    monkeypatch.setattr("app.integrations.httpx.get", fake_get)
+    monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
+
+    result = call_synexvm_change_ip(db, resource)
+
+    assert result["new_ip"] == "203.0.113.99"
+    assert all(url == "https://other-panel.example.com/api.php" for url, _, _ in seen)
+    assert all(token == "per-service-tok" for _, token, _ in seen)
+
+
+def test_change_resource_ip_dispatches_synexvm_and_updates_origin(monkeypatch):
+    db = make_session()
+    origin = make_origin(db)
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resource = AzPanelResource(
+        name="syn-861",
+        provider="synexvm",
+        resource_id="861",
+        ip_version="ipv4",
+        origin_id=origin.id,
+        current_ip="192.0.2.10",
+        port=22,
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+
+    monkeypatch.setattr(
+        "app.integrations.call_synexvm_change_ip", lambda db_, res, reason=None: {"new_ip": "198.51.100.7"}
+    )
+
+    job = change_resource_ip(db, resource, trigger_type="manual", reason="test")
+    db.commit()
+
+    assert job.status == "success"
+    assert job.provider == "synexvm"
+    assert job.new_ip == "198.51.100.7"
+    assert resource.current_ip == "198.51.100.7"
+    db.refresh(origin)
+    assert origin.target == "198.51.100.7"
+
+
+def test_trigger_ip_change_uses_synexvm_resource_when_azpanel_disabled(monkeypatch):
+    db = make_session()
+    origin = make_origin(db)
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resource = AzPanelResource(
+        name="syn-861",
+        provider="synexvm",
+        resource_id="861",
+        ip_version="ipv4",
+        origin_id=origin.id,
+        current_ip="192.0.2.10",
+        port=22,
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+
+    called = {}
+
+    def fake_change(db_, res, reason=None):
+        called["id"] = res.id
+        return {"new_ip": "198.51.100.8"}
+
+    monkeypatch.setattr("app.integrations.call_synexvm_change_ip", fake_change)
+
+    job = trigger_ip_change_for_origin(db, origin, "origin blocked")
+    db.commit()
+
+    assert job is not None
+    assert job.status == "success"
+    assert called["id"] == resource.id
+
+
+def test_trigger_ip_change_skips_synexvm_resource_when_disabled(monkeypatch):
+    db = make_session()
+    origin = make_origin(db)
+    # synexvm 未启用：绑定的 synexvm 资源不应触发换 IP
+    resource = AzPanelResource(
+        name="syn-861",
+        provider="synexvm",
+        resource_id="861",
+        ip_version="ipv4",
+        origin_id=origin.id,
+        current_ip="192.0.2.10",
+        port=22,
+    )
+    db.add(resource)
+    db.commit()
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("synexvm change ip should not be called when integration is disabled")
+
+    monkeypatch.setattr("app.integrations.call_synexvm_change_ip", fail_if_called)
+
+    assert trigger_ip_change_for_origin(db, origin, "origin blocked") is None
+
+
+def test_trigger_ip_change_matches_resource_by_ip_when_port_differs(monkeypatch):
+    db = make_session()
+    origin = make_origin(db)  # target 192.0.2.10:22
+    origin.port = 443  # 外部 IP 的入口端口，和云资源的检查端口不同
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resource = AzPanelResource(
+        name="syn-861",
+        provider="synexvm",
+        resource_id="861",
+        ip_version="ipv4",
+        current_ip="192.0.2.10",
+        port=22,
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+
+    called = {}
+
+    def fake_change(db_, res, reason=None):
+        called["id"] = res.id
+        return {"new_ip": "198.51.100.9"}
+
+    monkeypatch.setattr("app.integrations.call_synexvm_change_ip", fake_change)
+
+    job = trigger_ip_change_for_origin(db, origin, "origin blocked")
+    db.commit()
+
+    assert job is not None
+    assert job.status == "success"
+    assert called["id"] == resource.id
+    # 资源没绑定源站：源站目标不直接改，等外部来源同步新 IP 后按绑定跟随
+    assert origin.target == "192.0.2.10"
+
+
+def test_successful_ip_change_marks_external_sources_due(monkeypatch):
+    from datetime import datetime as dt
+
+    from app.models import ExternalIpSource
+
+    db = make_session()
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    source = ExternalIpSource(
+        name="nyanpass",
+        base_url="https://ny.example.com",
+        token_encrypted=encrypt_secret("token"),
+        last_synced_at=dt.utcnow(),
+    )
+    resource = AzPanelResource(
+        name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", current_ip="192.0.2.10", port=22
+    )
+    db.add_all([source, resource])
+    db.commit()
+    db.refresh(resource)
+
+    monkeypatch.setattr(
+        "app.integrations.call_synexvm_change_ip", lambda db_, res, reason=None: {"new_ip": "198.51.100.10"}
+    )
+
+    job = change_resource_ip(db, resource, trigger_type="manual", reason="test")
+    db.commit()
+
+    assert job.status == "success"
+    # 换 IP 成功后外部来源被标记为到期，下个调度周期立即重新同步
+    assert source.last_synced_at is None
