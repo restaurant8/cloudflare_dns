@@ -35,6 +35,7 @@ EVENT_NAMES = {
     "cloudflare.synced": "Cloudflare 已同步",
     "azpanel.ip_changed": "云资源 IP 已更换",
     "azpanel.ip_change_failed": "云资源 IP 更换失败",
+    "azpanel.ip_change_pending": "云资源换 IP 已下发，等待新 IP",
     "xboard.node_update_failed": "Xboard 节点更新失败",
     "external_ip.origin_synced": "外部 IP 已同步到备用目标",
 }
@@ -85,6 +86,7 @@ TELEGRAM_EVENT_PRIORITIES = {
     "cloudflare.sync_failed": 30,
     "azpanel.ip_changed": 30,
     "azpanel.ip_change_failed": 30,
+    "azpanel.ip_change_pending": 10,
     "xboard.node_update_failed": 20,
     "external_ip.origin_synced": 20,
 }

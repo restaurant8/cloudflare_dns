@@ -331,6 +331,8 @@ class AzPanelResource(Base, TimestampMixin):
     cooldown_seconds: Mapped[int] = mapped_column(Integer, default=1800, nullable=False)
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_change_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # 非空表示换 IP 已下发但新 IP 还没确认，调度器会持续查 status 直到取到新 IP 或超时
+    pending_change_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
     remark: Mapped[str | None] = mapped_column(Text)
 

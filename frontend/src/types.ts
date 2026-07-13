@@ -290,6 +290,7 @@ export type AzPanelResource = {
   ip_change_method: string;
   api_url: string | null;
   api_token_configured: boolean;
+  pending_change_at: string | null;
   origin_id: number | null;
   current_ip: string | null;
   port: number;

@@ -10,6 +10,7 @@ from .config import get_settings
 from .database import SessionLocal, init_db
 from .external_ips import sync_due_external_ip_sources
 from .failover import evaluate_failover_groups
+from .integrations import reconcile_pending_synexvm_changes
 from .health import mark_stale_agents, run_local_checks
 from .retention import prune_old_rows
 from .runtime_settings import get_runtime_settings
@@ -34,6 +35,9 @@ def _run_scheduler_tick() -> int:
         mark_stale_agents(db)
         check_cache = {}
         run_local_checks(db, check_cache=check_cache)
+        # 先把已下发但未确认的 SynexVM 换 IP 用 status 补上新 IP（并催外部来源重同步），
+        # 再跑外部同步和故障切换评估，绑定的源站才能在本轮就跟上新 IP。
+        reconcile_pending_synexvm_changes(db)
         sync_due_external_ip_sources(db)
         # commit_per_group keeps external side effects (Cloudflare writes, azpanel
         # IP changes) recorded even if a later group fails mid-tick.

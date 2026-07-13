@@ -37,6 +37,9 @@ SYNEXVM_DEFAULT_COOLDOWN = "synexvm.default_cooldown_seconds"
 
 SYNEXVM_DEFAULT_API_URL = "https://www.synexvm.com/modules/servers/pvewhmcs/api.php"
 SYNEXVM_POLL_INTERVAL_SECONDS = 5
+# 换 IP 下发后在请求内最多同步等待多久确认新 IP（快路径）；超过就转后台对账，
+# 避免长时间阻塞调度线程。剩余等待预算由 wait_seconds 在调度器里消化。
+SYNEXVM_INLINE_CONFIRM_SECONDS = 15
 
 IP_RE = re.compile(r"(?:(?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]{2,})")
 
@@ -347,9 +350,11 @@ def call_synexvm_change_ip(db: Session, resource: AzPanelResource, reason: str |
         data["new_ip"] = new_ip
         return data
 
-    # change_ip 响应里没有新 IP（或还是旧 IP）时轮询 status，等新 IP 生效。
-    # IP 切换期间面板可能暂时报错，忽略继续等。
-    deadline = time.monotonic() + max(settings["wait_seconds"], 0)
+    # change_ip 响应里通常没有新 IP。SynexVM 换 IP 是后台重新分配，status 接口
+    # 反映新 IP 可能要几分钟，所以只在这里短暂内联确认（快路径），拿不到就返回
+    # pending，交给调度器后台继续查 status，避免长时间阻塞调度线程、也不再误判失败。
+    inline_budget = min(max(settings["wait_seconds"], 0), SYNEXVM_INLINE_CONFIRM_SECONDS)
+    deadline = time.monotonic() + inline_budget
     while time.monotonic() < deadline:
         time.sleep(SYNEXVM_POLL_INTERVAL_SECONDS)
         try:
@@ -360,10 +365,9 @@ def call_synexvm_change_ip(db: Session, resource: AzPanelResource, reason: str |
         if current and (not old_ip or current != old_ip):
             data["new_ip"] = current
             return data
-    raise RuntimeError(
-        f"SynexVM 已下发换 IP，但 {settings['wait_seconds']} 秒内 status 接口仍未返回新 IP"
-        f"（原 IP {old_ip or '未知'}），请稍后在面板上刷新状态确认"
-    )
+    data["pending"] = True
+    data["old_ip"] = old_ip or None
+    return data
 
 
 def _remote_resource_key(item: dict[str, Any]) -> str:
@@ -633,6 +637,49 @@ def call_xboard_update_node_ip(db: Session, node: XboardNodeBinding, new_ip: str
     return data
 
 
+def _sync_resource_xboard_nodes(db: Session, resource: AzPanelResource, new_ip: str, reason: str | None) -> list[dict[str, Any]]:
+    """把新 IP 推给资源绑定的 Xboard 节点，返回成功更新的结果列表。"""
+    xboard_config = xboard_settings(db)
+    results: list[dict[str, Any]] = []
+    for node in list(resource.xboard_nodes):
+        if not node.enabled or not node.auto_update_after_change:
+            continue
+        node.host = new_ip
+        node.last_sync_at = datetime.utcnow()
+        if not xboard_config["enabled"]:
+            node.last_error = None
+            continue
+        try:
+            xboard_result = call_xboard_update_node_ip(db, node, new_ip, reason=reason)
+            node.last_error = None
+            results.append({"node_id": node.xboard_node_id, "result": xboard_result})
+        except Exception as exc:
+            node.last_error = str(exc)
+            add_event(
+                db,
+                "xboard.node_update_failed",
+                "warning",
+                f"Xboard node {node.xboard_node_id} update failed: {exc}",
+                {"node_binding_id": node.id, "node_id": node.xboard_node_id, "error": str(exc)},
+            )
+    return results
+
+
+def _apply_changed_ip(db: Session, resource: AzPanelResource, new_ip: str, reason: str | None) -> tuple[str, list[dict[str, Any]]]:
+    """新 IP 确认后统一落地：更新资源、同步源站、推 Xboard、催外部来源重新同步。"""
+    target_info = parse_target(new_ip)
+    resource.current_ip = target_info.value
+    resource.last_change_at = datetime.utcnow()
+    resource.last_error = None
+    resource.pending_change_at = None
+    sync_resource_current_ip_to_origin(db, resource)
+    xboard_results = _sync_resource_xboard_nodes(db, resource, target_info.value, reason)
+    # 机器换了 IP，外部 IP 来源（如 nyanpass）要尽快重新同步，
+    # 绑定了这台机器的备用目标才能跟上新 IP
+    mark_external_ip_sources_due(db)
+    return target_info.value, xboard_results
+
+
 def _resource_on_cooldown(resource: AzPanelResource, now: datetime) -> bool:
     last_attempt_at = getattr(resource, "last_attempt_at", None) or resource.last_change_at
     if last_attempt_at is None:
@@ -728,41 +775,41 @@ def change_resource_ip(
             result = call_synexvm_change_ip(db, resource, reason=reason)
         else:
             result = call_azpanel_change_ip(db, resource, reason=reason)
-        new_ip = str(result["new_ip"]).strip()
-        target_info = parse_target(new_ip)
-        resource.current_ip = target_info.value
-        resource.last_change_at = datetime.utcnow()
-        resource.last_error = None
-        job.new_ip = target_info.value
-        job.response_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
-        sync_resource_current_ip_to_origin(db, resource)
+        if result.get("pending") and not result.get("new_ip"):
+            # 换 IP 已下发但新 IP 还没确认（SynexVM 生效慢）。不判失败：标记 pending，
+            # 由调度器后台查 status 补新 IP；同时催外部来源重新同步，绑定了这台机器的
+            # 备用目标会通过 nyanpass 的新 IP 恢复。
+            resource.pending_change_at = datetime.utcnow()
+            resource.last_error = None
+            job.status = "pending"
+            job.error = None
+            job.response_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+            job.finished_at = datetime.utcnow()
+            mark_external_ip_sources_due(db)
+            payload = {
+                "resource_id": resource.id,
+                "provider": resource.provider,
+                "old_ip": job.old_ip,
+                "origin_id": resource.origin_id,
+                "trigger_type": trigger_type,
+            }
+            add_event(
+                db,
+                "azpanel.ip_change_pending",
+                "info",
+                f"{resource.name} 已下发换 IP，等待新 IP 生效（后台查询状态中）",
+                payload,
+            )
+            db.flush()
+            return job
 
-        xboard_config = xboard_settings(db)
-        for node in list(resource.xboard_nodes):
-            if not node.enabled or not node.auto_update_after_change:
-                continue
-            node.host = target_info.value
-            node.last_sync_at = datetime.utcnow()
-            if not xboard_config["enabled"]:
-                node.last_error = None
-                continue
-            try:
-                xboard_result = call_xboard_update_node_ip(db, node, target_info.value, reason=reason)
-                node.last_error = None
-                if job.response_json:
-                    merged = json.loads(job.response_json)
-                    merged.setdefault("xboard", []).append({"node_id": node.xboard_node_id, "result": xboard_result})
-                    job.response_json = json.dumps(merged, ensure_ascii=False, separators=(",", ":"))
-            except Exception as exc:
-                node.last_error = str(exc)
-                add_event(
-                    db,
-                    "xboard.node_update_failed",
-                    "warning",
-                    f"Xboard node {node.xboard_node_id} update failed: {exc}",
-                    {"node_binding_id": node.id, "node_id": node.xboard_node_id, "error": str(exc)},
-                )
+        new_ip, xboard_results = _apply_changed_ip(db, resource, str(result["new_ip"]).strip(), reason)
+        job.new_ip = new_ip
+        merged = dict(result)
+        if xboard_results:
+            merged["xboard"] = xboard_results
+        job.response_json = json.dumps(merged, ensure_ascii=False, separators=(",", ":"))
 
         job.status = "success"
         job.finished_at = datetime.utcnow()
@@ -776,9 +823,6 @@ def change_resource_ip(
         }
         add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {job.new_ip}", payload)
         send_webhooks(db, "azpanel.ip_changed", payload)
-        # 机器换了 IP，外部 IP 来源（如 nyanpass）要尽快重新同步，
-        # 绑定了这台机器的备用目标才能跟上新 IP
-        mark_external_ip_sources_due(db)
     except Exception as exc:
         message = str(exc)
         resource.last_error = message
@@ -797,6 +841,83 @@ def change_resource_ip(
         send_webhooks(db, "azpanel.ip_change_failed", payload)
     db.flush()
     return job
+
+
+def _finish_pending_job(db: Session, resource: AzPanelResource, new_ip: str | None, error: str | None) -> None:
+    """把该资源最近一条 pending 换 IP 任务收尾成成功或失败。"""
+    job = (
+        db.query(IpChangeJob)
+        .filter(IpChangeJob.azpanel_resource_id == resource.id, IpChangeJob.status == "pending")
+        .order_by(IpChangeJob.id.desc())
+        .first()
+    )
+    if job is None:
+        return
+    job.finished_at = datetime.utcnow()
+    if new_ip:
+        job.status = "success"
+        job.new_ip = new_ip
+        job.error = None
+    else:
+        job.status = "failed"
+        job.error = error
+
+
+def reconcile_pending_synexvm_changes(db: Session) -> int:
+    """调度器每个周期调用：对 pending 的 SynexVM 资源查 status 补新 IP。
+
+    change_ip 下发后新 IP 往往几分钟才在 status 生效，所以下发时只标记 pending，
+    这里非阻塞地轮询 status，拿到新 IP 就落地（更新资源/源站/Xboard/外部来源），
+    超过 wait_seconds 预算仍没结果就放弃并记失败。
+    """
+    resources = (
+        db.query(AzPanelResource)
+        .filter(AzPanelResource.provider == "synexvm", AzPanelResource.pending_change_at.isnot(None))
+        .all()
+    )
+    if not resources:
+        return 0
+    settings = synexvm_settings(db)
+    budget = max(settings["wait_seconds"], 60)
+    now = datetime.utcnow()
+    resolved = 0
+    for resource in resources:
+        try:
+            payload = call_synexvm_status(db, resource)
+        except Exception:
+            payload = None
+        new_ip = _synexvm_payload_ip(payload, resource.ip_version) if payload else None
+        if new_ip and new_ip != (resource.current_ip or ""):
+            old_ip = resource.current_ip
+            applied_ip, xboard_results = _apply_changed_ip(db, resource, new_ip, reason="synexvm pending change confirmed")
+            _finish_pending_job(db, resource, applied_ip, None)
+            payload_evt = {
+                "resource_id": resource.id,
+                "provider": resource.provider,
+                "old_ip": old_ip,
+                "new_ip": applied_ip,
+                "origin_id": resource.origin_id,
+                "trigger_type": "auto_reconcile",
+            }
+            add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {applied_ip}", payload_evt)
+            send_webhooks(db, "azpanel.ip_changed", payload_evt)
+            resolved += 1
+        elif resource.pending_change_at and (now - resource.pending_change_at).total_seconds() > budget:
+            resource.pending_change_at = None
+            message = f"换 IP 已下发但 {int(budget)} 秒内 status 未返回新 IP，请在 SynexVM 面板确认"
+            resource.last_error = message
+            _finish_pending_job(db, resource, None, message)
+            payload_evt = {
+                "resource_id": resource.id,
+                "provider": resource.provider,
+                "old_ip": resource.current_ip,
+                "origin_id": resource.origin_id,
+                "trigger_type": "auto_reconcile",
+                "error": message,
+            }
+            add_event(db, "azpanel.ip_change_failed", "warning", f"{resource.name} IP change unconfirmed: {message}", payload_evt)
+    db.flush()
+    return resolved
 
 
 def trigger_ip_change_for_origin(db: Session, origin: Origin, reason: str) -> IpChangeJob | None:

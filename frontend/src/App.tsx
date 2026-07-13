@@ -128,7 +128,8 @@ const statusLabels: Record<string, string> = {
   running: "执行中",
   success: "成功",
   failed: "失败",
-  skipped: "已跳过"
+  skipped: "已跳过",
+  pending: "下发中"
 };
 
 const targetTypeLabels: Record<string, string> = {
@@ -152,6 +153,7 @@ const eventTypeLabels: Record<string, string> = {
   "telegram.test": "Telegram 测试",
   "azpanel.ip_changed": "云资源 IP 已更换",
   "azpanel.ip_change_failed": "云资源 IP 更换失败",
+  "azpanel.ip_change_pending": "换 IP 已下发，等待新 IP",
   "external_ip.origin_synced": "外部 IP 已同步到备用目标",
   "xboard.node_update_failed": "Xboard 节点更新失败"
 };
@@ -4689,6 +4691,7 @@ function AzPanelPanel({
               <div className="poolItemMain">
                 <strong>{resource.name}</strong>
                 <span>{resource.provider} · {resource.resource_id} · {resource.current_ip || "未记录 IP"}:{resource.port} · 尝试 {fmtDate(resource.last_attempt_at)} · 成功 {fmtDate(resource.last_change_at)}</span>
+                {resource.pending_change_at && <small className="successText">换 IP 已下发，后台查询状态中（约每个检查周期重试，新 IP 生效后自动同步）…</small>}
                 {resource.last_error && <small className="danger">{resource.last_error}</small>}
               </div>
               <div className="rowActions">

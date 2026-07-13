@@ -672,3 +672,130 @@ def test_successful_ip_change_marks_external_sources_due(monkeypatch):
     assert job.status == "success"
     # 换 IP 成功后外部来源被标记为到期，下个调度周期立即重新同步
     assert source.last_synced_at is None
+
+
+def _synex_resp(payload):
+    class Response:
+        is_success = True
+
+        def json(self):
+            return payload
+
+    return Response()
+
+
+def test_synexvm_change_ip_returns_pending_when_status_lags(monkeypatch):
+    db = make_session()
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok", "wait_seconds": 10})
+    resource = AzPanelResource(
+        name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", current_ip="42.200.231.85", port=22
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+
+    # status 一直返回旧 IP（换 IP 生效慢），change_ip 不带新 IP
+    def fake_get(url, params=None, timeout=None, follow_redirects=None):
+        if params["action"] == "change_ip":
+            return _synex_resp({"success": True, "message": "scheduled"})
+        return _synex_resp({"success": True, "vm": {"ipv4": "42.200.231.85"}})
+
+    monkeypatch.setattr("app.integrations.httpx.get", fake_get)
+    monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
+
+    result = call_synexvm_change_ip(db, resource)
+
+    assert result.get("pending") is True
+    assert "new_ip" not in result
+
+
+def test_change_resource_ip_pending_marks_resource_and_external_due(monkeypatch):
+    from app.models import ExternalIpSource
+    from datetime import datetime as dt
+
+    db = make_session()
+    origin = make_origin(db)
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    source = ExternalIpSource(name="ny", base_url="https://ny.example.com", token_encrypted=encrypt_secret("t"), last_synced_at=dt.utcnow())
+    resource = AzPanelResource(
+        name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", origin_id=origin.id, current_ip="192.0.2.10", port=22
+    )
+    db.add_all([source, resource])
+    db.commit()
+    db.refresh(resource)
+
+    monkeypatch.setattr("app.integrations.call_synexvm_change_ip", lambda db_, res, reason=None: {"pending": True, "old_ip": "192.0.2.10"})
+
+    job = change_resource_ip(db, resource, trigger_type="auto_blocked", reason="blocked")
+    db.commit()
+
+    assert job.status == "pending"
+    assert job.new_ip is None
+    assert resource.pending_change_at is not None
+    # 源站不立即改（等新 IP），但外部来源被催重新同步
+    db.refresh(origin)
+    assert origin.target == "192.0.2.10"
+    assert source.last_synced_at is None
+
+
+def test_reconcile_applies_new_ip_and_finishes_job(monkeypatch):
+    from app.integrations import reconcile_pending_synexvm_changes
+    from app.models import IpChangeJob
+    from datetime import datetime as dt
+
+    db = make_session()
+    origin = make_origin(db)
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resource = AzPanelResource(
+        name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", origin_id=origin.id,
+        current_ip="192.0.2.10", port=22, pending_change_at=dt.utcnow(), auto_update_origin=True,
+    )
+    db.add(resource)
+    db.flush()
+    pending_job = IpChangeJob(
+        trigger_type="auto_blocked", status="pending", provider="synexvm",
+        azpanel_resource_id=resource.id, origin_id=origin.id, old_ip="192.0.2.10", started_at=dt.utcnow(),
+    )
+    db.add(pending_job)
+    db.commit()
+
+    # status 现在返回新 IP
+    monkeypatch.setattr("app.integrations.httpx.get", lambda *a, **k: _synex_resp({"success": True, "vm": {"ipv4": "198.51.100.7"}}))
+
+    resolved = reconcile_pending_synexvm_changes(db)
+    db.commit()
+
+    assert resolved == 1
+    db.refresh(resource)
+    db.refresh(pending_job)
+    assert resource.current_ip == "198.51.100.7"
+    assert resource.pending_change_at is None
+    assert pending_job.status == "success"
+    assert pending_job.new_ip == "198.51.100.7"
+    db.refresh(origin)
+    assert origin.target == "198.51.100.7"
+
+
+def test_reconcile_gives_up_after_budget(monkeypatch):
+    from app.integrations import reconcile_pending_synexvm_changes
+    from datetime import datetime as dt, timedelta
+
+    db = make_session()
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok", "wait_seconds": 60})
+    resource = AzPanelResource(
+        name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4",
+        current_ip="192.0.2.10", port=22, pending_change_at=dt.utcnow() - timedelta(seconds=200),
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+
+    # status 一直是旧 IP，超过预算应放弃
+    monkeypatch.setattr("app.integrations.httpx.get", lambda *a, **k: _synex_resp({"success": True, "vm": {"ipv4": "192.0.2.10"}}))
+
+    reconcile_pending_synexvm_changes(db)
+    db.commit()
+    db.refresh(resource)
+
+    assert resource.pending_change_at is None
+    assert "未返回新 IP" in (resource.last_error or "")

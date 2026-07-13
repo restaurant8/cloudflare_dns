@@ -650,6 +650,7 @@ class AzPanelResourceUpdate(BaseModel):
 class AzPanelResourceOut(AzPanelResourceBase):
     id: int
     api_token_configured: bool = False
+    pending_change_at: datetime | None = None
     last_attempt_at: datetime | None
     last_change_at: datetime | None
     last_error: str | None
