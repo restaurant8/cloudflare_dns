@@ -133,6 +133,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
             "expanded_ip_priorities_json": "ALTER TABLE origins ADD COLUMN expanded_ip_priorities_json TEXT NULL",
             "external_source_id": "ALTER TABLE origins ADD COLUMN external_source_id INT NULL",
             "external_machine_key": "ALTER TABLE origins ADD COLUMN external_machine_key VARCHAR(255) NULL",
+            "ignore_health_check": "ALTER TABLE origins ADD COLUMN ignore_health_check TINYINT(1) NOT NULL DEFAULT 0",
         }
     return {
         "global_origin_id": "ALTER TABLE origins ADD COLUMN global_origin_id INTEGER",
@@ -146,6 +147,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
         "expanded_ip_priorities_json": "ALTER TABLE origins ADD COLUMN expanded_ip_priorities_json TEXT NOT NULL DEFAULT '{}'",
         "external_source_id": "ALTER TABLE origins ADD COLUMN external_source_id INTEGER",
         "external_machine_key": "ALTER TABLE origins ADD COLUMN external_machine_key VARCHAR(255)",
+        "ignore_health_check": "ALTER TABLE origins ADD COLUMN ignore_health_check BOOLEAN NOT NULL DEFAULT FALSE",
     }
 
 
@@ -163,11 +165,13 @@ def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
             "preferred_agent_id": "ALTER TABLE failover_global_origins ADD COLUMN preferred_agent_id INT NULL",
             "probe_mode": "ALTER TABLE failover_global_origins ADD COLUMN probe_mode VARCHAR(20) NOT NULL DEFAULT 'default'",
             "expanded_ip_priorities_json": "ALTER TABLE failover_global_origins ADD COLUMN expanded_ip_priorities_json TEXT NULL",
+            "ignore_health_check": "ALTER TABLE failover_global_origins ADD COLUMN ignore_health_check TINYINT(1) NOT NULL DEFAULT 0",
         }
     return {
         "preferred_agent_id": "ALTER TABLE failover_global_origins ADD COLUMN preferred_agent_id INTEGER",
         "probe_mode": "ALTER TABLE failover_global_origins ADD COLUMN probe_mode VARCHAR(20) NOT NULL DEFAULT 'default'",
         "expanded_ip_priorities_json": "ALTER TABLE failover_global_origins ADD COLUMN expanded_ip_priorities_json TEXT NOT NULL DEFAULT '{}'",
+        "ignore_health_check": "ALTER TABLE failover_global_origins ADD COLUMN ignore_health_check BOOLEAN NOT NULL DEFAULT FALSE",
     }
 
 

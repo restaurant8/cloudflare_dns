@@ -170,6 +170,7 @@ class Origin(Base, TimestampMixin):
     weight: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     remark: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    ignore_health_check: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -250,6 +251,7 @@ class FailoverGlobalOrigin(Base, TimestampMixin):
     priority: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
     remark: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    ignore_health_check: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     expanded_ip_priorities_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
 
     @property
@@ -305,6 +307,14 @@ class TargetPoolProbeState(Base, TimestampMixin):
     @property
     def agent_enabled(self) -> bool:
         return True if self.agent is None else self.agent.enabled
+
+    @property
+    def agent_online(self) -> bool:
+        return True if self.agent is None else self.agent.status == "online"
+
+    @property
+    def agent_region(self) -> str | None:
+        return self.agent.region if self.agent else None
 
 
 class AzPanelResource(Base, TimestampMixin):

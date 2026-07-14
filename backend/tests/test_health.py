@@ -344,6 +344,31 @@ def test_mark_stale_agents_sends_offline_status(monkeypatch):
     assert agent.status == "offline"
 
 
+def test_mark_stale_agents_recalculates_origin_using_offline_preferred_probe(monkeypatch):
+    db = make_session()
+    origin, agent = make_origin_with_agent(db)
+    origin.preferred_agent_id = agent.id
+    origin.probe_mode = "china_only"
+    origin.status = "healthy"
+    agent.last_seen_at = None
+    db.add(
+        ProbeState(
+            origin_id=origin.id,
+            agent_id=agent.id,
+            source_key=f"agent:{agent.id}",
+            status="healthy",
+            last_checked_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+    monkeypatch.setattr("app.health.send_webhooks", lambda *args, **kwargs: None)
+
+    mark_stale_agents(db)
+
+    assert agent.status == "offline"
+    assert origin.status == "unknown"
+
+
 def make_group_with_current_and_backup(db, current_status: str = "healthy"):
     credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
     db.add(credential)

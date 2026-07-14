@@ -159,6 +159,7 @@ def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreat
         probe_mode=_normalize_probe_mode(payload.probe_mode),
         remark=_normalize_remark(payload.remark),
         enabled=payload.enabled,
+        ignore_health_check=payload.ignore_health_check,
         external_source_id=external_source_id,
         external_machine_key=external_machine_key,
     )
@@ -211,6 +212,7 @@ def _global_origin_from_payload(db: Session, collection: FailoverCollection, pay
         probe_mode=_normalize_probe_mode(payload.probe_mode),
         remark=_normalize_remark(payload.remark),
         enabled=payload.enabled,
+        ignore_health_check=payload.ignore_health_check,
     )
     _apply_expanded_ip_priorities(global_origin, payload.expanded_ip_priorities if target_info.target_type == "hostname" else {})
     return global_origin
@@ -248,6 +250,7 @@ def _copy_global_origin_to_origin(origin: Origin, global_origin: FailoverGlobalO
     origin.priority = global_origin.priority
     origin.remark = global_origin.remark
     origin.enabled = global_origin.enabled
+    origin.ignore_health_check = global_origin.ignore_health_check
     origin.expanded_ip_priorities_json = global_origin.expanded_ip_priorities_json
     if endpoint_changed or probe_source_changed:
         _reset_origin_probe_state(origin)

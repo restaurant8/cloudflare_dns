@@ -55,8 +55,8 @@ import { ThemeToggle } from "@/components/theme-toggle";
 type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
 type ProbeMode = "default" | "local_only" | "china_only" | "any";
-type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
-type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; unbind_external: boolean };
+type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
+type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; unbind_external: boolean };
 type GlobalOriginDraft = OriginAddDraft;
 type CollectionDraft = { name: string };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | "" };
@@ -269,11 +269,24 @@ function externalIpPoolRemark(item: ExternalIpItem): string {
 }
 
 function activeProbeStates(probeStates: ProbeState[]) {
-  return probeStates.filter((probe) => probe.agent_enabled !== false);
+  return probeStates.filter((probe) => probe.agent_enabled !== false && probe.agent_online !== false);
 }
 
 function currentProbeStates(origin: Origin) {
-  const activeStates = activeProbeStates(origin.probe_states);
+  const mode = normalizeProbeMode(origin.probe_mode);
+  const activeStates = activeProbeStates(origin.probe_states).filter((probe) => {
+    const isLocal = probe.agent_id == null;
+    if (origin.preferred_agent_id != null) {
+      if (!isLocal && probe.agent_id !== origin.preferred_agent_id) return false;
+      if (mode === "local_only") return isLocal;
+      if (mode === "china_only") return !isLocal;
+      return true;
+    }
+    if (mode === "local_only") return isLocal;
+    if (mode === "china_only") return !isLocal && probe.agent_region === "china";
+    if (mode === "any") return isLocal || probe.agent_region === "china";
+    return true;
+  });
   if (origin.publish_mode !== "expanded") return activeStates;
   const currentIps = new Set(origin.resolved_ips);
   return activeStates.filter((probe) => {
@@ -410,8 +423,8 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
-const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
+const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
@@ -2042,6 +2055,7 @@ function GroupsPanel({
       probe_mode: "default",
       remark: "",
       enabled: true,
+      ignore_health_check: false,
       azpanel_resource_id: "",
       azpanel_remote_key: "",
       external_ip_item_id: ""
@@ -2066,7 +2080,8 @@ function GroupsPanel({
             preferred_agent_id: globalOriginAdd.preferred_agent_id === "" ? null : globalOriginAdd.preferred_agent_id,
             probe_mode: globalOriginAdd.probe_mode,
             remark: globalOriginAdd.remark.trim() || null,
-            enabled: globalOriginAdd.enabled
+            enabled: globalOriginAdd.enabled,
+            ignore_health_check: globalOriginAdd.ignore_health_check
           })
         });
       },
@@ -2092,6 +2107,7 @@ function GroupsPanel({
         probe_mode: normalizeProbeMode(origin.probe_mode),
         remark: origin.remark || "",
         enabled: origin.enabled,
+        ignore_health_check: origin.ignore_health_check,
         azpanel_resource_id: "",
         azpanel_remote_key: "",
         external_ip_item_id: ""
@@ -2135,6 +2151,7 @@ function GroupsPanel({
       probe_mode: "default",
       remark: "",
       enabled: true,
+      ignore_health_check: false,
       azpanel_resource_id: "",
       azpanel_remote_key: "",
       external_ip_item_id: ""
@@ -2254,6 +2271,7 @@ function GroupsPanel({
             probe_mode: originAdd.probe_mode,
             remark: originAdd.remark.trim() || null,
             enabled: originAdd.enabled,
+            ignore_health_check: originAdd.ignore_health_check,
             azpanel_resource_id: originAdd.azpanel_resource_id === "" ? null : originAdd.azpanel_resource_id,
             azpanel_remote_key: originAdd.azpanel_remote_key || null,
             external_ip_item_id: originAdd.external_ip_item_id === "" ? null : originAdd.external_ip_item_id
@@ -2432,6 +2450,7 @@ function GroupsPanel({
         probe_mode: normalizeProbeMode(origin.probe_mode),
         remark: origin.remark || "",
         enabled: origin.enabled,
+        ignore_health_check: origin.ignore_health_check,
         unbind_external: false
       }
     }));
@@ -2543,7 +2562,8 @@ function GroupsPanel({
       preferred_agent_id: origin.preferred_agent_id || "",
       probe_mode: normalizeProbeMode(origin.probe_mode),
       remark: origin.remark || "",
-      enabled: origin.enabled
+      enabled: origin.enabled,
+      ignore_health_check: origin.ignore_health_check
     };
     const editType = inferDraftTargetType(draft.target);
     if (editingGlobalOriginId === origin.id) {
@@ -2615,6 +2635,10 @@ function GroupsPanel({
             <input type="checkbox" checked={draft.enabled} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, enabled: event.target.checked } }))} />
             启用
           </label>
+          <label className="inlineCheck" title="开启后，即使探测不健康也会按健康状态参与优先级和时间段入口选择">
+            <input type="checkbox" checked={draft.ignore_health_check} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, ignore_health_check: event.target.checked } }))} />
+            无视健康检查规则
+          </label>
           <div className="rowActions">
             <button className="icon" title="保存并同步" onClick={() => saveGlobalOriginEdit(origin.id)}>
               <Save size={15} />
@@ -2634,6 +2658,7 @@ function GroupsPanel({
             {targetTypeText(origin.target_type)} · 优先级 {origin.priority} · 发布为 {recordTypeForTargetType(origin.target_type, origin.publish_mode)} · {origin.enabled ? "已启用" : "已停用"}
             {preferredAgent ? ` · 指定探针 ${preferredAgent.name}` : ""}
             {normalizeProbeMode(origin.probe_mode) !== "default" ? ` · ${probeModeText(origin.probe_mode)}` : ""}
+            {origin.ignore_health_check ? " · 无视健康检查" : ""}
           </span>
         </div>
         <div className="rowActions">
@@ -3009,6 +3034,7 @@ function GroupsPanel({
                         probe_mode: normalizeProbeMode(origin.probe_mode),
                         remark: origin.remark || "",
                         enabled: origin.enabled,
+                        ignore_health_check: origin.ignore_health_check,
                         unbind_external: false
                       };
                       const editType = inferDraftTargetType(originEdit.target);
@@ -3100,6 +3126,10 @@ function GroupsPanel({
                                   <input type="checkbox" checked={originEdit.enabled} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, enabled: event.target.checked } }))} />
                                   启用
                                 </label>
+                                <label className="inlineCheck" title="开启后，即使探测不健康也会按健康状态参与优先级和时间段入口选择">
+                                  <input type="checkbox" checked={originEdit.ignore_health_check} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, ignore_health_check: event.target.checked } }))} />
+                                  无视健康检查规则
+                                </label>
                                 {origin.external_machine_key && (
                                   <label className="inlineCheck">
                                     <input type="checkbox" checked={originEdit.unbind_external} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, unbind_external: event.target.checked } }))} />
@@ -3136,6 +3166,7 @@ function GroupsPanel({
                                     <span className="originBadge record">{recordTypeForTargetType(origin.target_type, origin.publish_mode)}</span>
                                     {preferredAgent && <span className="originBadge record">指定探针 {preferredAgent.name}</span>}
                                     {normalizeProbeMode(origin.probe_mode) !== "default" && <span className="originBadge record">{probeModeText(origin.probe_mode)}</span>}
+                                    {origin.ignore_health_check && <span className="originBadge record">无视健康检查</span>}
                                     {origin.external_machine_key && <span className="originBadge record" title={`绑定外部机器 ${origin.external_machine_key}，来源同步到新 IP 时自动更新`}>外部IP绑定</span>}
                                   </div>
                                 </div>
@@ -3277,6 +3308,10 @@ function GroupsPanel({
             <label className="inlineCheck">
               <input type="checkbox" checked={globalOriginAdd.enabled} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, enabled: event.target.checked }))} />
               启用这个全局备用
+            </label>
+            <label className="inlineCheck" title="即使探测不健康也按健康状态参与选择">
+              <input type="checkbox" checked={globalOriginAdd.ignore_health_check} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, ignore_health_check: event.target.checked }))} />
+              无视健康检查规则
             </label>
             {globalAddTargetType === "hostname" && (
               <label className="inlineCheck">
@@ -3451,6 +3486,10 @@ function GroupsPanel({
             <label className="inlineCheck">
               <input type="checkbox" checked={originAdd.enabled} onChange={(event) => setOriginAdd((current) => ({ ...current, enabled: event.target.checked }))} />
               启用这个备用目标
+            </label>
+            <label className="inlineCheck" title="即使探测不健康也按健康状态参与选择">
+              <input type="checkbox" checked={originAdd.ignore_health_check} onChange={(event) => setOriginAdd((current) => ({ ...current, ignore_health_check: event.target.checked }))} />
+              无视健康检查规则
             </label>
             {addTargetType === "hostname" && (
               <label className="inlineCheck">

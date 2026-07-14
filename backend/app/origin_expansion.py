@@ -94,6 +94,28 @@ def selected_healthy_ip(origin: Any) -> str | None:
     )[0]
 
 
+def selected_publish_ip(origin: Any) -> str | None:
+    """Select a healthy IP, or any resolved IP when health is explicitly ignored."""
+    selected = selected_healthy_ip(origin)
+    if selected or not getattr(origin, "ignore_health_check", False):
+        return selected
+    ips = resolved_ips(origin)
+    if not ips:
+        return None
+    current_published = published_ips(origin)
+    if current_published and current_published[0] in ips:
+        return current_published[0]
+    priorities = expanded_ip_priorities(origin)
+    return sorted(
+        ips,
+        key=lambda item: (
+            priorities.get(item, DEFAULT_EXPANDED_IP_PRIORITY),
+            ipaddress.ip_address(item).version,
+            ipaddress.ip_address(item),
+        ),
+    )[0]
+
+
 def resolved_ips(origin: Any) -> list[str]:
     return _json_list(getattr(origin, "resolved_ips_json", None))
 

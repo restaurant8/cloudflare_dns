@@ -8,6 +8,7 @@ from app.integrations import (
     change_resource_ip,
     list_azpanel_remote_resources,
     sync_resource_current_ip_to_origin,
+    sync_synexvm_resource_status,
     synexvm_settings,
     trigger_ip_change_for_origin,
     update_azpanel_settings,
@@ -501,12 +502,15 @@ def test_call_synexvm_change_ip_prefers_resource_override(monkeypatch):
             return self._payload
 
     seen = []
+    changed = False
 
     def fake_get(url, params=None, timeout=None, follow_redirects=None):
+        nonlocal changed
         seen.append((url, params["token"], params["action"]))
         if params["action"] == "change_ip":
+            changed = True
             return Response({"success": True, "new_ip": "203.0.113.99"})
-        return Response({"success": True, "vm": {"ipv4": "203.0.113.5"}})
+        return Response({"success": True, "vm": {"ipv4": "203.0.113.99" if changed else "203.0.113.5"}})
 
     monkeypatch.setattr("app.integrations.httpx.get", fake_get)
     monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
@@ -516,6 +520,39 @@ def test_call_synexvm_change_ip_prefers_resource_override(monkeypatch):
     assert result["new_ip"] == "203.0.113.99"
     assert all(url == "https://other-panel.example.com/api.php" for url, _, _ in seen)
     assert all(token == "per-service-tok" for _, token, _ in seen)
+
+
+def test_call_synexvm_change_ip_uses_status_when_change_response_ip_differs(monkeypatch):
+    db = make_session()
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok", "wait_seconds": 15})
+    resource = AzPanelResource(
+        name="syn-861",
+        provider="synexvm",
+        resource_id="861",
+        ip_version="ipv4",
+        current_ip="209.9.202.194",
+        port=22,
+    )
+    db.add(resource)
+    db.commit()
+
+    calls = []
+
+    def fake_get(url, params=None, timeout=None, follow_redirects=None):
+        calls.append(params["action"])
+        if params["action"] == "change_ip":
+            return _synex_resp({"success": True, "new_ip": "42.200.177.53"})
+        current = "209.9.202.194" if len(calls) == 1 else "42.200.177.61"
+        return _synex_resp({"success": True, "vm": {"ipv4": current}})
+
+    monkeypatch.setattr("app.integrations.httpx.get", fake_get)
+    monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
+
+    result = call_synexvm_change_ip(db, resource)
+
+    assert result["reported_new_ip"] == "42.200.177.53"
+    assert result["new_ip"] == "42.200.177.61"
+    assert calls == ["status", "change_ip", "status"]
 
 
 def test_change_resource_ip_dispatches_synexvm_and_updates_origin(monkeypatch):
@@ -736,6 +773,53 @@ def test_change_resource_ip_pending_marks_resource_and_external_due(monkeypatch)
     db.refresh(origin)
     assert origin.target == "192.0.2.10"
     assert source.last_synced_at is None
+
+
+def test_synexvm_status_refresh_finishes_pending_job_with_actual_ip(monkeypatch):
+    from app.models import IpChangeJob
+    from datetime import datetime as dt
+
+    db = make_session()
+    origin = make_origin(db)
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resource = AzPanelResource(
+        name="syn-861",
+        provider="synexvm",
+        resource_id="861",
+        ip_version="ipv4",
+        origin_id=origin.id,
+        current_ip="209.9.202.194",
+        port=22,
+        pending_change_at=dt.utcnow(),
+        auto_update_origin=True,
+    )
+    db.add(resource)
+    db.flush()
+    job = IpChangeJob(
+        trigger_type="manual",
+        status="pending",
+        provider="synexvm",
+        azpanel_resource_id=resource.id,
+        origin_id=origin.id,
+        old_ip="209.9.202.194",
+        started_at=dt.utcnow(),
+    )
+    db.add(job)
+    db.commit()
+    monkeypatch.setattr(
+        "app.integrations.httpx.get",
+        lambda *args, **kwargs: _synex_resp({"success": True, "vm": {"ipv4": "42.200.177.61"}}),
+    )
+
+    sync_synexvm_resource_status(db, resource)
+    db.commit()
+
+    assert resource.current_ip == "42.200.177.61"
+    assert resource.pending_change_at is None
+    assert resource.last_change_at is not None
+    assert job.status == "success"
+    assert job.new_ip == "42.200.177.61"
+    assert origin.target == "42.200.177.61"
 
 
 def test_reconcile_applies_new_ip_and_finishes_job(monkeypatch):

@@ -32,9 +32,12 @@ export type DnsRecord = {
 
 export type ProbeState = {
   id: number;
+  agent_id: number | null;
   source_key: string;
   agent_name: string | null;
   agent_enabled: boolean;
+  agent_online: boolean;
+  agent_region: string | null;
   status: string;
   success_count: number;
   fail_count: number;
@@ -58,6 +61,7 @@ export type Origin = {
   priority: number;
   remark: string | null;
   enabled: boolean;
+  ignore_health_check: boolean;
   status: string;
   last_checked_at: string | null;
   last_error: string | null;
@@ -120,6 +124,7 @@ export type FailoverGlobalOrigin = {
   expanded_ip_priorities: Record<string, number>;
   remark: string | null;
   enabled: boolean;
+  ignore_health_check: boolean;
   created_at: string;
   updated_at: string;
 };

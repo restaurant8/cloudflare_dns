@@ -16,7 +16,7 @@ from .origin_expansion import (
     is_expanded_origin,
     published_ips,
     record_type_for_ip,
-    selected_healthy_ip,
+    selected_publish_ip,
     set_published_ips,
 )
 from .runtime_settings import get_runtime_settings
@@ -48,7 +48,11 @@ class OriginSelection:
 
 
 def _origin_is_available(origin: Origin | None) -> bool:
-    return bool(origin is not None and origin.enabled and origin.status == ORIGIN_AVAILABLE_STATUS)
+    return bool(
+        origin is not None
+        and origin.enabled
+        and (origin.ignore_health_check or origin.status == ORIGIN_AVAILABLE_STATUS)
+    )
 
 
 def choose_desired_origin(origins: list[Origin], current_origin_id: int | None = None) -> Origin | None:
@@ -245,7 +249,7 @@ def _normalize_dns_content(record_type: str, value: str | None) -> str:
 
 def _desired_record_for_origin(origin: Origin) -> tuple[str, str] | None:
     if is_expanded_origin(origin):
-        selected_ip = selected_healthy_ip(origin)
+        selected_ip = selected_publish_ip(origin)
         if not selected_ip:
             return None
         return record_type_for_ip(selected_ip), selected_ip
@@ -461,7 +465,7 @@ def publish_expanded_origin(
 ) -> dict:
     if origin.target_type != "hostname":
         raise ValueError("只有域名目标可以展开发布为 IP 池")
-    selected_ip = selected_healthy_ip(origin)
+    selected_ip = selected_publish_ip(origin)
     if not selected_ip:
         raise ValueError("展开域名当前没有健康 IP，无法发布")
 
@@ -605,7 +609,7 @@ def _evaluate_single_group(
     if group.last_error in RECOVERABLE_GROUP_ERRORS:
         group.last_error = None
     if desired.id == group.current_origin_id and not group.last_error:
-        desired_expanded_ip = selected_healthy_ip(desired)
+        desired_expanded_ip = selected_publish_ip(desired)
         expanded_metadata_mismatch = is_expanded_origin(desired) and published_ips(desired) != ([desired_expanded_ip] if desired_expanded_ip else [])
         checked_at = _consistency_checked_at.get(group.id)
         consistency_due = (

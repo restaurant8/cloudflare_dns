@@ -8,7 +8,7 @@ from app.dns_utils import parse_target
 from app.cloudflare import CloudflareError
 from app.failover import choose_desired_origin, evaluate_failover_groups, publish_origin, validate_group_hostname_records
 from app.models import CloudflareCredential, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, Zone
-from app.origin_expansion import EXPANDED_PUBLISH_MODE, selected_healthy_ip, set_expanded_ip_priorities, set_healthy_ips, set_published_ips
+from app.origin_expansion import EXPANDED_PUBLISH_MODE, selected_healthy_ip, selected_publish_ip, set_expanded_ip_priorities, set_healthy_ips, set_published_ips, set_resolved_ips
 from app.security import encrypt_secret
 
 
@@ -41,6 +41,14 @@ def test_choose_desired_origin_keeps_current_when_same_best_priority():
     assert choose_desired_origin(origins, current_origin_id=1).id == 1
 
 
+def test_choose_desired_origin_treats_ignored_unhealthy_origin_as_available():
+    ignored = origin(1, "unhealthy", 5)
+    ignored.ignore_health_check = True
+    healthy = origin(2, "healthy", 10)
+
+    assert choose_desired_origin([ignored, healthy]).id == 1
+
+
 def test_selected_expanded_ip_keeps_current_published_ip_while_healthy():
     origin_model = Origin(target="backup.example.net", target_type="hostname", publish_mode=EXPANDED_PUBLISH_MODE, port=443)
     set_healthy_ips(origin_model, ["192.0.2.10", "192.0.2.20"])
@@ -48,6 +56,20 @@ def test_selected_expanded_ip_keeps_current_published_ip_while_healthy():
     set_expanded_ip_priorities(origin_model, {"192.0.2.10": 1, "192.0.2.20": 50})
 
     assert selected_healthy_ip(origin_model) == "192.0.2.20"
+
+
+def test_selected_publish_ip_uses_resolved_ip_when_health_is_ignored():
+    origin_model = Origin(
+        target="backup.example.net",
+        target_type="hostname",
+        publish_mode=EXPANDED_PUBLISH_MODE,
+        port=443,
+        ignore_health_check=True,
+    )
+    set_resolved_ips(origin_model, ["192.0.2.20", "192.0.2.10"])
+    set_expanded_ip_priorities(origin_model, {"192.0.2.10": 1, "192.0.2.20": 50})
+
+    assert selected_publish_ip(origin_model) == "192.0.2.10"
 
 
 class FakeCloudflareClient:

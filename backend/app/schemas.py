@@ -340,6 +340,7 @@ class OriginCreate(BaseModel):
     probe_mode: Literal["default", "local_only", "china_only", "any"] = "default"
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool = True
+    ignore_health_check: bool = False
     # 可选：创建后把这个 azpanel 云资源绑定到新源站，源站被墙时自动换 IP
     azpanel_resource_id: int | None = None
     # 可选：azpanel 远端资源的 key，还没添加为本地云资源时自动创建并绑定
@@ -363,15 +364,19 @@ class OriginUpdate(BaseModel):
     probe_mode: Literal["default", "local_only", "china_only", "any"] | None = None
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool | None = None
+    ignore_health_check: bool | None = None
     # 传 null 表示解除外部 IP 绑定；传 item id 表示改绑到那台机器
     external_ip_item_id: int | None = None
 
 
 class ProbeStateOut(BaseModel):
     id: int
+    agent_id: int | None = None
     source_key: str
     agent_name: str | None = None
     agent_enabled: bool = True
+    agent_online: bool = True
+    agent_region: str | None = None
     status: str
     success_count: int
     fail_count: int
@@ -399,6 +404,7 @@ class OriginOut(BaseModel):
     priority: int
     remark: str | None
     enabled: bool
+    ignore_health_check: bool
     external_source_id: int | None = None
     external_machine_key: str | None = None
     status: str
@@ -440,6 +446,7 @@ class FailoverGlobalOriginOut(BaseModel):
     expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
     remark: str | None
     enabled: bool
+    ignore_health_check: bool
     created_at: datetime
     updated_at: datetime
 

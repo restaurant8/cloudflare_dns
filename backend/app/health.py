@@ -290,7 +290,7 @@ def _origin_remote_agent_source_keys(
 ) -> list[str] | None:
     if origin.preferred_agent_id:
         agent = db.get(Agent, origin.preferred_agent_id)
-        if agent is None or not agent.enabled:
+        if agent is None or not agent.enabled or agent.status != "online":
             return []
         return _selected_agent_source_keys([agent], states, stale_before, target)
 
@@ -1000,4 +1000,16 @@ def mark_stale_agents(db: Session) -> int:
         }
         add_event(db, "agent.status_changed", "warning", f"探针 {agent.name} 已离线", payload)
         send_webhooks(db, "agent.status_changed", payload)
+    if stale_agents:
+        stale_agent_ids = [agent.id for agent in stale_agents]
+        db.flush()
+        affected_origins = (
+            db.query(Origin)
+            .join(ProbeState, ProbeState.origin_id == Origin.id)
+            .filter(ProbeState.agent_id.in_(stale_agent_ids))
+            .distinct()
+            .all()
+        )
+        for origin in affected_origins:
+            recalculate_origin_status(db, origin)
     return len(stale_agents)

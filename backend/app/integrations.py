@@ -317,13 +317,28 @@ def sync_synexvm_resource_status(db: Session, resource: AzPanelResource) -> dict
         target_info = parse_target(panel_ip)
         if target_info.target_type not in {"ipv4", "ipv6"}:
             raise RuntimeError(f"SynexVM status 返回的 IP 无法识别: {panel_ip}")
-        resource.current_ip = target_info.value
-        try:
-            sync_resource_current_ip_to_origin(db, resource)
-        except ValueError as exc:
-            resource.last_error = f"远端 IP 无法同步到源站: {exc}"
+        if resource.pending_change_at is not None:
+            old_ip = resource.current_ip
+            applied_ip, _ = _apply_changed_ip(db, resource, target_info.value, reason="synexvm status refresh confirmed")
+            _finish_pending_job(db, resource, applied_ip, None)
+            event_payload = {
+                "resource_id": resource.id,
+                "provider": resource.provider,
+                "old_ip": old_ip,
+                "new_ip": applied_ip,
+                "origin_id": resource.origin_id,
+                "trigger_type": "manual_status_refresh",
+            }
+            add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {applied_ip}", event_payload)
+            send_webhooks(db, "azpanel.ip_changed", event_payload)
         else:
-            resource.last_error = None
+            resource.current_ip = target_info.value
+            try:
+                sync_resource_current_ip_to_origin(db, resource)
+            except ValueError as exc:
+                resource.last_error = f"远端 IP 无法同步到源站: {exc}"
+            else:
+                resource.last_error = None
         db.flush()
     return payload
 
@@ -345,18 +360,22 @@ def call_synexvm_change_ip(db: Session, resource: AzPanelResource, reason: str |
 
     result = _synexvm_request(api_url, "change_ip", resource.resource_id, token, settings["timeout_seconds"])
     data = _extract_payload(result)
-    new_ip = _synexvm_payload_ip(result, resource.ip_version)
-    if new_ip and new_ip != old_ip:
-        data["new_ip"] = new_ip
-        return data
+    # change_ip 的响应可能只是调度结果，里面的 IP 不一定是面板最终应用的 IP。
+    # 只把它保留为提示；资源 current_ip 和成功记录一律以 status 回读为准，
+    # 否则会出现资源卡片与最近换 IP 记录显示不同地址。
+    reported_ip = _synexvm_payload_ip(result, resource.ip_version)
+    data.pop("new_ip", None)
+    if reported_ip and reported_ip != old_ip:
+        data["reported_new_ip"] = reported_ip
 
     # change_ip 响应里通常没有新 IP。SynexVM 换 IP 是后台重新分配，status 接口
     # 反映新 IP 可能要几分钟，所以只在这里短暂内联确认（快路径），拿不到就返回
     # pending，交给调度器后台继续查 status，避免长时间阻塞调度线程、也不再误判失败。
     inline_budget = min(max(settings["wait_seconds"], 0), SYNEXVM_INLINE_CONFIRM_SECONDS)
-    deadline = time.monotonic() + inline_budget
-    while time.monotonic() < deadline:
-        time.sleep(SYNEXVM_POLL_INTERVAL_SECONDS)
+    attempts = max(1, 1 + inline_budget // SYNEXVM_POLL_INTERVAL_SECONDS)
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(SYNEXVM_POLL_INTERVAL_SECONDS)
         try:
             payload = _synexvm_request(api_url, "status", resource.resource_id, token, settings["timeout_seconds"])
         except Exception:
