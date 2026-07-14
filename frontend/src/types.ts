@@ -296,6 +296,8 @@ export type AzPanelResource = {
   api_url: string | null;
   api_token_configured: boolean;
   pending_change_at: string | null;
+  status_sync_interval_seconds: number;
+  last_status_sync_at: string | null;
   origin_id: number | null;
   current_ip: string | null;
   port: number;

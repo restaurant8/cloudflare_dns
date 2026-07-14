@@ -70,7 +70,7 @@ type SnippetDraft = { title: string; category: string; address: string; username
 type SshSettingsDraft = { enabled: boolean; external_url: string };
 type AzPanelSettingsDraft = { enabled: boolean; base_url: string; api_token: string; timeout_seconds: number; default_cooldown_seconds: number };
 type SynexVmSettingsDraft = { enabled: boolean; api_url: string; api_token: string; timeout_seconds: number; wait_seconds: number; default_cooldown_seconds: number };
-type AzPanelResourceDraft = { name: string; provider: string; resource_id: string; account_id: string; region: string; ip_version: string; ip_change_method: string; api_url: string; api_token: string; origin_id: number | ""; current_ip: string; port: number; enabled: boolean; auto_change_on_blocked: boolean; auto_update_origin: boolean; cooldown_seconds: number; remark: string };
+type AzPanelResourceDraft = { name: string; provider: string; resource_id: string; account_id: string; region: string; ip_version: string; ip_change_method: string; api_url: string; api_token: string; origin_id: number | ""; current_ip: string; port: number; enabled: boolean; auto_change_on_blocked: boolean; auto_update_origin: boolean; cooldown_seconds: number; status_sync_interval_seconds: number; remark: string };
 type XboardSettingsDraft = { enabled: boolean; base_url: string; api_token: string; timeout_seconds: number };
 type XboardNodeDraft = { name: string; xboard_node_id: number; node_type: string; host: string; port: number | ""; origin_id: number | ""; azpanel_resource_id: number | ""; enabled: boolean; auto_update_after_change: boolean; remark: string };
 type AgentEditDraft = { name: string };
@@ -4288,6 +4288,7 @@ function AzPanelPanel({
     auto_change_on_blocked: true,
     auto_update_origin: true,
     cooldown_seconds: settings.default_cooldown_seconds || 1800,
+    status_sync_interval_seconds: 0,
     remark: ""
   });
   const [resourceDraft, setResourceDraft] = useState<AzPanelResourceDraft>(emptyDraft);
@@ -4341,6 +4342,7 @@ function AzPanelPanel({
       auto_change_on_blocked: resourceDraft.auto_change_on_blocked,
       auto_update_origin: resourceDraft.auto_update_origin,
       cooldown_seconds: resourceDraft.cooldown_seconds,
+      status_sync_interval_seconds: synex ? resourceDraft.status_sync_interval_seconds : 0,
       remark: resourceDraft.remark.trim() || null
     };
     // Token 留空表示不修改，避免编辑时把已保存的 Token 清掉
@@ -4473,6 +4475,7 @@ function AzPanelPanel({
       auto_change_on_blocked: resource.auto_change_on_blocked,
       auto_update_origin: resource.auto_update_origin,
       cooldown_seconds: resource.cooldown_seconds,
+      status_sync_interval_seconds: resource.status_sync_interval_seconds || 0,
       remark: resource.remark || ""
     });
   }
@@ -4693,6 +4696,19 @@ function AzPanelPanel({
             冷却（秒）
             <input type="number" min={60} max={86400} value={resourceDraft.cooldown_seconds} onChange={(event) => setResourceDraft((current) => ({ ...current, cooldown_seconds: Number(event.target.value) }))} />
           </label>
+          {isSynexDraft && (
+            <label>
+              自动查询状态（秒，0 关闭）
+              <input
+                type="number"
+                min={0}
+                max={86400}
+                title="定时调 status 接口同步最新 IP（兜底）。实际频率不会快于系统检查周期。"
+                value={resourceDraft.status_sync_interval_seconds}
+                onChange={(event) => setResourceDraft((current) => ({ ...current, status_sync_interval_seconds: Number(event.target.value) }))}
+              />
+            </label>
+          )}
           <label>
             备注
             <input value={resourceDraft.remark} onChange={(event) => setResourceDraft((current) => ({ ...current, remark: event.target.value }))} />
@@ -4729,8 +4745,11 @@ function AzPanelPanel({
             <div className="poolItem" key={resource.id}>
               <div className="poolItemMain">
                 <strong>{resource.name}</strong>
-                <span>{resource.provider} · {resource.resource_id} · {resource.current_ip || "未记录 IP"}:{resource.port} · 尝试 {fmtDate(resource.last_attempt_at)} · 成功 {fmtDate(resource.last_change_at)}</span>
-                {resource.pending_change_at && <small className="successText">换 IP 已下发，后台查询状态中（约每个检查周期重试，新 IP 生效后自动同步）…</small>}
+                <span>
+                  {resource.provider} · {resource.resource_id} · {resource.current_ip || "未记录 IP"}:{resource.port} · 尝试 {fmtDate(resource.last_attempt_at)} · 成功 {fmtDate(resource.last_change_at)}
+                  {resource.provider === "synexvm" && resource.status_sync_interval_seconds > 0 && ` · 自动查状态 每${resource.status_sync_interval_seconds}s`}
+                </span>
+                {resource.pending_change_at && <small className="successText">换 IP 已下发，后台查询状态中（新 IP 需连续两次查询一致才采纳，防过渡 IP）…</small>}
                 {resource.last_error && <small className="danger">{resource.last_error}</small>}
               </div>
               <div className="rowActions">

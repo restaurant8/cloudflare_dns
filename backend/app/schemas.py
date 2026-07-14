@@ -610,6 +610,8 @@ class AzPanelResourceBase(BaseModel):
     auto_change_on_blocked: bool = True
     auto_update_origin: bool = True
     cooldown_seconds: int = Field(default=1800, ge=60, le=86400)
+    # synexvm 专用：>0 时调度器按该间隔自动查 status 同步最新 IP（0 = 关闭）
+    status_sync_interval_seconds: int = Field(default=0, ge=0, le=86400)
     remark: str | None = Field(default=None, max_length=500)
 
     @field_validator("api_url")
@@ -646,6 +648,7 @@ class AzPanelResourceUpdate(BaseModel):
     auto_change_on_blocked: bool | None = None
     auto_update_origin: bool | None = None
     cooldown_seconds: int | None = Field(default=None, ge=60, le=86400)
+    status_sync_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
     remark: str | None = Field(default=None, max_length=500)
 
     @field_validator("api_url")
@@ -658,6 +661,7 @@ class AzPanelResourceOut(AzPanelResourceBase):
     id: int
     api_token_configured: bool = False
     pending_change_at: datetime | None = None
+    last_status_sync_at: datetime | None = None
     last_attempt_at: datetime | None
     last_change_at: datetime | None
     last_error: str | None

@@ -432,7 +432,8 @@ def test_synexvm_settings_fall_back_to_default_api_url():
     assert synexvm_settings(db)["api_url"] == "https://www.synexvm.com/modules/servers/pvewhmcs/api.php"
 
 
-def test_call_synexvm_change_ip_polls_status_until_ip_changes(monkeypatch):
+def test_call_synexvm_change_ip_never_trusts_immediate_ip(monkeypatch):
+    """换 IP 刚下发时 status 可能返回过渡 IP，一律不采纳，统一 pending 由调度器双读确认。"""
     db = make_session()
     update_synexvm_settings(db, {"enabled": True, "api_token": "tok", "wait_seconds": 60})
     resource = AzPanelResource(
@@ -451,12 +452,6 @@ def test_call_synexvm_change_ip_polls_status_until_ip_changes(monkeypatch):
         def json(self):
             return self._payload
 
-    responses = [
-        {"success": True, "vm": {"ipv4": "42.200.231.85", "status": "running"}},  # 换 IP 前先查旧 IP
-        {"success": True, "message": "IP change scheduled"},  # change_ip 本身不带新 IP
-        {"success": True, "vm": {"ipv4": "42.200.231.85", "status": "running"}},  # 第一次轮询还是旧 IP
-        {"success": True, "vm": {"ipv4": "42.200.240.9", "status": "running"}},  # 新 IP 生效
-    ]
     calls = []
 
     def fake_get(url, params=None, timeout=None, follow_redirects=None):
@@ -464,15 +459,19 @@ def test_call_synexvm_change_ip_polls_status_until_ip_changes(monkeypatch):
         assert params["service_id"] == "861"
         assert params["token"] == "tok"
         calls.append(params["action"])
-        return Response(responses[len(calls) - 1])
+        if params["action"] == "change_ip":
+            return Response({"success": True, "message": "IP change scheduled"})
+        # 下发后 status 立刻给出一个"看似新"的过渡 IP —— 不能信
+        return Response({"success": True, "vm": {"ipv4": "42.200.240.9", "status": "running"}})
 
     monkeypatch.setattr("app.integrations.httpx.get", fake_get)
     monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
 
     result = call_synexvm_change_ip(db, resource)
 
-    assert result["new_ip"] == "42.200.240.9"
-    assert calls == ["status", "change_ip", "status", "status"]
+    assert result.get("pending") is True
+    assert "new_ip" not in result
+    assert calls == ["status", "change_ip"]
 
 
 def test_call_synexvm_change_ip_prefers_resource_override(monkeypatch):
@@ -502,27 +501,26 @@ def test_call_synexvm_change_ip_prefers_resource_override(monkeypatch):
             return self._payload
 
     seen = []
-    changed = False
 
     def fake_get(url, params=None, timeout=None, follow_redirects=None):
-        nonlocal changed
         seen.append((url, params["token"], params["action"]))
         if params["action"] == "change_ip":
-            changed = True
             return Response({"success": True, "new_ip": "203.0.113.99"})
-        return Response({"success": True, "vm": {"ipv4": "203.0.113.99" if changed else "203.0.113.5"}})
+        return Response({"success": True, "vm": {"ipv4": "203.0.113.5"}})
 
     monkeypatch.setattr("app.integrations.httpx.get", fake_get)
     monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
 
     result = call_synexvm_change_ip(db, resource)
 
-    assert result["new_ip"] == "203.0.113.99"
+    # change_ip 响应里的 IP 只留作提示，实际以 status 双读确认为准（pending）
+    assert result.get("pending") is True
+    assert result.get("reported_new_ip") == "203.0.113.99"
     assert all(url == "https://other-panel.example.com/api.php" for url, _, _ in seen)
     assert all(token == "per-service-tok" for _, token, _ in seen)
 
 
-def test_call_synexvm_change_ip_uses_status_when_change_response_ip_differs(monkeypatch):
+def test_call_synexvm_change_ip_keeps_reported_ip_as_hint_only(monkeypatch):
     db = make_session()
     update_synexvm_settings(db, {"enabled": True, "api_token": "tok", "wait_seconds": 15})
     resource = AzPanelResource(
@@ -542,17 +540,18 @@ def test_call_synexvm_change_ip_uses_status_when_change_response_ip_differs(monk
         calls.append(params["action"])
         if params["action"] == "change_ip":
             return _synex_resp({"success": True, "new_ip": "42.200.177.53"})
-        current = "209.9.202.194" if len(calls) == 1 else "42.200.177.61"
-        return _synex_resp({"success": True, "vm": {"ipv4": current}})
+        return _synex_resp({"success": True, "vm": {"ipv4": "209.9.202.194"}})
 
     monkeypatch.setattr("app.integrations.httpx.get", fake_get)
     monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
 
     result = call_synexvm_change_ip(db, resource)
 
+    # change_ip 报的 IP 可能不是最终地址：只保留提示，不当 new_ip，等 status 双读确认
     assert result["reported_new_ip"] == "42.200.177.53"
-    assert result["new_ip"] == "42.200.177.61"
-    assert calls == ["status", "change_ip", "status"]
+    assert "new_ip" not in result
+    assert result.get("pending") is True
+    assert calls == ["status", "change_ip"]
 
 
 def test_change_resource_ip_dispatches_synexvm_and_updates_origin(monkeypatch):
@@ -810,6 +809,7 @@ def test_synexvm_status_refresh_finishes_pending_job_with_actual_ip(monkeypatch)
         "app.integrations.httpx.get",
         lambda *args, **kwargs: _synex_resp({"success": True, "vm": {"ipv4": "42.200.177.61"}}),
     )
+    monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
 
     sync_synexvm_resource_status(db, resource)
     db.commit()
@@ -846,6 +846,14 @@ def test_reconcile_applies_new_ip_and_finishes_job(monkeypatch):
     # status 现在返回新 IP
     monkeypatch.setattr("app.integrations.httpx.get", lambda *a, **k: _synex_resp({"success": True, "vm": {"ipv4": "198.51.100.7"}}))
 
+    # 第一个周期：只见过一次的新 IP 先记为候选，不落地（防过渡 IP）
+    assert reconcile_pending_synexvm_changes(db) == 0
+    db.commit()
+    db.refresh(resource)
+    assert resource.current_ip == "192.0.2.10"
+    assert resource.pending_candidate_ip == "198.51.100.7"
+
+    # 第二个周期：同一个新 IP 再次出现，确认稳定，落地
     resolved = reconcile_pending_synexvm_changes(db)
     db.commit()
 
@@ -854,6 +862,7 @@ def test_reconcile_applies_new_ip_and_finishes_job(monkeypatch):
     db.refresh(pending_job)
     assert resource.current_ip == "198.51.100.7"
     assert resource.pending_change_at is None
+    assert resource.pending_candidate_ip is None
     assert pending_job.status == "success"
     assert pending_job.new_ip == "198.51.100.7"
     db.refresh(origin)
@@ -883,3 +892,133 @@ def test_reconcile_gives_up_after_budget(monkeypatch):
 
     assert resource.pending_change_at is None
     assert "未返回新 IP" in (resource.last_error or "")
+
+
+def test_reconcile_discards_transient_ip_and_applies_stable_one(monkeypatch):
+    """换 IP 过程中 status 短暂返回过渡 IP：不能落地，最终以连续两次一致的地址为准。"""
+    from app.integrations import reconcile_pending_synexvm_changes
+    from datetime import datetime as dt
+
+    db = make_session()
+    origin = make_origin(db)
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resource = AzPanelResource(
+        name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", origin_id=origin.id,
+        current_ip="192.0.2.10", port=22, pending_change_at=dt.utcnow(), auto_update_origin=True,
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+
+    reported = {"ip": "203.0.113.250"}  # 过渡 IP
+
+    monkeypatch.setattr(
+        "app.integrations.httpx.get",
+        lambda *a, **k: _synex_resp({"success": True, "vm": {"ipv4": reported["ip"]}}),
+    )
+
+    # 周期 1：过渡 IP 只记候选
+    assert reconcile_pending_synexvm_changes(db) == 0
+    assert resource.pending_candidate_ip == "203.0.113.250"
+    assert resource.current_ip == "192.0.2.10"
+
+    # 周期 2：面板换成了真正的新 IP，候选被替换，仍不落地
+    reported["ip"] = "198.51.100.7"
+    assert reconcile_pending_synexvm_changes(db) == 0
+    assert resource.pending_candidate_ip == "198.51.100.7"
+    assert resource.current_ip == "192.0.2.10"
+
+    # 周期 3：真新 IP 连续第二次出现，落地；过渡 IP 从未被采纳
+    assert reconcile_pending_synexvm_changes(db) == 1
+    db.commit()
+    db.refresh(resource)
+    assert resource.current_ip == "198.51.100.7"
+    db.refresh(origin)
+    assert origin.target == "198.51.100.7"
+
+
+def test_manual_status_refresh_rejects_unstable_ip(monkeypatch):
+    import pytest
+
+    db = make_session()
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resource = AzPanelResource(
+        name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", current_ip="192.0.2.10", port=22
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+
+    ips = iter(["203.0.113.250", "198.51.100.7"])  # 两次读取不一致 → 尚未稳定
+
+    monkeypatch.setattr(
+        "app.integrations.httpx.get",
+        lambda *a, **k: _synex_resp({"success": True, "vm": {"ipv4": next(ips)}}),
+    )
+    monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
+
+    with pytest.raises(RuntimeError, match="尚未稳定"):
+        sync_synexvm_resource_status(db, resource)
+    assert resource.current_ip == "192.0.2.10"
+
+
+def test_auto_sync_synexvm_statuses_applies_ip_after_two_reads(monkeypatch):
+    from app.integrations import auto_sync_synexvm_statuses
+    from datetime import datetime as dt, timedelta
+
+    db = make_session()
+    origin = make_origin(db)
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resource = AzPanelResource(
+        name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", origin_id=origin.id,
+        current_ip="192.0.2.10", port=22, status_sync_interval_seconds=30, auto_update_origin=True,
+    )
+    db.add(resource)
+    db.commit()
+    db.refresh(resource)
+
+    monkeypatch.setattr(
+        "app.integrations.httpx.get",
+        lambda *a, **k: _synex_resp({"success": True, "vm": {"ipv4": "198.51.100.7"}}),
+    )
+
+    # 第一次到期查询：新 IP 记候选
+    assert auto_sync_synexvm_statuses(db) == 0
+    assert resource.pending_candidate_ip == "198.51.100.7"
+    assert resource.last_status_sync_at is not None
+
+    # 间隔未到：不重复查询
+    assert auto_sync_synexvm_statuses(db) == 0
+    assert resource.pending_candidate_ip == "198.51.100.7"
+
+    # 间隔已到：同一 IP 第二次出现，落地并同步源站
+    resource.last_status_sync_at = dt.utcnow() - timedelta(seconds=60)
+    db.flush()
+    assert auto_sync_synexvm_statuses(db) == 1
+    db.commit()
+    db.refresh(resource)
+    assert resource.current_ip == "198.51.100.7"
+    assert resource.pending_candidate_ip is None
+    db.refresh(origin)
+    assert origin.target == "198.51.100.7"
+
+
+def test_auto_sync_skips_disabled_zero_interval_and_pending(monkeypatch):
+    from app.integrations import auto_sync_synexvm_statuses
+    from datetime import datetime as dt
+
+    db = make_session()
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    db.add_all([
+        AzPanelResource(name="off", provider="synexvm", resource_id="1", ip_version="ipv4", current_ip="192.0.2.1", port=22, status_sync_interval_seconds=0),
+        AzPanelResource(name="disabled", provider="synexvm", resource_id="2", ip_version="ipv4", current_ip="192.0.2.2", port=22, status_sync_interval_seconds=30, enabled=False),
+        AzPanelResource(name="pending", provider="synexvm", resource_id="3", ip_version="ipv4", current_ip="192.0.2.3", port=22, status_sync_interval_seconds=30, pending_change_at=dt.utcnow()),
+    ])
+    db.commit()
+
+    def fail_get(*a, **k):
+        raise AssertionError("should not query status for skipped resources")
+
+    monkeypatch.setattr("app.integrations.httpx.get", fail_get)
+
+    assert auto_sync_synexvm_statuses(db) == 0

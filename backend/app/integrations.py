@@ -37,9 +37,8 @@ SYNEXVM_DEFAULT_COOLDOWN = "synexvm.default_cooldown_seconds"
 
 SYNEXVM_DEFAULT_API_URL = "https://www.synexvm.com/modules/servers/pvewhmcs/api.php"
 SYNEXVM_POLL_INTERVAL_SECONDS = 5
-# 换 IP 下发后在请求内最多同步等待多久确认新 IP（快路径）；超过就转后台对账，
-# 避免长时间阻塞调度线程。剩余等待预算由 wait_seconds 在调度器里消化。
-SYNEXVM_INLINE_CONFIRM_SECONDS = 15
+# 手动"查询状态"时两次读取之间的间隔：新 IP 必须两次一致才采纳，防止过渡 IP
+SYNEXVM_MANUAL_CONFIRM_DELAY_SECONDS = 3
 
 IP_RE = re.compile(r"(?:(?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]{2,})")
 
@@ -310,13 +309,27 @@ def call_synexvm_status(db: Session, resource: AzPanelResource) -> dict[str, Any
 
 
 def sync_synexvm_resource_status(db: Session, resource: AzPanelResource) -> dict[str, Any]:
-    """查询 status 接口并把面板上的当前 IP 同步到资源和绑定源站。"""
+    """查询 status 接口并把面板上的当前 IP 同步到资源和绑定源站。
+
+    发现 IP 和本地记录不一致时会隔几秒再读一次，两次一致才采纳——
+    换 IP 过程中 status 可能短暂返回过渡 IP，不能当成最终地址。
+    """
     payload = call_synexvm_status(db, resource)
     panel_ip = _synexvm_payload_ip(payload, resource.ip_version)
     if panel_ip and panel_ip != resource.current_ip:
+        time.sleep(SYNEXVM_MANUAL_CONFIRM_DELAY_SECONDS)
+        second_payload = call_synexvm_status(db, resource)
+        second_ip = _synexvm_payload_ip(second_payload, resource.ip_version)
+        if second_ip != panel_ip:
+            raise RuntimeError(
+                f"面板返回的 IP 尚未稳定（{panel_ip} → {second_ip or '未知'}），换 IP 可能还在进行中，请稍后再试"
+            )
+        payload = second_payload
         target_info = parse_target(panel_ip)
         if target_info.target_type not in {"ipv4", "ipv6"}:
             raise RuntimeError(f"SynexVM status 返回的 IP 无法识别: {panel_ip}")
+        resource.pending_candidate_ip = None
+        resource.last_status_sync_at = datetime.utcnow()
         if resource.pending_change_at is not None:
             old_ip = resource.current_ip
             applied_ip, _ = _apply_changed_ip(db, resource, target_info.value, reason="synexvm status refresh confirmed")
@@ -368,22 +381,9 @@ def call_synexvm_change_ip(db: Session, resource: AzPanelResource, reason: str |
     if reported_ip and reported_ip != old_ip:
         data["reported_new_ip"] = reported_ip
 
-    # change_ip 响应里通常没有新 IP。SynexVM 换 IP 是后台重新分配，status 接口
-    # 反映新 IP 可能要几分钟，所以只在这里短暂内联确认（快路径），拿不到就返回
-    # pending，交给调度器后台继续查 status，避免长时间阻塞调度线程、也不再误判失败。
-    inline_budget = min(max(settings["wait_seconds"], 0), SYNEXVM_INLINE_CONFIRM_SECONDS)
-    attempts = max(1, 1 + inline_budget // SYNEXVM_POLL_INTERVAL_SECONDS)
-    for attempt in range(attempts):
-        if attempt:
-            time.sleep(SYNEXVM_POLL_INTERVAL_SECONDS)
-        try:
-            payload = _synexvm_request(api_url, "status", resource.resource_id, token, settings["timeout_seconds"])
-        except Exception:
-            continue
-        current = _synexvm_payload_ip(payload, resource.ip_version)
-        if current and (not old_ip or current != old_ip):
-            data["new_ip"] = current
-            return data
+    # 刚下发时 status 可能返回一个过渡 IP（看着变了、其实不是最终地址），
+    # "立刻拿到的 IP"一律不信。统一返回 pending，由调度器双读确认后才落地：
+    # 新 IP 必须在连续两个周期的 status 查询里保持一致。
     data["pending"] = True
     data["old_ip"] = old_ip or None
     return data
@@ -800,6 +800,7 @@ def change_resource_ip(
             # 由调度器后台查 status 补新 IP；同时催外部来源重新同步，绑定了这台机器的
             # 备用目标会通过 nyanpass 的新 IP 恢复。
             resource.pending_change_at = datetime.utcnow()
+            resource.pending_candidate_ip = None
             resource.last_error = None
             job.status = "pending"
             job.error = None
@@ -906,7 +907,10 @@ def reconcile_pending_synexvm_changes(db: Session) -> int:
         except Exception:
             payload = None
         new_ip = _synexvm_payload_ip(payload, resource.ip_version) if payload else None
-        if new_ip and new_ip != (resource.current_ip or ""):
+        if new_ip and new_ip != (resource.current_ip or "") and new_ip == resource.pending_candidate_ip:
+            # 连续两个周期读到同一个新 IP，确认稳定，才真正落地。
+            # 换 IP 刚下发时 status 可能短暂返回过渡 IP，只见过一次的地址不能信。
+            resource.pending_candidate_ip = None
             old_ip = resource.current_ip
             applied_ip, xboard_results = _apply_changed_ip(db, resource, new_ip, reason="synexvm pending change confirmed")
             _finish_pending_job(db, resource, applied_ip, None)
@@ -921,8 +925,12 @@ def reconcile_pending_synexvm_changes(db: Session) -> int:
             add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {applied_ip}", payload_evt)
             send_webhooks(db, "azpanel.ip_changed", payload_evt)
             resolved += 1
+        elif new_ip and new_ip != (resource.current_ip or ""):
+            # 第一次见到这个新 IP：先记为候选，下个周期再读一次一致才采纳
+            resource.pending_candidate_ip = new_ip
         elif resource.pending_change_at and (now - resource.pending_change_at).total_seconds() > budget:
             resource.pending_change_at = None
+            resource.pending_candidate_ip = None
             message = f"换 IP 已下发但 {int(budget)} 秒内 status 未返回新 IP，请在 SynexVM 面板确认"
             resource.last_error = message
             _finish_pending_job(db, resource, None, message)
@@ -935,8 +943,73 @@ def reconcile_pending_synexvm_changes(db: Session) -> int:
                 "error": message,
             }
             add_event(db, "azpanel.ip_change_failed", "warning", f"{resource.name} IP change unconfirmed: {message}", payload_evt)
+        elif new_ip:
+            # 面板又报回旧 IP：之前的候选是过渡值，作废重来
+            resource.pending_candidate_ip = None
     db.flush()
     return resolved
+
+
+def auto_sync_synexvm_statuses(db: Session) -> int:
+    """按资源配置的间隔自动查 status 同步最新 IP（"查询状态"按钮的自动版，兜底）。
+
+    pending 中的资源由 reconcile 负责（跳过避免重复请求）。发现的新 IP 同样要
+    连续两次读取一致（pending_candidate_ip）才落地，防止把过渡 IP 当真。
+    实际频率受调度检查周期限制：间隔设得比检查周期小也只会每个周期查一次。
+    """
+    resources = (
+        db.query(AzPanelResource)
+        .filter(
+            AzPanelResource.provider == "synexvm",
+            AzPanelResource.enabled.is_(True),
+            AzPanelResource.status_sync_interval_seconds > 0,
+            AzPanelResource.pending_change_at.is_(None),
+        )
+        .all()
+    )
+    if not resources:
+        return 0
+    now = datetime.utcnow()
+    synced = 0
+    for resource in resources:
+        interval = max(resource.status_sync_interval_seconds, 10)
+        if resource.last_status_sync_at and (now - resource.last_status_sync_at).total_seconds() < interval:
+            continue
+        resource.last_status_sync_at = now
+        try:
+            payload = call_synexvm_status(db, resource)
+        except Exception:
+            continue  # 面板暂时不可达不算失败，下个到期周期再试
+        panel_ip = _synexvm_payload_ip(payload, resource.ip_version)
+        if not panel_ip:
+            continue
+        if panel_ip == (resource.current_ip or ""):
+            resource.pending_candidate_ip = None
+            continue
+        if panel_ip != resource.pending_candidate_ip:
+            # 第一次见到的新 IP 先记候选，下次读取一致才采纳
+            resource.pending_candidate_ip = panel_ip
+            continue
+        resource.pending_candidate_ip = None
+        old_ip = resource.current_ip
+        try:
+            applied_ip, _ = _apply_changed_ip(db, resource, panel_ip, reason="synexvm auto status sync")
+        except ValueError as exc:
+            resource.last_error = f"自动查询到的 IP 无法应用: {exc}"
+            continue
+        payload_evt = {
+            "resource_id": resource.id,
+            "provider": resource.provider,
+            "old_ip": old_ip,
+            "new_ip": applied_ip,
+            "origin_id": resource.origin_id,
+            "trigger_type": "auto_status_sync",
+        }
+        add_event(db, "azpanel.ip_changed", "info", f"{resource.name} 自动查询发现 IP 变为 {applied_ip}，已同步", payload_evt)
+        send_webhooks(db, "azpanel.ip_changed", payload_evt)
+        synced += 1
+    db.flush()
+    return synced
 
 
 def trigger_ip_change_for_origin(db: Session, origin: Origin, reason: str) -> IpChangeJob | None:

@@ -114,9 +114,15 @@ def _migrate_existing_schema() -> None:
                 connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN api_url VARCHAR(255) NULL"))
             if "api_token" not in existing:
                 connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN api_token VARCHAR(500) NULL"))
+            timestamp_type = "TIMESTAMP" if dialect == "postgresql" else "DATETIME"
             if "pending_change_at" not in existing:
-                timestamp_type = "TIMESTAMP" if dialect == "postgresql" else "DATETIME"
                 connection.execute(text(f"ALTER TABLE azpanel_resources ADD COLUMN pending_change_at {timestamp_type} NULL"))
+            if "pending_candidate_ip" not in existing:
+                connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN pending_candidate_ip VARCHAR(120) NULL"))
+            if "status_sync_interval_seconds" not in existing:
+                connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN status_sync_interval_seconds INTEGER NOT NULL DEFAULT 0"))
+            if "last_status_sync_at" not in existing:
+                connection.execute(text(f"ALTER TABLE azpanel_resources ADD COLUMN last_status_sync_at {timestamp_type} NULL"))
 
 
 def _origin_migration_statements(dialect: str) -> dict[str, str]:

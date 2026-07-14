@@ -124,6 +124,7 @@ def create_azpanel_resource(payload: AzPanelResourceCreate, _: User = Depends(ge
         auto_change_on_blocked=payload.auto_change_on_blocked,
         auto_update_origin=payload.auto_update_origin,
         cooldown_seconds=payload.cooldown_seconds,
+        status_sync_interval_seconds=payload.status_sync_interval_seconds,
         remark=_normalize_text(payload.remark),
     )
     db.add(resource)

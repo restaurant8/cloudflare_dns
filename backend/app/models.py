@@ -343,6 +343,11 @@ class AzPanelResource(Base, TimestampMixin):
     last_change_at: Mapped[datetime | None] = mapped_column(DateTime)
     # 非空表示换 IP 已下发但新 IP 还没确认，调度器会持续查 status 直到取到新 IP 或超时
     pending_change_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # 候选新 IP：status 刚出现的新 IP 可能是过渡值，必须连续两次读取一致才采纳
+    pending_candidate_ip: Mapped[str | None] = mapped_column(String(120))
+    # >0 时调度器按该间隔自动调 status 接口同步最新 IP（"查询状态"按钮的自动版，兜底）
+    status_sync_interval_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_status_sync_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
     remark: Mapped[str | None] = mapped_column(Text)
 
