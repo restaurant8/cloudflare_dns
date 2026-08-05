@@ -37,6 +37,8 @@ EVENT_NAMES = {
     "azpanel.ip_change_failed": "云资源 IP 更换失败",
     "azpanel.ip_change_pending": "云资源换 IP 已下发，等待新 IP",
     "azpanel.resource_ip_synced": "云资源 IP 已同步到备用",
+    "azpanel.ip_change_ambiguous": "自动换 IP 已拦截：匹配多个资源",
+    "azpanel.ip_change_suppressed": "自动换 IP 已触发批量保护",
     "xboard.node_update_failed": "Xboard 节点更新失败",
     "external_ip.origin_synced": "外部 IP 已同步到备用目标",
 }
@@ -49,6 +51,8 @@ IP_CHANGE_TRIGGER_NAMES = {
     "manual_status_refresh": "手动查询状态",
     "auto_status_sync": "定时查询状态",
     "pre_change_sync": "换 IP 前校准资源地址",
+    "ambiguous_ip_match": "同 IP 匹配多个资源，已拒绝自动选择",
+    "mass_change_guard": "单轮批量换 IP 保护",
 }
 
 
@@ -98,6 +102,8 @@ TELEGRAM_EVENT_PRIORITIES = {
     "azpanel.ip_changed": 30,
     "azpanel.ip_change_failed": 30,
     "azpanel.ip_change_pending": 10,
+    "azpanel.ip_change_ambiguous": 30,
+    "azpanel.ip_change_suppressed": 30,
     "xboard.node_update_failed": 20,
     "external_ip.origin_synced": 20,
 }

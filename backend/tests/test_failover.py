@@ -587,7 +587,7 @@ def test_evaluate_does_not_trigger_ip_change_when_machine_down(monkeypatch):
     monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "app.failover.trigger_ip_change_for_origin",
-        lambda db_arg, origin_arg, reason: calls.append((origin_arg.id, reason)),
+        lambda db_arg, origin_arg, reason, **_kwargs: calls.append((origin_arg.id, reason)),
     )
 
     evaluate_failover_groups(db)
@@ -607,7 +607,7 @@ def test_evaluate_does_not_trigger_ip_change_for_default_mode_unhealthy(monkeypa
     monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "app.failover.trigger_ip_change_for_origin",
-        lambda db_arg, origin_arg, reason: calls.append((origin_arg.id, reason)),
+        lambda db_arg, origin_arg, reason, **_kwargs: calls.append((origin_arg.id, reason)),
     )
 
     evaluate_failover_groups(db)
@@ -629,7 +629,7 @@ def test_evaluate_triggers_ip_change_for_china_only_unhealthy(monkeypatch):
     monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "app.failover.trigger_ip_change_for_origin",
-        lambda db_arg, origin_arg, reason: calls.append((origin_arg.id, reason)),
+        lambda db_arg, origin_arg, reason, **_kwargs: calls.append((origin_arg.id, reason)),
     )
 
     evaluate_failover_groups(db)
@@ -652,7 +652,7 @@ def test_evaluate_triggers_ip_change_for_blocked_non_current_origin(monkeypatch)
     monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "app.failover.trigger_ip_change_for_origin",
-        lambda db_arg, origin_arg, reason: calls.append((origin_arg.id, reason)),
+        lambda db_arg, origin_arg, reason, **_kwargs: calls.append((origin_arg.id, reason)),
     )
 
     evaluate_failover_groups(db)
@@ -1139,7 +1139,10 @@ def test_evaluate_failover_groups_skips_ip_change_when_disabled(monkeypatch):
     origin_model.status = "blocked"
     db.commit()
     triggered = []
-    monkeypatch.setattr("app.failover.trigger_ip_change_for_origin", lambda _db, origin_arg, _reason: triggered.append(origin_arg.id))
+    monkeypatch.setattr(
+        "app.failover.trigger_ip_change_for_origin",
+        lambda _db, origin_arg, _reason, **_kwargs: triggered.append(origin_arg.id),
+    )
     monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
     monkeypatch.setattr("app.failover.current_dns_matches_origin", lambda *args, **kwargs: True)
     capture_dns_switches(monkeypatch)
@@ -1150,3 +1153,25 @@ def test_evaluate_failover_groups_skips_ip_change_when_disabled(monkeypatch):
     # The scheduler still rotates the IP on its own tick.
     evaluate_failover_groups(db, group_ids=[group.id])
     assert triggered == [origin_model.id]
+
+
+def test_evaluate_failover_groups_shares_one_ip_change_guard_across_groups(monkeypatch):
+    db = make_session()
+    groups = setup_two_groups(db)
+    for _group, origin_model in groups:
+        origin_model.status = "blocked"
+    db.commit()
+    guards = []
+
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.failover.trigger_ip_change_for_origin",
+        lambda _db, _origin, _reason, *, guard=None: guards.append(guard),
+    )
+
+    evaluate_failover_groups(db)
+
+    assert len(guards) == 2
+    assert guards[0] is not None
+    assert guards[0] is guards[1]

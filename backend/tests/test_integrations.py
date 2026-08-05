@@ -3,6 +3,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.integrations import (
+    AutoIpChangeGuard,
     azpanel_settings,
     call_synexvm_change_ip,
     change_resource_ip,
@@ -697,6 +698,144 @@ def test_trigger_ip_change_matches_resource_by_ip_when_port_differs(monkeypatch)
     assert called["id"] == resource.id
     # 资源没绑定源站：源站目标不直接改，等外部来源同步新 IP 后按绑定跟随
     assert origin.target == "192.0.2.10"
+
+
+def test_trigger_ip_change_refuses_ambiguous_unbound_resources(monkeypatch):
+    """An IP shared by several accounts must never select the first account."""
+    db = make_session()
+    origin = make_origin(db)
+    origin.port = 443
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    db.add_all(
+        [
+            AzPanelResource(
+                name=f"account-{index}",
+                provider="synexvm",
+                resource_id=str(index),
+                current_ip=origin.target,
+                port=22,
+            )
+            for index in range(3)
+        ]
+    )
+    db.commit()
+    events = []
+
+    monkeypatch.setattr(
+        "app.integrations.change_resource_ip",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ambiguous resource must not be changed")),
+    )
+    monkeypatch.setattr(
+        "app.integrations.add_event",
+        lambda _db, event_type, _severity, message, payload: events.append((event_type, message, payload)),
+    )
+    monkeypatch.setattr("app.integrations.send_webhooks", lambda *args, **kwargs: None)
+
+    guard = AutoIpChangeGuard()
+    assert trigger_ip_change_for_origin(db, origin, "origin blocked", guard=guard) is None
+    assert trigger_ip_change_for_origin(db, origin, "origin blocked", guard=guard) is None
+
+    assert len(events) == 1
+    assert events[0][0] == "azpanel.ip_change_ambiguous"
+    assert "3 个未绑定云资源" in events[0][2]["error"]
+
+
+def test_ip_fallback_does_not_use_resource_bound_to_another_origin(monkeypatch):
+    """An unbound origin sharing an address cannot rotate another domain's machine."""
+    db = make_session()
+    unbound, bound = make_origins_in_two_groups(db)
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resource = AzPanelResource(
+        name="bound-account",
+        provider="synexvm",
+        resource_id="861",
+        current_ip=unbound.target,
+        port=unbound.port,
+    )
+    db.add(resource)
+    db.flush()
+    bound.azpanel_resource_id = resource.id
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.integrations.change_resource_ip",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cross-bound resource must not be changed")),
+    )
+
+    assert trigger_ip_change_for_origin(db, unbound, "origin blocked") is None
+
+
+def test_auto_ip_change_guard_allows_only_one_distinct_resource_per_pass(monkeypatch):
+    db = make_session()
+    first, second = make_origins_in_two_groups(db)
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resources = [
+        AzPanelResource(
+            name=f"account-{index}",
+            provider="synexvm",
+            resource_id=str(index),
+            current_ip=origin.target,
+            port=origin.port,
+        )
+        for index, origin in enumerate((first, second), start=1)
+    ]
+    db.add_all(resources)
+    db.flush()
+    first.azpanel_resource_id = resources[0].id
+    second.azpanel_resource_id = resources[1].id
+    db.commit()
+    attempted = []
+    events = []
+
+    def fake_change(_db, resource, **_kwargs):
+        attempted.append(resource.id)
+        return object()
+
+    monkeypatch.setattr("app.integrations.change_resource_ip", fake_change)
+    monkeypatch.setattr(
+        "app.integrations.add_event",
+        lambda _db, event_type, _severity, message, payload: events.append((event_type, message, payload)),
+    )
+    monkeypatch.setattr("app.integrations.send_webhooks", lambda *args, **kwargs: None)
+
+    guard = AutoIpChangeGuard()
+    assert trigger_ip_change_for_origin(db, first, "first blocked", guard=guard) is not None
+    assert trigger_ip_change_for_origin(db, second, "second blocked", guard=guard) is None
+
+    assert attempted == [resources[0].id]
+    assert guard.attempted_resource_ids == {resources[0].id}
+    assert [event[0] for event in events] == ["azpanel.ip_change_suppressed"]
+
+
+def test_auto_ip_change_guard_deduplicates_shared_bound_resource(monkeypatch):
+    db = make_session()
+    first, second = make_origins_in_two_groups(db)
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resource = AzPanelResource(
+        name="shared-account",
+        provider="synexvm",
+        resource_id="861",
+        current_ip=first.target,
+        port=first.port,
+    )
+    db.add(resource)
+    db.flush()
+    first.azpanel_resource_id = resource.id
+    second.azpanel_resource_id = resource.id
+    db.commit()
+    attempted = []
+
+    def fake_change(_db, resource_arg, **_kwargs):
+        attempted.append(resource_arg.id)
+        return object()
+
+    monkeypatch.setattr("app.integrations.change_resource_ip", fake_change)
+
+    guard = AutoIpChangeGuard()
+    assert trigger_ip_change_for_origin(db, first, "first blocked", guard=guard) is not None
+    assert trigger_ip_change_for_origin(db, second, "second blocked", guard=guard) is None
+
+    assert attempted == [resource.id]
 
 
 def test_successful_ip_change_marks_external_sources_due(monkeypatch):
