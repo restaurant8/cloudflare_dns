@@ -9,7 +9,7 @@ from websockets.sync.client import connect
 
 from .dns_utils import parse_target
 from .events import add_event
-from .models import ExternalIpItem, ExternalIpSource, Origin
+from .models import ExternalIpItem, ExternalIpSource, FailoverGlobalOrigin, Origin
 from .runtime_settings import get_runtime_settings
 from .security import decrypt_secret
 
@@ -161,9 +161,79 @@ def sync_external_ip_source(db: Session, source: ExternalIpSource) -> int:
     source.status = "ok"
     source.last_error = None
     source.last_synced_at = now
+    # Global backups first: they own the target for every origin they mirror, so
+    # updating them and then fanning out keeps the two in step. _sync_bound_origins
+    # then handles only the standalone (non-mirrored) origins.
+    _sync_bound_global_origins(db, source, imported_items)
     _sync_bound_origins(db, source, imported_items)
     db.flush()
     return len(imported_items)
+
+
+def _pick_machine_ip(candidates: list[ImportedExternalIp], current_target_type: str) -> ImportedExternalIp:
+    """同一台机器可能同时有 v4/v6，优先跟随现有的地址类型。"""
+    return next((item for item in candidates if item.target_type == current_target_type), candidates[0])
+
+
+def _sync_bound_global_origins(db: Session, source: ExternalIpSource, imported_items: list[ImportedExternalIp]) -> int:
+    """把机器的新 IP 跟随到业务分组的全局备用，再同步到它镜像出的每个源站。
+
+    绑定的是机器而不是 IP：换 IP 时全局备用只是属性变了，不需要新增一条备用，
+    业务分组下所有域名也会一起跟上。
+    """
+    by_key: dict[str, list[ImportedExternalIp]] = {}
+    for imported in imported_items:
+        if imported.machine_key:
+            by_key.setdefault(imported.machine_key, []).append(imported)
+    global_origins = (
+        db.query(FailoverGlobalOrigin)
+        .filter(
+            FailoverGlobalOrigin.external_source_id == source.id,
+            FailoverGlobalOrigin.external_machine_key.isnot(None),
+        )
+        .all()
+    )
+    updated = 0
+    for global_origin in global_origins:
+        candidates = by_key.get(global_origin.external_machine_key or "")
+        if not candidates:
+            # 机器暂时不在线/没上报不代表被删了，保留绑定等它回来
+            continue
+        chosen = _pick_machine_ip(candidates, global_origin.target_type)
+        if global_origin.target == chosen.target and global_origin.target_type == chosen.target_type:
+            continue
+        old_target = global_origin.target
+        global_origin.target = chosen.target
+        global_origin.target_type = chosen.target_type
+        mirrors = db.query(Origin).filter(Origin.global_origin_id == global_origin.id).all()
+        for origin in mirrors:
+            origin.target = chosen.target
+            origin.target_type = chosen.target_type
+            origin.status = "unknown"
+            origin.last_error = "外部 IP 已更换，等待本地和探针探测结果"
+            origin.last_checked_at = None
+            origin.last_rtt_ms = None
+            origin.probe_states.clear()
+            if origin.group.current_origin_id == origin.id:
+                origin.group.current_origin_id = None
+                origin.group.last_switch_at = None
+        updated += 1
+        add_event(
+            db,
+            "external_ip.global_origin_synced",
+            "info",
+            f"{chosen.name} 外部 IP 变为 {chosen.target}，已同步到全局备用及其 {len(mirrors)} 个切换组（原 {old_target}）",
+            {
+                "global_origin_id": global_origin.id,
+                "collection_id": global_origin.collection_id,
+                "source_id": source.id,
+                "machine_key": global_origin.external_machine_key,
+                "old_target": old_target,
+                "new_target": chosen.target,
+                "mirrored_origin_ids": [origin.id for origin in mirrors],
+            },
+        )
+    return updated
 
 
 def _sync_bound_origins(db: Session, source: ExternalIpSource, imported_items: list[ImportedExternalIp]) -> int:
@@ -178,7 +248,13 @@ def _sync_bound_origins(db: Session, source: ExternalIpSource, imported_items: l
             by_key.setdefault(imported.machine_key, []).append(imported)
     origins = (
         db.query(Origin)
-        .filter(Origin.external_source_id == source.id, Origin.external_machine_key.isnot(None))
+        .filter(
+            Origin.external_source_id == source.id,
+            Origin.external_machine_key.isnot(None),
+            # 镜像出来的源站由全局备用驱动（见 _sync_bound_global_origins），
+            # 这里再写一次会和 sync_global_origins_to_group 互相覆盖。
+            Origin.global_origin_id.is_(None),
+        )
         .all()
     )
     updated = 0
@@ -187,8 +263,7 @@ def _sync_bound_origins(db: Session, source: ExternalIpSource, imported_items: l
         if not candidates:
             # 机器暂时不在线/没上报不代表被删了，保留绑定等它回来
             continue
-        # 同一台机器可能同时有 v4/v6，优先跟随源站现有的地址类型
-        chosen = next((item for item in candidates if item.target_type == origin.target_type), candidates[0])
+        chosen = _pick_machine_ip(candidates, origin.target_type)
         if origin.target == chosen.target and origin.target_type == chosen.target_type:
             continue
         old_target = origin.target
@@ -199,6 +274,9 @@ def _sync_bound_origins(db: Session, source: ExternalIpSource, imported_items: l
         origin.last_checked_at = None
         origin.last_rtt_ms = None
         origin.probe_states.clear()
+        if origin.group.current_origin_id == origin.id:
+            origin.group.current_origin_id = None
+            origin.group.last_switch_at = None
         updated += 1
         add_event(
             db,

@@ -56,8 +56,11 @@ type Section = "overview" | "cloudflare" | "records" | "groups" | "targetPool" |
 type ExpandedIpPriorityMap = Record<string, number>;
 type ProbeMode = "default" | "local_only" | "china_only" | "any";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
-type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; unbind_external: boolean };
+type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; unbind_external: boolean };
 type GlobalOriginDraft = OriginAddDraft;
+// Machine binding stays tri-state; azpanel_resource_id carries the exact current
+// binding so the same form can keep, change or clear it explicitly.
+type GlobalOriginEditDraft = Omit<GlobalOriginDraft, "azpanel_remote_key"> & { unbind_external: boolean };
 type CollectionDraft = { name: string };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | "" };
 type GroupTimeRuleDraft = { enabled: boolean; name: string; origin_id: number | ""; timezone: string; weekdays: number[]; start_time: string; end_time: string };
@@ -77,6 +80,10 @@ type AgentEditDraft = { name: string };
 type SystemSettingsDraft = { [K in keyof SystemSettings]: string };
 type SystemSettingField = { key: keyof SystemSettings; label: string; min?: number; max?: number; step?: number; hint?: string; type?: "number" | "toggle" };
 type ToastTone = "info" | "success" | "error" | "loading";
+// "all" reloads every panel's data (the safe default for actions that can touch
+// anything). "groups" reloads only what the failover panel renders, so editing a
+// backup target no longer fires 19 API calls plus a DNS record fetch.
+type RefreshScope = "all" | "groups";
 type ActionRunner = <T>(fn: () => Promise<T>, done?: string, afterSuccess?: () => void) => Promise<boolean>;
 
 const nav: { id: Section; label: string; icon: typeof Activity }[] = [
@@ -235,6 +242,13 @@ function displayTargetWithRemark(target: string, port: number, remark?: string |
   return remark?.trim() || `${target}:${port}`;
 }
 
+// Machines are the stable thing; their IP is not. Lead with whatever names the
+// machine (remark, then the bound external machine key) and let the address be a
+// secondary detail, so a rotated IP never changes how a row reads.
+function inheritedMachineLabel(origin: Origin): string {
+  return origin.remark?.trim() || origin.external_machine_key?.trim() || origin.target;
+}
+
 function formatTimeRuleWeekdays(weekdays: number[]): string {
   const normalized = [...new Set(weekdays)].filter((day) => day >= 0 && day <= 6).sort((left, right) => left - right);
   if (normalized.length === 7) return "每天";
@@ -246,7 +260,7 @@ function formatTimeRuleWeekdays(weekdays: number[]): string {
 
 function originOptions(groups: FailoverGroup[]) {
   return groups.flatMap((group) =>
-    group.origins.map((origin) => ({
+    group.origins.filter((origin) => !origin.global_origin_id).map((origin) => ({
       id: origin.id,
       label: `${group.hostname} · ${displayTargetWithRemark(origin.target, origin.port, origin.remark)}`
     }))
@@ -555,6 +569,26 @@ export default function App() {
     }
   }
 
+  // Post-action refresh for the failover panel. It renders groups, collections and
+  // — inside the failover modal — the azpanel resources and external IP items, so
+  // those are the only endpoints an edit there can invalidate. Everything else the
+  // 10s live poll picks up when the user navigates to it.
+  async function loadGroupsSection(activeToken = token) {
+    if (!activeToken) return;
+    const [nextOverview, nextCollections, nextGroups, nextAzPanelResources, nextExternalIpItems] = await Promise.all([
+      apiFetch<Overview>("/api/overview", activeToken),
+      apiFetch<FailoverCollection[]>("/api/groups/collections", activeToken),
+      apiFetch<FailoverGroup[]>("/api/groups", activeToken),
+      apiFetch<AzPanelResource[]>("/api/integrations/azpanel/resources", activeToken),
+      apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken)
+    ]);
+    setOverview(nextOverview);
+    setFailoverCollections(nextCollections);
+    setGroups(nextGroups);
+    setAzPanelResources(nextAzPanelResources);
+    setExternalIpItems(nextExternalIpItems);
+  }
+
   async function loadRecords(zoneId = selectedZoneId) {
     if (!token || !zoneId) return;
     const data = await apiFetch<DnsRecord[]>(`/api/zones/${zoneId}/records`, token);
@@ -621,7 +655,7 @@ export default function App() {
     }
   }
 
-  async function act<T>(fn: () => Promise<T>, done = "已完成", afterSuccess?: () => void) {
+  async function act<T>(fn: () => Promise<T>, done = "已完成", afterSuccess?: () => void, refresh: RefreshScope = "all") {
     const pending = pendingActionButton.current;
     pendingActionButton.current = null;
     const actionButton =
@@ -640,8 +674,12 @@ export default function App() {
       await fn();
       afterSuccess?.();
       showMessage(done, "success", 1800);
-      await loadAll();
-      if (selectedZoneId) await loadRecords();
+      if (refresh === "groups") {
+        await loadGroupsSection();
+      } else {
+        await loadAll();
+        if (selectedZoneId) await loadRecords();
+      }
       return true;
     } catch (error) {
       showMessage(error instanceof Error ? error.message : "请求失败", "error", 5000);
@@ -652,6 +690,10 @@ export default function App() {
       setBusy(false);
     }
   }
+
+  // Every action inside the failover panel only invalidates that panel's data, so
+  // it gets a runner bound to the scoped refresh instead of the full reload.
+  const actGroups: ActionRunner = (fn, done, afterSuccess) => act(fn, done, afterSuccess, "groups");
 
   useEffect(() => {
     loadSetup().catch((error) => setBootError(error instanceof Error ? error.message : "无法连接后端 API"));
@@ -878,7 +920,7 @@ export default function App() {
           />
         )}
         {section === "groups" && (
-          <GroupsPanel token={token} collections={failoverCollections} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={act} />
+          <GroupsPanel token={token} collections={failoverCollections} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
         )}
         {section === "targetPool" && (
           <TargetPoolPanel token={token} targetPool={targetPool} groups={groups} act={act} />
@@ -1933,7 +1975,7 @@ function GroupsPanel({
   const [addingGlobalCollectionId, setAddingGlobalCollectionId] = useState<number | null>(null);
   const [globalOriginAdd, setGlobalOriginAdd] = useState<GlobalOriginDraft>(defaultGlobalOriginDraft);
   const [editingGlobalOriginId, setEditingGlobalOriginId] = useState<number | null>(null);
-  const [globalOriginEdits, setGlobalOriginEdits] = useState<Record<number, GlobalOriginDraft>>({});
+  const [globalOriginEdits, setGlobalOriginEdits] = useState<Record<number, GlobalOriginEditDraft>>({});
   const [addingGroupId, setAddingGroupId] = useState<number | null>(null);
   const [originAdd, setOriginAdd] = useState<OriginAddDraft>(defaultOriginAddDraft);
   const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
@@ -1946,25 +1988,22 @@ function GroupsPanel({
   const [originEdits, setOriginEdits] = useState<Record<number, OriginEditDraft>>({});
   const [collapsedCollectionIds, setCollapsedCollectionIds] = useState<Set<string>>(new Set());
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<number>>(new Set());
+  // Origins inherited from a collection are identical across every group in it, so
+  // rendering all of them per group is N×M noise. They collapse to one summary row
+  // by default and expand into a compact table on demand.
+  const [expandedInheritedGroupIds, setExpandedInheritedGroupIds] = useState<Set<number>>(new Set());
   const [azRemoteResources, setAzRemoteResources] = useState<AzPanelRemoteResource[]>([]);
   const addingGlobalCollection = addingGlobalCollectionId ? collections.find((collection) => collection.id === addingGlobalCollectionId) : undefined;
   const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
   const addingHostnameGroup = addingHostnameGroupId ? groups.find((group) => group.id === addingHostnameGroupId) : undefined;
   const enabledPoolItems = targetPool.filter((item) => item.enabled);
   const healthyExternalItems = externalIpItems.filter((item) => item.status === "healthy");
-  // 未绑定的排前面，方便直接选到还没占用的机器
+  // 绑定较少的排前面；同一资源允许驱动多个备用，不再把“已绑定”视为占用。
   const bindableAzResources = [...azPanelResources.filter((item) => item.enabled)].sort(
-    (left, right) => Number(Boolean(left.origin_id)) - Number(Boolean(right.origin_id))
+    (left, right) =>
+      (left.bound_origin_ids?.length || (left.origin_id ? 1 : 0)) -
+      (right.bound_origin_ids?.length || (right.origin_id ? 1 : 0))
   );
-  const originLabelById = useMemo(() => {
-    const map = new Map<number, string>();
-    for (const group of groups) {
-      for (const origin of group.origins) {
-        map.set(origin.id, `${group.hostname} · ${origin.target}`);
-      }
-    }
-    return map;
-  }, [groups]);
   // azpanel 上还没添加为本地云资源的机器，选中后添加时自动创建并绑定
   const unaddedRemoteResources = useMemo(
     () =>
@@ -2081,7 +2120,9 @@ function GroupsPanel({
             probe_mode: globalOriginAdd.probe_mode,
             remark: globalOriginAdd.remark.trim() || null,
             enabled: globalOriginAdd.enabled,
-            ignore_health_check: globalOriginAdd.ignore_health_check
+            ignore_health_check: globalOriginAdd.ignore_health_check,
+            azpanel_resource_id: globalOriginAdd.azpanel_resource_id === "" ? null : globalOriginAdd.azpanel_resource_id,
+            external_ip_item_id: globalOriginAdd.external_ip_item_id === "" ? null : globalOriginAdd.external_ip_item_id
           })
         });
       },
@@ -2108,9 +2149,9 @@ function GroupsPanel({
         remark: origin.remark || "",
         enabled: origin.enabled,
         ignore_health_check: origin.ignore_health_check,
-        azpanel_resource_id: "",
-        azpanel_remote_key: "",
-        external_ip_item_id: ""
+        azpanel_resource_id: origin.azpanel_resource_id || "",
+        external_ip_item_id: "",
+        unbind_external: false
       }
     }));
   }
@@ -2123,13 +2164,26 @@ function GroupsPanel({
       () =>
         apiFetch(`/api/groups/global-origins/${originId}`, token, {
           method: "PATCH",
+          // Built field by field rather than spreading the draft: the draft carries
+          // UI-only state ("" for "binding unchanged", unbind_external) that the API
+          // rejects — spreading it was returning 422 on every global-backup edit.
           body: JSON.stringify({
-            ...draft,
             target: draft.target.trim(),
-            remark: draft.remark.trim() || null,
+            port: draft.port,
+            priority: draft.priority,
             publish_mode: targetType === "hostname" ? draft.publish_mode : "direct",
+            expanded_ip_priorities: targetType === "hostname" ? draft.expanded_ip_priorities : {},
+            remark: draft.remark.trim() || null,
+            enabled: draft.enabled,
+            ignore_health_check: draft.ignore_health_check,
             preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id,
-            probe_mode: draft.probe_mode
+            probe_mode: draft.probe_mode,
+            azpanel_resource_id: draft.azpanel_resource_id === "" ? null : draft.azpanel_resource_id,
+            ...(draft.unbind_external
+              ? { external_ip_item_id: null }
+              : draft.external_ip_item_id === ""
+                ? {}
+                : { external_ip_item_id: draft.external_ip_item_id })
           })
         }),
       "全局备用已同步更新",
@@ -2451,6 +2505,7 @@ function GroupsPanel({
         remark: origin.remark || "",
         enabled: origin.enabled,
         ignore_health_check: origin.ignore_health_check,
+        azpanel_resource_id: origin.azpanel_resource_id || "",
         unbind_external: false
       }
     }));
@@ -2466,6 +2521,7 @@ function GroupsPanel({
       publish_mode: targetType === "hostname" ? draft.publish_mode : "direct",
       preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id,
       probe_mode: draft.probe_mode,
+      azpanel_resource_id: draft.azpanel_resource_id === "" ? null : draft.azpanel_resource_id,
       ...(unbind_external ? { external_ip_item_id: null } : {})
     };
     await act(
@@ -2509,7 +2565,30 @@ function GroupsPanel({
       expanded_ip_priorities: {},
       preferred_agent_id: current.preferred_agent_id,
       remark: item.name || "",
-      enabled: true
+      enabled: true,
+      azpanel_resource_id: "",
+      // Binding to the machine is what makes this backup survive an IP change:
+      // the sync rewrites the target instead of the user adding another backup.
+      external_ip_item_id: item.machine_key ? item.id : ""
+    }));
+  }
+
+  function selectGlobalAzPanelResource(resourceId: number) {
+    const resource = azPanelResources.find((item) => item.id === resourceId);
+    if (!resource) {
+      setGlobalOriginAdd((current) => ({ ...current, azpanel_resource_id: "" }));
+      return;
+    }
+    setGlobalOriginAdd((current) => ({
+      ...current,
+      target: resource.current_ip || current.target,
+      port: resource.port || current.port || 22,
+      publish_mode: "direct",
+      expanded_ip_priorities: {},
+      remark: current.remark || resource.name,
+      azpanel_resource_id: resource.id,
+      azpanel_remote_key: "",
+      external_ip_item_id: ""
     }));
   }
 
@@ -2524,6 +2603,31 @@ function GroupsPanel({
 
   function toggleGroupCollapsed(groupId: number) {
     setCollapsedGroupIds((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
+  }
+
+  // Which cloud resource drives this backup's IP. Nothing surfaced this before, so a
+  // resource silently rebound to another backup left no trace in the UI.
+  function azPanelBindingLabel(resourceId: number): string {
+    const resource = azPanelResources.find((item) => item.id === resourceId);
+    return resource ? `换IP：${resource.name}` : "换IP绑定";
+  }
+
+  function azPanelBindingTitle(resourceId: number): string {
+    const resource = azPanelResources.find((item) => item.id === resourceId);
+    if (!resource) return "绑定了一个已删除的云资源";
+    return `被墙时由云资源 ${resource.name} 自动换 IP；同一个资源可以同时驱动多个备用`;
+  }
+
+  function toggleInheritedExpanded(groupId: number) {
+    setExpandedInheritedGroupIds((current) => {
       const next = new Set(current);
       if (next.has(groupId)) {
         next.delete(groupId);
@@ -2563,7 +2667,10 @@ function GroupsPanel({
       probe_mode: normalizeProbeMode(origin.probe_mode),
       remark: origin.remark || "",
       enabled: origin.enabled,
-      ignore_health_check: origin.ignore_health_check
+      ignore_health_check: origin.ignore_health_check,
+      azpanel_resource_id: origin.azpanel_resource_id || "",
+      external_ip_item_id: "" as number | "",
+      unbind_external: false
     };
     const editType = inferDraftTargetType(draft.target);
     if (editingGlobalOriginId === origin.id) {
@@ -2571,8 +2678,79 @@ function GroupsPanel({
         <div className="globalOriginItem globalOriginEditing" key={origin.id}>
           <label>
             目标
-            <input value={draft.target} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, target: event.target.value } }))} />
+            <input
+              value={draft.target}
+              onChange={(event) =>
+                setGlobalOriginEdits((current) => ({
+                  ...current,
+                  [origin.id]: {
+                    ...draft,
+                    target: event.target.value,
+                    azpanel_resource_id: "",
+                    external_ip_item_id: "",
+                    unbind_external: Boolean(origin.external_machine_key)
+                  }
+                }))
+              }
+            />
           </label>
+          <label>
+            自动换 IP 资源
+            <select
+              value={draft.azpanel_resource_id}
+              onChange={(event) => {
+                const resourceId = event.target.value ? Number(event.target.value) : "";
+                const resource = resourceId === "" ? undefined : azPanelResources.find((item) => item.id === resourceId);
+                setGlobalOriginEdits((current) => ({
+                  ...current,
+                  [origin.id]: {
+                    ...draft,
+                    azpanel_resource_id: resourceId,
+                    target: resource && (!origin.external_machine_key || draft.unbind_external) ? resource.current_ip || draft.target : draft.target,
+                    port: resource && (!origin.external_machine_key || draft.unbind_external) ? resource.port || draft.port : draft.port
+                  }
+                }));
+              }}
+            >
+              <option value="">不绑定自动换 IP 资源</option>
+              {bindableAzResources.map((resource) => (
+                <option value={resource.id} key={resource.id}>
+                  {resource.name} · {resource.current_ip || "未记录 IP"} · 已驱动 {resource.bound_origin_ids?.length || (resource.origin_id ? 1 : 0)} 个域名备用
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            机器绑定
+            <select
+              value={draft.unbind_external ? "none" : draft.external_ip_item_id === "" ? "keep" : String(draft.external_ip_item_id)}
+              onChange={(event) => {
+                const value = event.target.value;
+                setGlobalOriginEdits((current) => ({
+                  ...current,
+                  [origin.id]:
+                    value === "none"
+                      ? { ...draft, unbind_external: true, external_ip_item_id: "" }
+                        : value === "keep"
+                          ? { ...draft, unbind_external: false, external_ip_item_id: "" }
+                        : { ...draft, unbind_external: false, external_ip_item_id: Number(value), target: externalIpItems.find((item) => item.id === Number(value))?.target || draft.target }
+                }));
+              }}
+            >
+              <option value="keep">{origin.external_machine_key ? `保持绑定 ${origin.external_machine_key}` : "不绑定机器（固定 IP）"}</option>
+              {origin.external_machine_key && <option value="none">解除绑定，改用当前固定 IP</option>}
+              {healthyExternalItems
+                .filter((item) => item.machine_key && item.machine_key !== origin.external_machine_key)
+                .map((item) => (
+                  <option value={item.id} key={item.id}>
+                    改绑到 {externalIpLabel(item)}
+                  </option>
+                ))}
+            </select>
+          </label>
+          {origin.external_machine_key && !draft.unbind_external && (
+            <p className="modalHint">绑定机器后换 IP 会自动跟随，业务分组下所有域名一起更新。</p>
+          )}
           <label>
             端口
             <input type="number" min={1} max={65535} value={draft.port} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, port: Number(event.target.value) } }))} />
@@ -2653,8 +2831,21 @@ function GroupsPanel({
     return (
       <div className="globalOriginItem" key={origin.id}>
         <div>
-          <strong title={`${origin.target}:${origin.port}`}>{displayTargetWithRemark(origin.target, origin.port, origin.remark)}</strong>
+          <div className="originTitleLine">
+            <strong title={`${origin.target}:${origin.port}`}>{displayTargetWithRemark(origin.target, origin.port, origin.remark)}</strong>
+            {origin.external_machine_key && (
+              <span className="originBadge record" title={`绑定外部机器 ${origin.external_machine_key}，换 IP 后自动跟随，不需要新增备用`}>
+                机器绑定
+              </span>
+            )}
+            {origin.azpanel_resource_id && (
+              <span className="originBadge record" title={azPanelBindingTitle(origin.azpanel_resource_id)}>
+                {azPanelBindingLabel(origin.azpanel_resource_id)}
+              </span>
+            )}
+          </div>
           <span>
+            {origin.external_machine_key ? `当前 ${origin.target}:${origin.port} · ` : ""}
             {targetTypeText(origin.target_type)} · 优先级 {origin.priority} · 发布为 {recordTypeForTargetType(origin.target_type, origin.publish_mode)} · {origin.enabled ? "已启用" : "已停用"}
             {preferredAgent ? ` · 指定探针 ${preferredAgent.name}` : ""}
             {normalizeProbeMode(origin.probe_mode) !== "default" ? ` · ${probeModeText(origin.probe_mode)}` : ""}
@@ -2769,6 +2960,16 @@ function GroupsPanel({
           };
           const sortedOrigins = [...group.origins].sort((left, right) => left.priority - right.priority || left.id - right.id);
           const primaryPriority = sortedOrigins[0]?.priority;
+          // Inherited origins are mirrors of the collection's global backups: the
+          // backend refuses to edit or delete them here, so they only ever need a
+          // read-only view. Keeping them out of the card list is what stops
+          // 10 domains × 10 machines from becoming 100 cards.
+          const ownOrigins = sortedOrigins.filter((origin) => !origin.global_origin_id);
+          const inheritedOrigins = sortedOrigins.filter((origin) => origin.global_origin_id);
+          const inheritedHealthy = inheritedOrigins.filter((origin) => origin.enabled && origin.status === "healthy").length;
+          const inheritedDisabled = inheritedOrigins.filter((origin) => !origin.enabled).length;
+          const inheritedUnhealthy = inheritedOrigins.length - inheritedHealthy - inheritedDisabled;
+          const inheritedExpanded = expandedInheritedGroupIds.has(group.id);
           const currentOrigin = sortedOrigins.find((origin) => origin.id === group.current_origin_id);
           const currentTarget = currentOrigin ? displayTargetWithRemark(currentOrigin.target, currentOrigin.port, currentOrigin.remark) : "未发布";
           const timeRuleOrigin = group.time_rule ? sortedOrigins.find((origin) => origin.id === group.time_rule?.origin_id) : undefined;
@@ -3022,8 +3223,66 @@ function GroupsPanel({
                     )}
                   </div>
                   {group.last_error && <div className="error">{group.last_error}</div>}
+                  {inheritedOrigins.length > 0 && (
+                    <div className={`inheritedOrigins ${inheritedExpanded ? "isExpanded" : ""}`}>
+                      <button type="button" className="inheritedSummary" onClick={() => toggleInheritedExpanded(group.id)} aria-expanded={inheritedExpanded}>
+                        {inheritedExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                        <span className="inheritedSummaryText">
+                          <strong>继承 {inheritedOrigins.length} 台全局备用</strong>
+                          <span className="inheritedCounts">
+                            <span className="inheritedCount healthy">健康 {inheritedHealthy}</span>
+                            <span className="inheritedCount unhealthy">异常 {inheritedUnhealthy}</span>
+                            {inheritedDisabled > 0 && <span className="inheritedCount disabled">停用 {inheritedDisabled}</span>}
+                          </span>
+                        </span>
+                        <span className="inheritedSummaryHint">{inheritedExpanded ? "收起" : "展开查看"}</span>
+                      </button>
+                      {inheritedExpanded && (
+                        <div className="inheritedTableScroll">
+                          <table className="inheritedTable">
+                            <thead>
+                              <tr>
+                                <th>机器</th>
+                                <th>地址</th>
+                                <th>优先级</th>
+                                <th>状态</th>
+                                <th>最后检测</th>
+                                <th aria-label="操作" />
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {inheritedOrigins.map((origin) => (
+                                <tr key={origin.id} className={group.current_origin_id === origin.id ? "inheritedCurrent" : ""}>
+                                  <td>
+                                    <span className="inheritedMachine">{inheritedMachineLabel(origin)}</span>
+                                    {group.current_origin_id === origin.id && <span className="originBadge current">当前使用</span>}
+                                  </td>
+                                  <td className="inheritedTarget" title={`${origin.target}:${origin.port}`}>
+                                    {origin.target}:{origin.port}
+                                  </td>
+                                  <td>{origin.priority}</td>
+                                  <td><Status value={origin.enabled ? origin.status : "disabled"} /></td>
+                                  <td className="inheritedChecked">{origin.enabled ? fmtTime(origin.last_checked_at) : "已停用"}</td>
+                                  <td>
+                                    <button
+                                      className="icon secondaryIcon"
+                                      title="手动检测这个目标"
+                                      onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}/run`, token, { method: "POST" }), "目标检测已完成")}
+                                    >
+                                      <Play size={15} />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          <p className="inheritedHint">全局备用统一在业务分组顶部管理，这里只读。</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div className="originList">
-                    {sortedOrigins.map((origin) => {
+                    {ownOrigins.map((origin) => {
                       const originEdit = originEdits[origin.id] || {
                         target: origin.target,
                         port: origin.port,
@@ -3035,6 +3294,7 @@ function GroupsPanel({
                         remark: origin.remark || "",
                         enabled: origin.enabled,
                         ignore_health_check: origin.ignore_health_check,
+                        azpanel_resource_id: origin.azpanel_resource_id || "",
                         unbind_external: false
                       };
                       const editType = inferDraftTargetType(originEdit.target);
@@ -3057,7 +3317,46 @@ function GroupsPanel({
                               <div className="originEditGrid">
                                 <label>
                                   目标 IP / IPv6 / 域名
-                                  <input value={originEdit.target} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, target: event.target.value } }))} />
+                                  <input
+                                    value={originEdit.target}
+                                    onChange={(event) =>
+                                      setOriginEdits((current) => ({
+                                        ...current,
+                                        [origin.id]: {
+                                          ...originEdit,
+                                          target: event.target.value,
+                                          azpanel_resource_id: "",
+                                          unbind_external: Boolean(origin.external_machine_key)
+                                        }
+                                      }))
+                                    }
+                                  />
+                                </label>
+                                <label>
+                                  自动换 IP 资源
+                                  <select
+                                    value={originEdit.azpanel_resource_id}
+                                    onChange={(event) => {
+                                      const resourceId = event.target.value ? Number(event.target.value) : "";
+                                      const resource = resourceId === "" ? undefined : azPanelResources.find((item) => item.id === resourceId);
+                                      setOriginEdits((current) => ({
+                                        ...current,
+                                        [origin.id]: {
+                                          ...originEdit,
+                                          azpanel_resource_id: resourceId,
+                                          target: resource && (!origin.external_machine_key || originEdit.unbind_external) ? resource.current_ip || originEdit.target : originEdit.target,
+                                          port: resource && (!origin.external_machine_key || originEdit.unbind_external) ? resource.port || originEdit.port : originEdit.port
+                                        }
+                                      }));
+                                    }}
+                                  >
+                                    <option value="">不绑定自动换 IP 资源</option>
+                                    {bindableAzResources.map((resource) => (
+                                      <option value={resource.id} key={resource.id}>
+                                        {resource.name} · {resource.current_ip || "未记录 IP"} · 已驱动 {resource.bound_origin_ids?.length || (resource.origin_id ? 1 : 0)} 个域名备用
+                                      </option>
+                                    ))}
+                                  </select>
                                 </label>
                                 <label>
                                   检查端口
@@ -3168,6 +3467,11 @@ function GroupsPanel({
                                     {normalizeProbeMode(origin.probe_mode) !== "default" && <span className="originBadge record">{probeModeText(origin.probe_mode)}</span>}
                                     {origin.ignore_health_check && <span className="originBadge record">无视健康检查</span>}
                                     {origin.external_machine_key && <span className="originBadge record" title={`绑定外部机器 ${origin.external_machine_key}，来源同步到新 IP 时自动更新`}>外部IP绑定</span>}
+                                    {origin.azpanel_resource_id && (
+                                      <span className="originBadge record" title={azPanelBindingTitle(origin.azpanel_resource_id)}>
+                                        {azPanelBindingLabel(origin.azpanel_resource_id)}
+                                      </span>
+                                    )}
                                   </div>
                                 </div>
                                 <span>{targetTypeText(origin.target_type)} · 优先级 {origin.priority} · {origin.enabled ? "已启用" : "已停用"} · {healthMeta}</span>
@@ -3267,9 +3571,38 @@ function GroupsPanel({
               </select>
             </label>
             <label>
-              全局备用 IP / IPv6 / 域名
-              <input placeholder="例如 192.0.2.10 或 backup.example.com" value={globalOriginAdd.target} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, target: event.target.value }))} />
+              从自动换 IP 资源选择
+              <select
+                value={globalOriginAdd.azpanel_resource_id}
+                onChange={(event) => event.target.value ? selectGlobalAzPanelResource(Number(event.target.value)) : setGlobalOriginAdd((current) => ({ ...current, azpanel_resource_id: "" }))}
+                disabled={bindableAzResources.length === 0}
+              >
+                <option value="">{bindableAzResources.length ? "不绑定自动换 IP 资源" : "暂无已启用资源"}</option>
+                {bindableAzResources.map((resource) => (
+                  <option value={resource.id} key={resource.id}>
+                    {resource.name} · {resource.current_ip || "未记录 IP"} · 已驱动 {resource.bound_origin_ids?.length || (resource.origin_id ? 1 : 0)} 个域名备用
+                  </option>
+                ))}
+              </select>
             </label>
+            <label>
+              全局备用 IP / IPv6 / 域名
+              <input
+                placeholder="例如 192.0.2.10 或 backup.example.com"
+                value={globalOriginAdd.target}
+                onChange={(event) =>
+                  // Typing an address by hand means this is a static backup, not the
+                  // machine that was picked above — drop the binding with the address.
+                  setGlobalOriginAdd((current) => ({ ...current, target: event.target.value, azpanel_resource_id: "", external_ip_item_id: "" }))
+                }
+              />
+            </label>
+            {globalOriginAdd.external_ip_item_id !== "" && (
+              <p className="modalHint">已绑定机器：换 IP 后这条全局备用会自动跟随，不需要再加一条。</p>
+            )}
+            {globalOriginAdd.azpanel_resource_id !== "" && (
+              <p className="modalHint">这个资源换 IP 后，会同步并立即发布到业务分组下所有域名；绑定不会挤掉该资源已有的其他备用。</p>
+            )}
             <label>
               备注
               <input placeholder="例如 全局香港备用、通用回源" value={globalOriginAdd.remark} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, remark: event.target.value }))} />
@@ -3417,7 +3750,7 @@ function GroupsPanel({
                     <optgroup label="已添加的云资源">
                       {bindableAzResources.map((item) => (
                         <option value={`local-${item.id}`} key={`local-${item.id}`}>
-                          {item.name} · {item.provider.toUpperCase()} · {item.current_ip ? `${item.current_ip}:${item.port}` : "未记录 IP"} · {item.origin_id ? `已绑定 ${originLabelById.get(item.origin_id) || "其他源站"}` : "未绑定"}
+                          {item.name} · {item.provider.toUpperCase()} · {item.current_ip ? `${item.current_ip}:${item.port}` : "未记录 IP"} · 已驱动 {item.bound_origin_ids?.length || (item.origin_id ? 1 : 0)} 个域名备用
                         </option>
                       ))}
                     </optgroup>
@@ -3440,7 +3773,7 @@ function GroupsPanel({
             )}
             {originAdd.azpanel_resource_id !== "" && (
               <div className="originHint">
-                添加后会把选中的云资源绑定到这个备用目标：源站疑似被墙时自动调用 azpanel 换 IP，新 IP 会同步回源站；机器宕机不会换 IP。若该资源之前绑定了其他源站，会改绑到这里。
+                添加后会把选中的云资源绑定到这个备用目标：源站疑似被墙时自动调用 azpanel 换 IP，新 IP 会同步回所有绑定域名；已有绑定不会被解除。
               </div>
             )}
             {originAdd.external_ip_item_id !== "" && (
@@ -4335,7 +4668,6 @@ function AzPanelPanel({
       ip_version: resourceDraft.ip_version,
       ip_change_method: resourceDraft.ip_change_method || "eip",
       api_url: synex ? resourceDraft.api_url.trim() || null : null,
-      origin_id: resourceDraft.origin_id === "" ? null : Number(resourceDraft.origin_id),
       current_ip: resourceDraft.current_ip.trim() || null,
       port: resourceDraft.port,
       enabled: resourceDraft.enabled,
@@ -4345,6 +4677,10 @@ function AzPanelPanel({
       status_sync_interval_seconds: synex ? resourceDraft.status_sync_interval_seconds : 0,
       remark: resourceDraft.remark.trim() || null
     };
+    // 创建时可顺手添加第一个绑定；编辑资源属性不能隐式清空或替换现有的一对多绑定。
+    if (!editingId) {
+      payload.origin_id = resourceDraft.origin_id === "" ? null : Number(resourceDraft.origin_id);
+    }
     // Token 留空表示不修改，避免编辑时把已保存的 Token 清掉
     if (synex && resourceDraft.api_token.trim()) {
       payload.api_token = resourceDraft.api_token.trim();
@@ -4468,7 +4804,7 @@ function AzPanelPanel({
       ip_change_method: resource.ip_change_method || "eip",
       api_url: resource.api_url || "",
       api_token: "",
-      origin_id: resource.origin_id || "",
+      origin_id: "",
       current_ip: resource.current_ip || "",
       port: resource.port,
       enabled: resource.enabled,
@@ -4672,13 +5008,20 @@ function AzPanelPanel({
               />
             </label>
           )}
-          <label>
-            绑定源站
-            <select value={resourceDraft.origin_id} onChange={(event) => setResourceDraft((current) => ({ ...current, origin_id: event.target.value ? Number(event.target.value) : "" }))}>
-              <option value="">不绑定</option>
-              {origins.map((origin) => <option key={origin.id} value={origin.id}>{origin.label}</option>)}
-            </select>
-          </label>
+          {!editingId ? (
+            <label>
+              创建后先绑定一个备用（可选）
+              <select value={resourceDraft.origin_id} onChange={(event) => setResourceDraft((current) => ({ ...current, origin_id: event.target.value ? Number(event.target.value) : "" }))}>
+                <option value="">暂不绑定</option>
+                {origins.map((origin) => <option key={origin.id} value={origin.id}>{origin.label}</option>)}
+              </select>
+            </label>
+          ) : (
+            <div className="originHint wideField">
+              当前驱动 {resources.find((item) => item.id === editingId)?.bound_origin_ids?.length || (resources.find((item) => item.id === editingId)?.origin_id ? 1 : 0)} 个域名备用。
+              请在「故障切换」里的普通备用或全局备用上增删资源绑定，编辑这里不会解除任何已有绑定。
+            </div>
+          )}
           <label>
             当前 IP
             <input
@@ -4749,6 +5092,10 @@ function AzPanelPanel({
                   {resource.provider} · {resource.resource_id} · {resource.current_ip || "未记录 IP"}:{resource.port} · 尝试 {fmtDate(resource.last_attempt_at)} · 成功 {fmtDate(resource.last_change_at)}
                   {resource.provider === "synexvm" && resource.status_sync_interval_seconds > 0 && ` · 自动查状态 每${resource.status_sync_interval_seconds}s`}
                 </span>
+                <small>
+                  驱动 {resource.bound_origin_ids?.length || (resource.origin_id ? 1 : 0)} 个域名备用
+                  {(resource.bound_global_origin_ids?.length || 0) > 0 && ` · 其中 ${resource.bound_global_origin_ids.length} 条为业务分组全局备用`}
+                </small>
                 {resource.pending_change_at && <small className="successText">换 IP 已下发，后台查询状态中（新 IP 需连续两次查询一致才采纳，防过渡 IP）…</small>}
                 {resource.last_error && <small className="danger">{resource.last_error}</small>}
               </div>

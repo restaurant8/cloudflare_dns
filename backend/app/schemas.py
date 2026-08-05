@@ -365,6 +365,9 @@ class OriginUpdate(BaseModel):
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool | None = None
     ignore_health_check: bool | None = None
+    # 传 null 表示解除 azpanel/SynexVM 资源绑定；传资源 id 表示改绑。
+    # 同一个资源可以绑定多个备用，绑定关系存放在备用一侧。
+    azpanel_resource_id: int | None = None
     # 传 null 表示解除外部 IP 绑定；传 item id 表示改绑到那台机器
     external_ip_item_id: int | None = None
 
@@ -405,6 +408,7 @@ class OriginOut(BaseModel):
     remark: str | None
     enabled: bool
     ignore_health_check: bool
+    azpanel_resource_id: int | None = None
     external_source_id: int | None = None
     external_machine_key: str | None = None
     status: str
@@ -436,6 +440,9 @@ class FailoverGlobalOriginUpdate(OriginUpdate):
 class FailoverGlobalOriginOut(BaseModel):
     id: int
     collection_id: int
+    external_source_id: int | None = None
+    external_machine_key: str | None = None
+    azpanel_resource_id: int | None = None
     preferred_agent_id: int | None
     probe_mode: str
     target: str
@@ -659,6 +666,9 @@ class AzPanelResourceUpdate(BaseModel):
 
 class AzPanelResourceOut(AzPanelResourceBase):
     id: int
+    # origin_id 仅为旧客户端保留；完整的一对多绑定由下面两个列表表达。
+    bound_origin_ids: list[int] = Field(default_factory=list)
+    bound_global_origin_ids: list[int] = Field(default_factory=list)
     api_token_configured: bool = False
     pending_change_at: datetime | None = None
     last_status_sync_at: datetime | None = None

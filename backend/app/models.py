@@ -161,6 +161,11 @@ class Origin(Base, TimestampMixin):
     # 不能按 item id 绑定）；来源同步到新 IP 时自动更新本源站的 target
     external_source_id: Mapped[int | None] = mapped_column(ForeignKey("external_ip_sources.id", ondelete="SET NULL"))
     external_machine_key: Mapped[str | None] = mapped_column(String(255))
+    # 绑定的 azpanel/SynexVM 云资源。绑定放在被写入的一方，一台机器才能同时驱动
+    # 多个备用；放在 AzPanelResource.origin_id 上时第二次绑定会覆盖第一次。
+    # 故意不加外键：azpanel_resources.origin_id 仍保留，双向外键会让建表互相依赖，
+    # 而且 SQLite 无法用 ALTER TABLE 补外键。
+    azpanel_resource_id: Mapped[int | None] = mapped_column(Integer)
     probe_mode: Mapped[str] = mapped_column(String(20), default="default", nullable=False)
     target: Mapped[str] = mapped_column(String(255), nullable=False)
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -238,10 +243,37 @@ class FailoverTimeRule(Base, TimestampMixin):
 
 class FailoverGlobalOrigin(Base, TimestampMixin):
     __tablename__ = "failover_global_origins"
-    __table_args__ = (UniqueConstraint("collection_id", "target", "port", name="uq_failover_global_origin_target_port"),)
+    __table_args__ = (
+        # There is deliberately no unique constraint on (collection_id, target, port).
+        # A machine-bound backup's target is just the machine's current IP, and two
+        # machines can legitimately hold the same address for a moment — most often
+        # when a provider recycles an IP from one machine to another between syncs.
+        # Duplicate *static* backups are rejected in the API layer instead, where the
+        # rule can depend on whether the backup is machine-bound.
+        #
+        # A machine-bound backup is identified by the machine, not by its address —
+        # the address is just whatever IP the machine holds right now. The source id
+        # is part of the key because machine_key is only unique within one source.
+        # NULLs compare as distinct on sqlite/mysql/postgres, so static-IP backups
+        # (both columns NULL) never collide here.
+        UniqueConstraint(
+            "collection_id",
+            "external_source_id",
+            "external_machine_key",
+            "port",
+            name="uq_failover_global_origin_machine",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     collection_id: Mapped[int] = mapped_column(ForeignKey("failover_collections.id", ondelete="CASCADE"), nullable=False)
+    # Bound machine, if any. The external IP sync rewrites ``target`` to follow this
+    # machine, and the change fans out to every mirrored origin in the collection.
+    external_source_id: Mapped[int | None] = mapped_column(ForeignKey("external_ip_sources.id", ondelete="SET NULL"))
+    external_machine_key: Mapped[str | None] = mapped_column(String(255))
+    # 绑定在全局备用上时，业务分组下每个域名镜像出的源站都会跟着换 IP，
+    # 一台机器备多少个域名都只需要绑一次。无外键，理由同 Origin。
+    azpanel_resource_id: Mapped[int | None] = mapped_column(Integer)
     preferred_agent_id: Mapped[int | None] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"))
     probe_mode: Mapped[str] = mapped_column(String(20), default="default", nullable=False)
     target: Mapped[str] = mapped_column(String(255), nullable=False)

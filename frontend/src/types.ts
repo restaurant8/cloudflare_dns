@@ -49,6 +49,7 @@ export type ProbeState = {
 export type Origin = {
   external_source_id: number | null;
   external_machine_key: string | null;
+  azpanel_resource_id: number | null;
   id: number;
   group_id: number;
   global_origin_id: number | null;
@@ -114,6 +115,9 @@ export type FailoverTimeRule = {
 export type FailoverGlobalOrigin = {
   id: number;
   collection_id: number;
+  external_source_id: number | null;
+  external_machine_key: string | null;
+  azpanel_resource_id: number | null;
   preferred_agent_id: number | null;
   target: string;
   target_type: string;
@@ -299,6 +303,8 @@ export type AzPanelResource = {
   status_sync_interval_seconds: number;
   last_status_sync_at: string | null;
   origin_id: number | null;
+  bound_origin_ids: number[];
+  bound_global_origin_ids: number[];
   current_ip: string | null;
   port: number;
   enabled: boolean;

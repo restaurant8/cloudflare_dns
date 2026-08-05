@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from .dns_utils import parse_target
 from .events import add_event
 from .external_ips import mark_external_ip_sources_due
-from .models import AppSetting, AzPanelRemoteResource, AzPanelResource, IpChangeJob, Origin, XboardNodeBinding
+from .models import AppSetting, AzPanelRemoteResource, AzPanelResource, FailoverGlobalOrigin, IpChangeJob, Origin, XboardNodeBinding
 from .notifier import send_webhooks
 from .security import decrypt_secret, encrypt_secret, json_dumps
 
@@ -334,24 +334,24 @@ def sync_synexvm_resource_status(db: Session, resource: AzPanelResource) -> dict
             old_ip = resource.current_ip
             applied_ip, _ = _apply_changed_ip(db, resource, target_info.value, reason="synexvm status refresh confirmed")
             _finish_pending_job(db, resource, applied_ip, None)
-            event_payload = {
-                "resource_id": resource.id,
-                "provider": resource.provider,
-                "old_ip": old_ip,
-                "new_ip": applied_ip,
-                "origin_id": resource.origin_id,
-                "trigger_type": "manual_status_refresh",
-            }
+            event_payload = ip_change_event_payload(
+                db, resource, old_ip=old_ip, new_ip=applied_ip, trigger_type="manual_status_refresh"
+            )
             add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {applied_ip}", event_payload)
             send_webhooks(db, "azpanel.ip_changed", event_payload)
         else:
-            resource.current_ip = target_info.value
+            old_ip = resource.current_ip
             try:
-                sync_resource_current_ip_to_origin(db, resource)
+                applied_ip, _ = _apply_changed_ip(db, resource, target_info.value, reason="synexvm manual status refresh")
             except ValueError as exc:
                 resource.last_error = f"远端 IP 无法同步到源站: {exc}"
             else:
                 resource.last_error = None
+                event_payload = ip_change_event_payload(
+                    db, resource, old_ip=old_ip, new_ip=applied_ip, trigger_type="manual_status_refresh"
+                )
+                add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {applied_ip}", event_payload)
+                send_webhooks(db, "azpanel.ip_changed", event_payload)
         db.flush()
     return payload
 
@@ -699,6 +699,94 @@ def _apply_changed_ip(db: Session, resource: AzPanelResource, new_ip: str, reaso
     return target_info.value, xboard_results
 
 
+def resource_bound_global_origins(db: Session, resource: AzPanelResource) -> list[FailoverGlobalOrigin]:
+    return (
+        db.query(FailoverGlobalOrigin)
+        .filter(FailoverGlobalOrigin.azpanel_resource_id == resource.id)
+        .order_by(FailoverGlobalOrigin.id.asc())
+        .all()
+    )
+
+
+def resource_bound_origins(db: Session, resource: AzPanelResource) -> list[Origin]:
+    """Every failover backup whose address this resource drives.
+
+    Both the directly bound origins and the mirrors of any global backup bound to
+    this resource — binding one machine to a collection's global backup is what
+    lets a single machine back every domain in it.
+    """
+    direct = (
+        db.query(Origin)
+        .filter(Origin.azpanel_resource_id == resource.id)
+        .order_by(Origin.id.asc())
+        .all()
+    )
+    global_ids = [global_origin.id for global_origin in resource_bound_global_origins(db, resource)]
+    mirrored = (
+        db.query(Origin).filter(Origin.global_origin_id.in_(global_ids)).order_by(Origin.id.asc()).all()
+        if global_ids
+        else []
+    )
+    seen: dict[int, Origin] = {}
+    for origin in [*direct, *mirrored]:
+        seen.setdefault(origin.id, origin)
+    return list(seen.values())
+
+
+def refresh_legacy_origin_mirror(db: Session, resource: AzPanelResource) -> None:
+    """Keep AzPanelResource.origin_id as a read-only mirror of the primary binding.
+
+    Nothing in the logic reads it any more — the binding lives on the origin — but
+    the column and the API field stay so an un-upgraded frontend keeps rendering
+    something true, and so a rollback still finds a usable value. It is derived,
+    never authoritative: writing to it is what used to unbind other backups.
+    """
+    db.flush()
+    bound_ids = [origin.id for origin in resource_bound_origins(db, resource)]
+    resource.origin_id = min(bound_ids) if bound_ids else None
+
+
+def _origin_notification_summary(origin: Origin) -> dict[str, Any]:
+    group = origin.group
+    return {
+        "origin_id": origin.id,
+        "hostname": getattr(group, "hostname", None),
+        "remark": origin.remark,
+        "target": origin.target,
+        "port": origin.port,
+    }
+
+
+def ip_change_event_payload(
+    db: Session,
+    resource: AzPanelResource,
+    *,
+    old_ip: str | None = None,
+    new_ip: str | None = None,
+    trigger_type: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Payload for the azpanel.* IP events.
+
+    It carries the resource *name* and the affected backups (hostname + remark +
+    address), not just row ids: the Telegram message is often the only place a
+    change is seen, and "origin_id: 47" does not tell anyone which backup moved.
+    """
+    payload: dict[str, Any] = {
+        "resource_id": resource.id,
+        "resource_name": resource.name,
+        "provider": resource.provider,
+        "old_ip": old_ip,
+        "new_ip": new_ip,
+        "origin_id": resource.origin_id,
+        "trigger_type": trigger_type,
+        "targets": [_origin_notification_summary(origin) for origin in resource_bound_origins(db, resource)],
+    }
+    if error is not None:
+        payload["error"] = error
+    return payload
+
+
 def _resource_on_cooldown(resource: AzPanelResource, now: datetime) -> bool:
     last_attempt_at = getattr(resource, "last_attempt_at", None) or resource.last_change_at
     if last_attempt_at is None:
@@ -706,25 +794,60 @@ def _resource_on_cooldown(resource: AzPanelResource, now: datetime) -> bool:
     return (now - last_attempt_at).total_seconds() < max(resource.cooldown_seconds, 60)
 
 
-def sync_resource_current_ip_to_origin(db: Session, resource: AzPanelResource) -> bool:
-    if not resource.origin_id or not resource.auto_update_origin or not resource.current_ip:
-        return False
-    origin = db.get(Origin, resource.origin_id)
-    if origin is None:
-        return False
-    target_info = parse_target(resource.current_ip)
-    changed = origin.target != target_info.value or origin.target_type != target_info.target_type or origin.port != resource.port
+def _apply_resource_ip_to_origin(origin: Origin, target_info, port: int) -> bool:
+    changed = origin.target != target_info.value or origin.target_type != target_info.target_type or origin.port != port
     if not changed:
         return False
     origin.target = target_info.value
     origin.target_type = target_info.target_type
-    origin.port = resource.port
+    origin.port = port
     origin.status = "unknown"
     origin.last_error = "资源 IP 已同步，等待本地和探针探测结果"
     origin.last_checked_at = None
     origin.last_rtt_ms = None
     origin.probe_states.clear()
+    # The DNS record still contains the old address. Keeping this origin marked as
+    # current lets the scheduler's steady-state consistency throttle skip the write
+    # for up to five minutes. Once the endpoint changes there is no longer a current
+    # origin that accurately describes published DNS, so force normal selection and
+    # publication on the next evaluation.
+    group = origin.group
+    if group.current_origin_id == origin.id:
+        group.current_origin_id = None
+        group.last_switch_at = None
     return True
+
+
+def sync_resource_current_ip_to_origin(db: Session, resource: AzPanelResource) -> bool:
+    """Push this resource's current IP to every backup it drives.
+
+    This used to resolve exactly one Origin from ``resource.origin_id``, so a machine
+    backing several domains left all but one of them on the dead IP.
+    """
+    if not resource.auto_update_origin or not resource.current_ip:
+        return False
+    target_info = parse_target(resource.current_ip)
+    changed_any = False
+
+    # Global backups first: writing the global row and then its mirrors keeps the two
+    # in step, the same ordering external_ips.py uses.
+    for global_origin in resource_bound_global_origins(db, resource):
+        if global_origin.external_machine_key:
+            # An external IP source already observes this machine and owns the target;
+            # _apply_changed_ip marks that source due so it re-reads right away.
+            continue
+        if global_origin.target != target_info.value or global_origin.target_type != target_info.target_type or global_origin.port != resource.port:
+            global_origin.target = target_info.value
+            global_origin.target_type = target_info.target_type
+            global_origin.port = resource.port
+            changed_any = True
+
+    for origin in resource_bound_origins(db, resource):
+        if origin.external_machine_key:
+            continue
+        if _apply_resource_ip_to_origin(origin, target_info, resource.port):
+            changed_any = True
+    return changed_any
 
 
 def _resource_current_ip_matches_origin(resource: AzPanelResource, origin: Origin) -> bool:
@@ -807,13 +930,7 @@ def change_resource_ip(
             job.response_json = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
             job.finished_at = datetime.utcnow()
             mark_external_ip_sources_due(db)
-            payload = {
-                "resource_id": resource.id,
-                "provider": resource.provider,
-                "old_ip": job.old_ip,
-                "origin_id": resource.origin_id,
-                "trigger_type": trigger_type,
-            }
+            payload = ip_change_event_payload(db, resource, old_ip=job.old_ip, trigger_type=trigger_type)
             add_event(
                 db,
                 "azpanel.ip_change_pending",
@@ -833,14 +950,7 @@ def change_resource_ip(
 
         job.status = "success"
         job.finished_at = datetime.utcnow()
-        payload = {
-            "resource_id": resource.id,
-            "provider": resource.provider,
-            "old_ip": job.old_ip,
-            "new_ip": job.new_ip,
-            "origin_id": resource.origin_id,
-            "trigger_type": trigger_type,
-        }
+        payload = ip_change_event_payload(db, resource, old_ip=job.old_ip, new_ip=job.new_ip, trigger_type=trigger_type)
         add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {job.new_ip}", payload)
         send_webhooks(db, "azpanel.ip_changed", payload)
     except Exception as exc:
@@ -849,14 +959,7 @@ def change_resource_ip(
         job.status = "failed"
         job.error = message
         job.finished_at = datetime.utcnow()
-        payload = {
-            "resource_id": resource.id,
-            "provider": resource.provider,
-            "old_ip": job.old_ip,
-            "origin_id": resource.origin_id,
-            "trigger_type": trigger_type,
-            "error": message,
-        }
+        payload = ip_change_event_payload(db, resource, old_ip=job.old_ip, trigger_type=trigger_type, error=message)
         add_event(db, "azpanel.ip_change_failed", "error", f"{resource.name} IP change failed: {message}", payload)
         send_webhooks(db, "azpanel.ip_change_failed", payload)
     db.flush()
@@ -914,14 +1017,9 @@ def reconcile_pending_synexvm_changes(db: Session) -> int:
             old_ip = resource.current_ip
             applied_ip, xboard_results = _apply_changed_ip(db, resource, new_ip, reason="synexvm pending change confirmed")
             _finish_pending_job(db, resource, applied_ip, None)
-            payload_evt = {
-                "resource_id": resource.id,
-                "provider": resource.provider,
-                "old_ip": old_ip,
-                "new_ip": applied_ip,
-                "origin_id": resource.origin_id,
-                "trigger_type": "auto_reconcile",
-            }
+            payload_evt = ip_change_event_payload(
+                db, resource, old_ip=old_ip, new_ip=applied_ip, trigger_type="auto_reconcile"
+            )
             add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {applied_ip}", payload_evt)
             send_webhooks(db, "azpanel.ip_changed", payload_evt)
             resolved += 1
@@ -934,14 +1032,13 @@ def reconcile_pending_synexvm_changes(db: Session) -> int:
             message = f"换 IP 已下发但 {int(budget)} 秒内 status 未返回新 IP，请在 SynexVM 面板确认"
             resource.last_error = message
             _finish_pending_job(db, resource, None, message)
-            payload_evt = {
-                "resource_id": resource.id,
-                "provider": resource.provider,
-                "old_ip": resource.current_ip,
-                "origin_id": resource.origin_id,
-                "trigger_type": "auto_reconcile",
-                "error": message,
-            }
+            payload_evt = ip_change_event_payload(
+                db,
+                resource,
+                old_ip=resource.current_ip,
+                trigger_type="auto_reconcile",
+                error=message,
+            )
             add_event(db, "azpanel.ip_change_failed", "warning", f"{resource.name} IP change unconfirmed: {message}", payload_evt)
         elif new_ip:
             # 面板又报回旧 IP：之前的候选是过渡值，作废重来
@@ -997,14 +1094,13 @@ def auto_sync_synexvm_statuses(db: Session) -> int:
         except ValueError as exc:
             resource.last_error = f"自动查询到的 IP 无法应用: {exc}"
             continue
-        payload_evt = {
-            "resource_id": resource.id,
-            "provider": resource.provider,
-            "old_ip": old_ip,
-            "new_ip": applied_ip,
-            "origin_id": resource.origin_id,
-            "trigger_type": "auto_status_sync",
-        }
+        payload_evt = ip_change_event_payload(
+            db,
+            resource,
+            old_ip=old_ip,
+            new_ip=applied_ip,
+            trigger_type="auto_status_sync",
+        )
         add_event(db, "azpanel.ip_changed", "info", f"{resource.name} 自动查询发现 IP 变为 {applied_ip}，已同步", payload_evt)
         send_webhooks(db, "azpanel.ip_changed", payload_evt)
         synced += 1
@@ -1021,12 +1117,21 @@ def trigger_ip_change_for_origin(db: Session, origin: Origin, reason: str) -> Ip
     def provider_enabled(resource: AzPanelResource) -> bool:
         return synexvm_enabled if resource.provider == "synexvm" else azpanel_enabled
 
+    # Resources bound to this backup directly, or to the global backup it mirrors —
+    # a blocked mirror must still be able to rotate the machine behind it.
+    bound_ids = {origin.azpanel_resource_id} if origin.azpanel_resource_id else set()
+    if origin.global_origin_id:
+        global_origin = db.get(FailoverGlobalOrigin, origin.global_origin_id)
+        if global_origin is not None and global_origin.azpanel_resource_id:
+            bound_ids.add(global_origin.azpanel_resource_id)
     resources = (
         db.query(AzPanelResource)
         .filter(AzPanelResource.enabled.is_(True), AzPanelResource.auto_change_on_blocked.is_(True))
-        .filter(AzPanelResource.origin_id == origin.id)
+        .filter(AzPanelResource.id.in_(bound_ids))
         .order_by(AzPanelResource.id.asc())
         .all()
+        if bound_ids
+        else []
     )
     resources = [resource for resource in resources if provider_enabled(resource)]
     for resource in resources:
@@ -1039,19 +1144,21 @@ def trigger_ip_change_for_origin(db: Session, origin: Origin, reason: str) -> Ip
             continue
         if resource_matches_origin:
             continue
+        old_origin_target = origin.target
         sync_resource_current_ip_to_origin(db, resource)
+        payload = ip_change_event_payload(
+            db,
+            resource,
+            old_ip=old_origin_target,
+            new_ip=resource.current_ip,
+            trigger_type="pre_change_sync",
+        )
         add_event(
             db,
             "azpanel.resource_ip_synced",
             "info",
             f"{resource.name} current IP synced to bound origin before auto change",
-            {
-                "resource_id": resource.id,
-                "provider": resource.provider,
-                "origin_id": origin.id,
-                "current_ip": resource.current_ip,
-                "reason": reason,
-            },
+            payload,
         )
         return None
     if not resources and origin.target_type in {"ipv4", "ipv6"}:

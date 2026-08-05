@@ -36,8 +36,19 @@ EVENT_NAMES = {
     "azpanel.ip_changed": "云资源 IP 已更换",
     "azpanel.ip_change_failed": "云资源 IP 更换失败",
     "azpanel.ip_change_pending": "云资源换 IP 已下发，等待新 IP",
+    "azpanel.resource_ip_synced": "云资源 IP 已同步到备用",
     "xboard.node_update_failed": "Xboard 节点更新失败",
     "external_ip.origin_synced": "外部 IP 已同步到备用目标",
+}
+
+
+IP_CHANGE_TRIGGER_NAMES = {
+    "auto_blocked": "源站被墙，自动换 IP",
+    "auto_reconcile": "后台确认新 IP",
+    "manual": "手动触发",
+    "manual_status_refresh": "手动查询状态",
+    "auto_status_sync": "定时查询状态",
+    "pre_change_sync": "换 IP 前校准资源地址",
 }
 
 
@@ -168,6 +179,41 @@ def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
                 status = STATUS_NAMES.get(str(origin.get("status")), origin.get("status"))
                 checked_at = _format_shanghai_time(origin.get("last_checked_at")) or "-"
                 lines.append(_line("源站", f"{target} · {status} · {checked_at}"))
+    elif event_type.startswith("azpanel."):
+        # Without this branch these events fell through to the generic key dump, which
+        # printed "origin_id: 47" and left no way to tell which backup had moved.
+        lines.append(_line("云资源", payload.get("resource_name") or payload.get("resource_id")))
+        old_ip = payload.get("old_ip") or "-"
+        new_ip = payload.get("new_ip")
+        lines.append(_line("IP", f"{old_ip} → {new_ip}" if new_ip else f"{old_ip} → 等待新 IP"))
+        targets = payload.get("targets")
+        if isinstance(targets, list) and targets:
+            for target in targets[:8]:
+                if not isinstance(target, dict):
+                    continue
+                name = target.get("remark") or target.get("hostname") or f"源站 {target.get('origin_id')}"
+                where = target.get("hostname") or "-"
+                address = f"{target.get('target', '-')}:{target.get('port', '-')}"
+                lines.append(_line("备用", f"{name} · {where} · {address}"))
+            if len(targets) > 8:
+                lines.append(_line("备用", f"…另有 {len(targets) - 8} 个"))
+        else:
+            lines.append(_line("备用", "这个资源没有绑定备用目标"))
+        trigger_type = payload.get("trigger_type")
+        if trigger_type:
+            lines.append(_line("触发方式", IP_CHANGE_TRIGGER_NAMES.get(str(trigger_type), trigger_type)))
+        if payload.get("error"):
+            lines.append(_line("错误", payload.get("error")))
+    elif event_type.startswith("external_ip."):
+        lines.extend(
+            [
+                _line("机器", payload.get("machine_key")),
+                _line("IP", f"{payload.get('old_target', '-')} → {payload.get('new_target', '-')}"),
+            ]
+        )
+        mirrored = payload.get("mirrored_origin_ids")
+        if isinstance(mirrored, list):
+            lines.append(_line("影响切换组", f"{len(mirrored)} 个"))
     elif event_type == "dns.publish_failed":
         lines.extend([_line("主机名", payload.get("hostname")), _line("错误", payload.get("error"))])
     elif event_type.startswith("cloudflare."):

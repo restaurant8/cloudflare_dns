@@ -7,6 +7,9 @@ from ..integrations import (
     azpanel_settings,
     change_resource_ip,
     list_azpanel_remote_resources,
+    refresh_legacy_origin_mirror,
+    resource_bound_global_origins,
+    resource_bound_origins,
     sync_resource_current_ip_to_origin,
     sync_synexvm_resource_status,
     synexvm_settings,
@@ -15,7 +18,7 @@ from ..integrations import (
     update_xboard_settings,
     xboard_settings,
 )
-from ..models import AzPanelResource, IpChangeJob, Origin, User, XboardNodeBinding
+from ..models import AzPanelResource, FailoverGlobalOrigin, IpChangeJob, Origin, User, XboardNodeBinding
 from ..schemas import (
     AzPanelResourceCreate,
     AzPanelResourceOut,
@@ -47,11 +50,43 @@ def _normalize_text(value: str | None) -> str | None:
     return stripped or None
 
 
-def _ensure_origin(db: Session, origin_id: int | None) -> None:
+def _ensure_origin(db: Session, origin_id: int | None, *, reject_global_mirror: bool = False) -> Origin | None:
     if origin_id is None:
-        return
-    if db.get(Origin, origin_id) is None:
+        return None
+    origin = db.get(Origin, origin_id)
+    if origin is None:
         raise HTTPException(status_code=404, detail="origin not found")
+    if reject_global_mirror and origin.global_origin_id:
+        raise HTTPException(
+            status_code=400,
+            detail="这是业务分组的全局备用镜像，请把云资源绑定到全局备用，业务分组下所有域名都会跟着换 IP",
+        )
+    return origin
+
+
+def _bind_resource_to_origin(db: Session, resource: AzPanelResource, origin: Origin | None) -> None:
+    """Bind additively.
+
+    The binding used to live on AzPanelResource.origin_id, so pointing a resource at
+    a second backup silently unbound the first and left it stuck on a dead IP. It now
+    lives on the origin, and binding one never disturbs another.
+    """
+    if origin is None:
+        return
+    db.flush()
+    origin.azpanel_resource_id = resource.id
+    refresh_legacy_origin_mirror(db, resource)
+
+
+def _resource_out(db: Session, resource: AzPanelResource) -> AzPanelResourceOut:
+    """Return the compatibility field plus the complete one-to-many binding state."""
+    db.flush()
+    return AzPanelResourceOut.model_validate(resource).model_copy(
+        update={
+            "bound_origin_ids": [origin.id for origin in resource_bound_origins(db, resource)],
+            "bound_global_origin_ids": [origin.id for origin in resource_bound_global_origins(db, resource)],
+        }
+    )
 
 
 def _ensure_resource(db: Session, resource_id: int | None) -> None:
@@ -87,7 +122,8 @@ def save_synexvm_settings(payload: SynexVmSettingsUpdate, _: User = Depends(get_
 
 @router.get("/azpanel/resources", response_model=list[AzPanelResourceOut])
 def list_azpanel_resources(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(AzPanelResource).order_by(AzPanelResource.created_at.desc()).all()
+    resources = db.query(AzPanelResource).order_by(AzPanelResource.created_at.desc()).all()
+    return [_resource_out(db, resource) for resource in resources]
 
 
 @router.get("/azpanel/remote-resources", response_model=list[AzPanelRemoteResourceOut])
@@ -105,7 +141,7 @@ def list_remote_azpanel_resources(provider: str | None = None, _: User = Depends
 
 @router.post("/azpanel/resources", response_model=AzPanelResourceOut)
 def create_azpanel_resource(payload: AzPanelResourceCreate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    _ensure_origin(db, payload.origin_id)
+    bind_origin = _ensure_origin(db, payload.origin_id, reject_global_mirror=True)
     api_token = _normalize_text(payload.api_token)
     resource = AzPanelResource(
         name=payload.name.strip(),
@@ -117,7 +153,6 @@ def create_azpanel_resource(payload: AzPanelResourceCreate, _: User = Depends(ge
         ip_change_method=payload.ip_change_method,
         api_url=_normalize_text(payload.api_url),
         api_token=encrypt_secret(api_token) if api_token else None,
-        origin_id=payload.origin_id,
         current_ip=_normalize_text(payload.current_ip),
         port=payload.port,
         enabled=payload.enabled,
@@ -128,13 +163,14 @@ def create_azpanel_resource(payload: AzPanelResourceCreate, _: User = Depends(ge
         remark=_normalize_text(payload.remark),
     )
     db.add(resource)
+    _bind_resource_to_origin(db, resource, bind_origin)
     try:
         sync_resource_current_ip_to_origin(db, resource)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.commit()
     db.refresh(resource)
-    return resource
+    return _resource_out(db, resource)
 
 
 @router.patch("/azpanel/resources/{resource_id}", response_model=AzPanelResourceOut)
@@ -143,8 +179,16 @@ def update_azpanel_resource(resource_id: int, payload: AzPanelResourceUpdate, _:
     if resource is None:
         raise HTTPException(status_code=404, detail="azpanel resource not found")
     updates = payload.model_dump(exclude_unset=True)
+    bind_origin = None
+    unbind_all = False
     if "origin_id" in updates:
-        _ensure_origin(db, updates["origin_id"])
+        # origin_id is kept for API compatibility but is now an additive bind;
+        # null clears every backup bound to this resource.
+        requested_origin_id = updates.pop("origin_id")
+        if requested_origin_id is None:
+            unbind_all = True
+        else:
+            bind_origin = _ensure_origin(db, requested_origin_id, reject_global_mirror=True)
     # Token 留空表示不修改（和全局设置的行为一致）
     api_token = _normalize_text(updates.pop("api_token", None))
     if api_token:
@@ -157,13 +201,21 @@ def update_azpanel_resource(resource_id: int, payload: AzPanelResourceUpdate, _:
         setattr(resource, key, value)
     if resource.provider == "synexvm" and not str(resource.resource_id).strip().isdigit():
         raise HTTPException(status_code=400, detail="SynexVM 资源的服务 ID（service_id）必须是数字")
+    if unbind_all:
+        for bound in resource_bound_origins(db, resource):
+            bound.azpanel_resource_id = None
+        for bound_global in resource_bound_global_origins(db, resource):
+            bound_global.azpanel_resource_id = None
+        db.flush()
+        refresh_legacy_origin_mirror(db, resource)
+    _bind_resource_to_origin(db, resource, bind_origin)
     try:
         sync_resource_current_ip_to_origin(db, resource)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.commit()
     db.refresh(resource)
-    return resource
+    return _resource_out(db, resource)
 
 
 @router.delete("/azpanel/resources/{resource_id}", response_model=Message)
@@ -171,6 +223,15 @@ def delete_azpanel_resource(resource_id: int, _: User = Depends(get_current_user
     resource = db.get(AzPanelResource, resource_id)
     if resource is None:
         raise HTTPException(status_code=404, detail="azpanel resource not found")
+    # These columns intentionally have no foreign key so SQLite/MySQL upgrades can
+    # add them without rebuilding both sides. Clear them explicitly before delete.
+    db.query(Origin).filter(Origin.azpanel_resource_id == resource.id).update(
+        {Origin.azpanel_resource_id: None}, synchronize_session="fetch"
+    )
+    db.query(FailoverGlobalOrigin).filter(FailoverGlobalOrigin.azpanel_resource_id == resource.id).update(
+        {FailoverGlobalOrigin.azpanel_resource_id: None}, synchronize_session="fetch"
+    )
+    resource.origin_id = None
     db.delete(resource)
     db.commit()
     return Message(message="azpanel resource deleted")
@@ -193,7 +254,7 @@ def refresh_azpanel_resource_status(resource_id: int, _: User = Depends(get_curr
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     db.commit()
     db.refresh(resource)
-    return resource
+    return _resource_out(db, resource)
 
 
 @router.post("/azpanel/resources/{resource_id}/change-ip", response_model=IpChangeJobOut)
