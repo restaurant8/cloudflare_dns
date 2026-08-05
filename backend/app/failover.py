@@ -9,7 +9,7 @@ from .cloudflare import CloudflareClient, CloudflareError
 from .dns_utils import record_type_for_target_type
 from .events import add_event
 from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, PROBE_MODE_CHINA_ONLY, origin_probe_mode, run_local_checks
-from .integrations import trigger_ip_change_for_origin
+from .integrations import AutoIpChangeGuard, trigger_ip_change_for_origin
 from .models import DnsRecord, FailoverGroup, FailoverHostname, Origin, Zone
 from .notifier import send_webhooks
 from .origin_expansion import (
@@ -546,6 +546,10 @@ def evaluate_failover_groups(
     ``trigger_ip_changes=False`` suppresses the automatic azpanel/SynexVM IP
     rotation for blocked origins. Editing a target must not rotate a VPS IP as a
     side effect; the scheduler still does it on its own tick.
+
+    One shared ``AutoIpChangeGuard`` spans every selected group. This makes the
+    safety limit apply to the whole scheduler pass instead of resetting for each
+    hostname.
     """
     query = (
         db.query(FailoverGroup)
@@ -569,6 +573,7 @@ def evaluate_failover_groups(
     elif now.tzinfo is not None:
         now = now.astimezone(timezone.utc).replace(tzinfo=None)
     settings = get_runtime_settings(db)
+    auto_ip_change_guard = AutoIpChangeGuard()
     for group in groups:
         try:
             switched = _evaluate_single_group(
@@ -579,6 +584,7 @@ def evaluate_failover_groups(
                 consistency_check_interval_seconds,
                 check_dns_consistency=check_dns_consistency,
                 trigger_ip_changes=trigger_ip_changes,
+                auto_ip_change_guard=auto_ip_change_guard,
             )
         except Exception:
             # One broken group (bad credential, unexpected API shape…) must not stop
@@ -601,6 +607,7 @@ def _evaluate_single_group(
     consistency_check_interval_seconds: int,
     check_dns_consistency: bool = True,
     trigger_ip_changes: bool = True,
+    auto_ip_change_guard: AutoIpChangeGuard | None = None,
 ) -> bool:
     if _should_probe_group_before_switch(group):
         run_local_checks(db, group_id=group.id, include_all=False)
@@ -613,7 +620,9 @@ def _evaluate_single_group(
     # Only a GFW block is fixable by rotating the IP: a machine that is down stays
     # down on a new IP, so machine_down/unhealthy do NOT trigger a change. The one
     # exception is probe_mode=china_only, which has no foreign probes to tell the
-    # two apart and reports a suspected block as "unhealthy".
+    # two apart and reports a suspected block as "unhealthy". The shared guard
+    # deduplicates domains backed by one resource and caps a whole pass at one
+    # distinct cloud resource, protecting against probe-wide false positives.
     if trigger_ip_changes:
         for group_origin in group.origins:
             if not group_origin.enabled:
@@ -622,7 +631,12 @@ def _evaluate_single_group(
                 group_origin.status == "unhealthy" and origin_probe_mode(group_origin) == PROBE_MODE_CHINA_ONLY
             )
             if suspected_block:
-                trigger_ip_change_for_origin(db, group_origin, f"{group.hostname} origin {group_origin.target} is {group_origin.status}")
+                trigger_ip_change_for_origin(
+                    db,
+                    group_origin,
+                    f"{group.hostname} origin {group_origin.target} is {group_origin.status}",
+                    guard=auto_ip_change_guard,
+                )
 
     selection = _choose_group_origin(group, now)
     desired = selection.origin

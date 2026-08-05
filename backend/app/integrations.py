@@ -1,6 +1,7 @@
 import json
 import re
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -41,6 +42,21 @@ SYNEXVM_POLL_INTERVAL_SECONDS = 5
 SYNEXVM_MANUAL_CONFIRM_DELAY_SECONDS = 3
 
 IP_RE = re.compile(r"(?:(?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]{2,})")
+
+
+@dataclass
+class AutoIpChangeGuard:
+    """Bound automatic IP changes to one distinct resource per evaluation pass.
+
+    A probe or routing incident can mark many origins blocked at once. Without a
+    shared guard, the scheduler would rotate every matching cloud account in the
+    same pass. Repeated origins for the same resource are also ignored after its
+    first attempt; the resource cooldown remains the longer-term safeguard.
+    """
+
+    max_distinct_resources: int = 1
+    attempted_resource_ids: set[int] = field(default_factory=set)
+    reported_warning_keys: set[str] = field(default_factory=set)
 
 
 def get_setting(db: Session, key: str, default: str = "") -> str:
@@ -1108,7 +1124,46 @@ def auto_sync_synexvm_statuses(db: Session) -> int:
     return synced
 
 
-def trigger_ip_change_for_origin(db: Session, origin: Origin, reason: str) -> IpChangeJob | None:
+def _report_auto_ip_change_warning(
+    db: Session,
+    origin: Origin,
+    *,
+    event_type: str,
+    message: str,
+    error: str,
+    trigger_type: str,
+    guard: AutoIpChangeGuard | None,
+    warning_key: str,
+    resource: AzPanelResource | None = None,
+) -> None:
+    if guard is not None:
+        if warning_key in guard.reported_warning_keys:
+            return
+        guard.reported_warning_keys.add(warning_key)
+    payload = (
+        ip_change_event_payload(db, resource, old_ip=origin.target, trigger_type=trigger_type, error=error)
+        if resource is not None
+        else {
+            "resource_id": None,
+            "resource_name": "多个同 IP 云资源",
+            "old_ip": origin.target,
+            "new_ip": None,
+            "trigger_type": trigger_type,
+            "targets": [_origin_notification_summary(origin)],
+            "error": error,
+        }
+    )
+    add_event(db, event_type, "warning", message, payload)
+    send_webhooks(db, event_type, payload)
+
+
+def trigger_ip_change_for_origin(
+    db: Session,
+    origin: Origin,
+    reason: str,
+    *,
+    guard: AutoIpChangeGuard | None = None,
+) -> IpChangeJob | None:
     azpanel_enabled = azpanel_settings(db)["enabled"]
     synexvm_enabled = synexvm_settings(db)["enabled"]
     if not azpanel_enabled and not synexvm_enabled:
@@ -1170,10 +1225,63 @@ def trigger_ip_change_for_origin(db: Session, origin: Origin, reason: str) -> Ip
             .all()
         )
         candidates = [resource for resource in candidates if provider_enabled(resource)]
+        # IP-only matching exists for external-IP integrations whose forwarding
+        # port differs from the cloud resource's check port. It is only safe for a
+        # genuinely unassigned resource. A resource already bound elsewhere must
+        # never be rotated because an unrelated unbound origin happens to share its
+        # address.
+        candidates = [
+            resource
+            for resource in candidates
+            if resource.origin_id is None
+            and not resource_bound_origins(db, resource)
+            and not resource_bound_global_origins(db, resource)
+        ]
         # 优先端口也一致的资源；没有再退到只按 IP 匹配——源站可能是外部 IP
         # 的入口端口（例如 nyanpass 转发端口），和云资源的检查端口本来就不同，
         # 而公网 IP 已经足够定位到同一台机器。
-        resources = [resource for resource in candidates if resource.port == origin.port] or candidates
+        exact_port_candidates = [resource for resource in candidates if resource.port == origin.port]
+        resources = exact_port_candidates or candidates
+        if len(resources) > 1:
+            names = ", ".join(f"{resource.name} (#{resource.id})" for resource in resources[:5])
+            if len(resources) > 5:
+                names += f"，另有 {len(resources) - 5} 个"
+            error = f"IP {origin.target} 同时匹配 {len(resources)} 个未绑定云资源：{names}；为防止连锁换号，已拒绝自动选择，请显式绑定资源"
+            _report_auto_ip_change_warning(
+                db,
+                origin,
+                event_type="azpanel.ip_change_ambiguous",
+                message=f"{origin.group.hostname} 自动换 IP 已拦截：同 IP 匹配多个云资源",
+                error=error,
+                trigger_type="ambiguous_ip_match",
+                guard=guard,
+                warning_key=f"ambiguous:{origin.target}:{origin.port}",
+            )
+            return None
     if not resources:
         return None
-    return change_resource_ip(db, resources[0], trigger_type="auto_blocked", reason=reason)
+    resource = resources[0]
+    if guard is not None:
+        if resource.id in guard.attempted_resource_ids:
+            return None
+        if len(guard.attempted_resource_ids) >= max(guard.max_distinct_resources, 1):
+            error = (
+                f"本轮已经尝试资源 ID {sorted(guard.attempted_resource_ids)}，"
+                f"为防止探针异常导致批量换号，已拦截资源 {resource.name} (#{resource.id})；下轮会重新评估"
+            )
+            _report_auto_ip_change_warning(
+                db,
+                origin,
+                event_type="azpanel.ip_change_suppressed",
+                message=f"{resource.name} 自动换 IP 已被单轮熔断保护拦截",
+                error=error,
+                trigger_type="mass_change_guard",
+                guard=guard,
+                warning_key="mass-change-guard",
+                resource=resource,
+            )
+            return None
+    job = change_resource_ip(db, resource, trigger_type="auto_blocked", reason=reason)
+    if guard is not None and job is not None:
+        guard.attempted_resource_ids.add(resource.id)
+    return job
