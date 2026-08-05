@@ -6,7 +6,9 @@ from app.integrations import (
     azpanel_settings,
     call_synexvm_change_ip,
     change_resource_ip,
+    ip_change_event_payload,
     list_azpanel_remote_resources,
+    resource_bound_origins,
     sync_resource_current_ip_to_origin,
     sync_synexvm_resource_status,
     synexvm_settings,
@@ -14,7 +16,9 @@ from app.integrations import (
     update_azpanel_settings,
     update_synexvm_settings,
 )
-from app.models import AzPanelRemoteResource, AzPanelResource, CloudflareCredential, FailoverGroup, Origin, ProbeState, User, XboardNodeBinding, Zone
+from app.models import AzPanelRemoteResource, AzPanelResource, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, ProbeState, User, XboardNodeBinding, Zone
+from app.notifier import render_telegram_message
+from app.routes.integrations import delete_azpanel_resource, list_azpanel_resources
 from app.security import encrypt_secret
 
 
@@ -30,6 +34,23 @@ def make_user(db):
     db.commit()
     db.refresh(user)
     return user
+
+
+
+def bind_resource_to_origin(db, resource):
+    """Add a resource and bind it the way the app does — on the origin.
+
+    The binding used to live on AzPanelResource.origin_id; it moved onto the origin
+    so one machine can drive several backups. Tests still express intent with the
+    ``origin_id=`` kwarg, and this translates it.
+    """
+    db.add(resource)
+    db.flush()
+    if resource.origin_id:
+        origin = db.get(Origin, resource.origin_id)
+        if origin is not None:
+            origin.azpanel_resource_id = resource.id
+    return resource
 
 
 def make_origin(db):
@@ -137,7 +158,7 @@ def test_remote_resource_refresh_syncs_matching_bound_resource_and_origin(monkey
         port=31111,
         auto_update_origin=True,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
 
     class Response:
@@ -174,7 +195,7 @@ def test_change_resource_ip_updates_resource_and_xboard_binding_without_xboard_a
     make_user(db)
     update_azpanel_settings(db, {"enabled": True, "base_url": "https://az.example.com", "api_token": "secret-token"})
     resource = AzPanelResource(name="node-1", provider="azure", resource_id="vm-1", current_ip="192.0.2.10", port=22)
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.flush()
     node = XboardNodeBinding(name="x-node", xboard_node_id=7, azpanel_resource_id=resource.id)
     db.add(node)
@@ -207,7 +228,7 @@ def test_bound_resource_current_ip_syncs_to_origin():
         port=31111,
         auto_update_origin=True,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
 
     changed = sync_resource_current_ip_to_origin(db, resource)
@@ -232,7 +253,7 @@ def test_trigger_ip_change_for_origin_uses_bound_resource(monkeypatch):
         current_ip=origin.target,
         port=origin.port,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
     db.refresh(origin)
 
@@ -266,7 +287,7 @@ def test_trigger_ip_change_syncs_mismatched_resource_ip_before_changing(monkeypa
         port=31111,
         auto_update_origin=True,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.flush()
     db.add(ProbeState(origin_id=origin.id, source_key="local", status="unhealthy"))
     db.commit()
@@ -439,7 +460,7 @@ def test_call_synexvm_change_ip_never_trusts_immediate_ip(monkeypatch):
     resource = AzPanelResource(
         name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", current_ip="42.200.231.85", port=22
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
     db.refresh(resource)
 
@@ -487,7 +508,7 @@ def test_call_synexvm_change_ip_prefers_resource_override(monkeypatch):
         api_url="https://other-panel.example.com/api.php",
         api_token=encrypt_secret("per-service-tok"),
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
     db.refresh(resource)
 
@@ -531,7 +552,7 @@ def test_call_synexvm_change_ip_keeps_reported_ip_as_hint_only(monkeypatch):
         current_ip="209.9.202.194",
         port=22,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
 
     calls = []
@@ -567,7 +588,7 @@ def test_change_resource_ip_dispatches_synexvm_and_updates_origin(monkeypatch):
         current_ip="192.0.2.10",
         port=22,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
     db.refresh(resource)
 
@@ -599,7 +620,7 @@ def test_trigger_ip_change_uses_synexvm_resource_when_azpanel_disabled(monkeypat
         current_ip="192.0.2.10",
         port=22,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
     db.refresh(resource)
 
@@ -632,7 +653,7 @@ def test_trigger_ip_change_skips_synexvm_resource_when_disabled(monkeypatch):
         current_ip="192.0.2.10",
         port=22,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
 
     def fail_if_called(*args, **kwargs):
@@ -656,7 +677,7 @@ def test_trigger_ip_change_matches_resource_by_ip_when_port_differs(monkeypatch)
         current_ip="192.0.2.10",
         port=22,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
     db.refresh(resource)
 
@@ -726,7 +747,7 @@ def test_synexvm_change_ip_returns_pending_when_status_lags(monkeypatch):
     resource = AzPanelResource(
         name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", current_ip="42.200.231.85", port=22
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
     db.refresh(resource)
 
@@ -792,7 +813,7 @@ def test_synexvm_status_refresh_finishes_pending_job_with_actual_ip(monkeypatch)
         pending_change_at=dt.utcnow(),
         auto_update_origin=True,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.flush()
     job = IpChangeJob(
         trigger_type="manual",
@@ -822,6 +843,47 @@ def test_synexvm_status_refresh_finishes_pending_job_with_actual_ip(monkeypatch)
     assert origin.target == "42.200.177.61"
 
 
+def test_synexvm_manual_status_refresh_notifies_with_every_bound_domain(monkeypatch):
+    db = make_session()
+    first, second = make_origins_in_two_groups(db)
+    update_synexvm_settings(db, {"enabled": True, "api_token": "tok"})
+    resource = AzPanelResource(
+        name="syn-861",
+        provider="synexvm",
+        resource_id="861",
+        ip_version="ipv4",
+        current_ip="192.0.2.10",
+        port=22,
+        auto_update_origin=True,
+    )
+    db.add(resource)
+    db.flush()
+    first.azpanel_resource_id = resource.id
+    second.azpanel_resource_id = resource.id
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.integrations.httpx.get",
+        lambda *args, **kwargs: _synex_resp({"success": True, "vm": {"ipv4": "198.51.100.77"}}),
+    )
+    monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
+    events = []
+    monkeypatch.setattr(
+        "app.integrations.add_event",
+        lambda _db, event_type, _severity, _message, payload: events.append((event_type, payload)),
+    )
+    monkeypatch.setattr("app.integrations.send_webhooks", lambda *args, **kwargs: None)
+
+    sync_synexvm_resource_status(db, resource)
+
+    assert resource.current_ip == "198.51.100.77"
+    assert {first.target, second.target} == {"198.51.100.77"}
+    event_type, payload = events[-1]
+    assert event_type == "azpanel.ip_changed"
+    assert payload["trigger_type"] == "manual_status_refresh"
+    assert {target["hostname"] for target in payload["targets"]} == {"h0.example.com", "h1.example.com"}
+
+
 def test_reconcile_applies_new_ip_and_finishes_job(monkeypatch):
     from app.integrations import reconcile_pending_synexvm_changes
     from app.models import IpChangeJob
@@ -834,7 +896,7 @@ def test_reconcile_applies_new_ip_and_finishes_job(monkeypatch):
         name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", origin_id=origin.id,
         current_ip="192.0.2.10", port=22, pending_change_at=dt.utcnow(), auto_update_origin=True,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.flush()
     pending_job = IpChangeJob(
         trigger_type="auto_blocked", status="pending", provider="synexvm",
@@ -879,7 +941,7 @@ def test_reconcile_gives_up_after_budget(monkeypatch):
         name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4",
         current_ip="192.0.2.10", port=22, pending_change_at=dt.utcnow() - timedelta(seconds=200),
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
     db.refresh(resource)
 
@@ -906,7 +968,7 @@ def test_reconcile_discards_transient_ip_and_applies_stable_one(monkeypatch):
         name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", origin_id=origin.id,
         current_ip="192.0.2.10", port=22, pending_change_at=dt.utcnow(), auto_update_origin=True,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
     db.refresh(resource)
 
@@ -945,7 +1007,7 @@ def test_manual_status_refresh_rejects_unstable_ip(monkeypatch):
     resource = AzPanelResource(
         name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", current_ip="192.0.2.10", port=22
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
     db.refresh(resource)
 
@@ -973,7 +1035,7 @@ def test_auto_sync_synexvm_statuses_applies_ip_after_two_reads(monkeypatch):
         name="syn-861", provider="synexvm", resource_id="861", ip_version="ipv4", origin_id=origin.id,
         current_ip="192.0.2.10", port=22, status_sync_interval_seconds=30, auto_update_origin=True,
     )
-    db.add(resource)
+    bind_resource_to_origin(db, resource)
     db.commit()
     db.refresh(resource)
 
@@ -1022,3 +1084,239 @@ def test_auto_sync_skips_disabled_zero_interval_and_pending(monkeypatch):
     monkeypatch.setattr("app.integrations.httpx.get", fail_get)
 
     assert auto_sync_synexvm_statuses(db) == 0
+
+
+def make_origins_in_two_groups(db, count=2):
+    """One machine used as a backup by several domains — the reported topology."""
+    credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
+    db.add(credential)
+    db.flush()
+    zone = Zone(credential_id=credential.id, cf_zone_id="zone-1", name="example.com")
+    db.add(zone)
+    db.flush()
+    origins = []
+    for index in range(count):
+        group = FailoverGroup(zone_id=zone.id, hostname=f"h{index}.example.com")
+        db.add(group)
+        db.flush()
+        origin = Origin(group_id=group.id, target="192.0.2.10", target_type="ipv4", port=22, priority=1, status="blocked")
+        db.add(origin)
+        db.flush()
+        origins.append(origin)
+    db.commit()
+    return origins
+
+
+def test_one_resource_syncs_its_ip_to_every_bound_backup():
+    """The reported bug: binding a second backup left the first on the dead IP."""
+    db = make_session()
+    first, second = make_origins_in_two_groups(db)
+    resource = AzPanelResource(
+        name="aws-tokyo", provider="aws", resource_id="i-1", ip_version="ipv4", current_ip="198.51.100.7", port=22
+    )
+    db.add(resource)
+    db.flush()
+    first.azpanel_resource_id = resource.id
+    second.azpanel_resource_id = resource.id
+    first.group.current_origin_id = first.id
+    second.group.current_origin_id = second.id
+    db.commit()
+
+    assert sync_resource_current_ip_to_origin(db, resource) is True
+    db.commit()
+
+    for origin in (first, second):
+        db.refresh(origin)
+        assert origin.target == "198.51.100.7"
+        assert origin.status == "unknown"
+        # DNS still points at the previous target, so this group must not remain in
+        # the steady-state fast path where the consistency cache can skip a write.
+        assert origin.group.current_origin_id is None
+
+
+def test_one_resource_ip_change_republishes_every_domain_even_with_fresh_consistency_cache(monkeypatch):
+    """Regression for “several domains bind one resource, only one DNS record updates”."""
+    from datetime import datetime as dt
+
+    from app import failover as failover_module
+
+    db = make_session()
+    first, second = make_origins_in_two_groups(db)
+    resource = AzPanelResource(
+        name="aws-tokyo", provider="aws", resource_id="i-1", ip_version="ipv4", current_ip="192.0.2.10", port=22
+    )
+    db.add(resource)
+    db.flush()
+    now = dt.utcnow()
+    for origin in (first, second):
+        origin.azpanel_resource_id = resource.id
+        origin.status = "healthy"
+        origin.group.current_origin_id = origin.id
+        failover_module._consistency_checked_at[origin.group_id] = now
+    db.commit()
+
+    resource.current_ip = "198.51.100.22"
+    assert sync_resource_current_ip_to_origin(db, resource) is True
+    # Simulate the next probe pass accepting the new address.
+    for origin in (first, second):
+        origin.status = "healthy"
+
+    published = []
+
+    def fake_publish(_db, group, origin):
+        published.append((group.hostname, origin.target))
+        return {"id": f"record-{group.id}", "type": "A", "content": origin.target, "hostnames": [group.hostname]}
+
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.failover.publish_origin", fake_publish)
+    monkeypatch.setattr("app.failover.add_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
+
+    switches = failover_module.evaluate_failover_groups(
+        db,
+        group_ids=[first.group_id, second.group_id],
+        consistency_check_interval_seconds=300,
+        now=now,
+        trigger_ip_changes=False,
+    )
+
+    assert switches == 2
+    assert set(published) == {
+        ("h0.example.com", "198.51.100.22"),
+        ("h1.example.com", "198.51.100.22"),
+    }
+
+
+def test_binding_a_second_backup_does_not_unbind_the_first():
+    db = make_session()
+    first, second = make_origins_in_two_groups(db)
+    resource = AzPanelResource(
+        name="aws-tokyo", provider="aws", resource_id="i-1", ip_version="ipv4", current_ip="198.51.100.7", port=22
+    )
+    db.add(resource)
+    db.flush()
+    first.azpanel_resource_id = resource.id
+    db.commit()
+
+    second.azpanel_resource_id = resource.id
+    db.commit()
+
+    bound = {origin.id for origin in resource_bound_origins(db, resource)}
+    assert bound == {first.id, second.id}
+
+
+def test_resource_bound_to_a_global_backup_reaches_every_mirrored_origin():
+    from app.models import FailoverCollection, FailoverGlobalOrigin
+
+    db = make_session()
+    credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
+    db.add(credential)
+    db.flush()
+    zone = Zone(credential_id=credential.id, cf_zone_id="zone-1", name="example.com")
+    db.add(zone)
+    db.flush()
+    collection = FailoverCollection(name="出海业务")
+    db.add(collection)
+    db.flush()
+    resource = AzPanelResource(
+        name="aws-tokyo", provider="aws", resource_id="i-1", ip_version="ipv4", current_ip="198.51.100.7", port=22
+    )
+    db.add(resource)
+    db.flush()
+    global_origin = FailoverGlobalOrigin(
+        collection_id=collection.id, target="192.0.2.10", target_type="ipv4", port=22, priority=10,
+        azpanel_resource_id=resource.id,
+    )
+    db.add(global_origin)
+    db.flush()
+    mirrors = []
+    for index in range(4):
+        group = FailoverGroup(zone_id=zone.id, hostname=f"h{index}.example.com", collection_id=collection.id)
+        db.add(group)
+        db.flush()
+        mirror = Origin(
+            group_id=group.id, global_origin_id=global_origin.id, target="192.0.2.10",
+            target_type="ipv4", port=22, priority=10, status="healthy",
+        )
+        db.add(mirror)
+        mirrors.append(mirror)
+    db.commit()
+
+    assert sync_resource_current_ip_to_origin(db, resource) is True
+    db.commit()
+
+    # One binding covers every domain in the collection.
+    db.refresh(global_origin)
+    assert global_origin.target == "198.51.100.7"
+    for mirror in mirrors:
+        db.refresh(mirror)
+        assert mirror.target == "198.51.100.7"
+
+
+def test_ip_change_event_payload_names_the_resource_and_every_affected_backup():
+    db = make_session()
+    first, second = make_origins_in_two_groups(db)
+    first.remark = "台北 tw01"
+    resource = AzPanelResource(
+        name="aws-tokyo", provider="aws", resource_id="i-1", ip_version="ipv4", current_ip="198.51.100.7", port=22
+    )
+    db.add(resource)
+    db.flush()
+    first.azpanel_resource_id = resource.id
+    second.azpanel_resource_id = resource.id
+    db.commit()
+
+    payload = ip_change_event_payload(db, resource, old_ip="192.0.2.10", new_ip="198.51.100.7", trigger_type="auto_blocked")
+
+    assert payload["resource_name"] == "aws-tokyo"
+    assert {target["hostname"] for target in payload["targets"]} == {"h0.example.com", "h1.example.com"}
+    assert "台北 tw01" in {target["remark"] for target in payload["targets"]}
+
+    text = render_telegram_message("azpanel.ip_changed", payload)
+    assert "aws-tokyo" in text
+    assert "h0.example.com" in text
+    assert "h1.example.com" in text
+    assert "台北 tw01" in text
+    # The old generic renderer printed bare ids and nothing else.
+    assert "origin_id" not in text
+
+
+def test_resource_output_lists_all_bindings_and_delete_clears_them():
+    db = make_session()
+    user = make_user(db)
+    direct, mirror = make_origins_in_two_groups(db)
+    collection = FailoverCollection(name="出海业务")
+    resource = AzPanelResource(
+        name="aws-tokyo", provider="aws", resource_id="i-1", ip_version="ipv4", current_ip="198.51.100.7", port=22
+    )
+    db.add_all([collection, resource])
+    db.flush()
+    global_origin = FailoverGlobalOrigin(
+        collection_id=collection.id,
+        target="198.51.100.7",
+        target_type="ipv4",
+        port=22,
+        priority=10,
+        azpanel_resource_id=resource.id,
+    )
+    db.add(global_origin)
+    db.flush()
+    direct.azpanel_resource_id = resource.id
+    mirror.global_origin_id = global_origin.id
+    mirror.azpanel_resource_id = resource.id
+    resource.origin_id = direct.id
+    db.commit()
+
+    output = list_azpanel_resources(user, db)[0]
+    assert set(output.bound_origin_ids) == {direct.id, mirror.id}
+    assert output.bound_global_origin_ids == [global_origin.id]
+
+    delete_azpanel_resource(resource.id, user, db)
+
+    db.refresh(direct)
+    db.refresh(mirror)
+    db.refresh(global_origin)
+    assert db.get(AzPanelResource, resource.id) is None
+    assert direct.azpanel_resource_id is None
+    assert mirror.azpanel_resource_id is None
+    assert global_origin.azpanel_resource_id is None

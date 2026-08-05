@@ -1045,3 +1045,108 @@ def test_validate_group_hostname_records_rejects_cname_conflict():
         assert "多个 A/AAAA/CNAME" in str(exc)
     else:
         raise AssertionError("Expected conflict")
+
+
+def setup_two_groups(db):
+    """Two independent enabled groups on one zone, both in published steady state."""
+    credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
+    db.add(credential)
+    db.flush()
+    zone = Zone(credential_id=credential.id, cf_zone_id="zone-1", name="example.com")
+    db.add(zone)
+    db.flush()
+    made = []
+    for index, hostname in enumerate(("a.example.com", "b.example.com"), start=1):
+        group = FailoverGroup(zone_id=zone.id, hostname=hostname, ttl=60, current_record_id=f"record-{index}")
+        db.add(group)
+        db.flush()
+        origin_model = Origin(
+            group_id=group.id,
+            target=f"192.0.2.{index}",
+            target_type="ipv4",
+            port=443,
+            status="healthy",
+            priority=10,
+        )
+        db.add(origin_model)
+        db.flush()
+        group.current_origin_id = origin_model.id
+        made.append((group, origin_model))
+    db.commit()
+    return made
+
+
+def test_evaluate_failover_groups_scoped_to_group_ids_ignores_other_groups(monkeypatch):
+    db = make_session()
+    (first_group, _first_origin), (second_group, second_origin) = setup_two_groups(db)
+    checked = []
+    monkeypatch.setattr("app.failover.current_dns_matches_origin", lambda _db, group, _origin: checked.append(group.id) or True)
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+
+    evaluate_failover_groups(db, group_ids=[second_group.id])
+
+    assert checked == [second_group.id]
+    assert first_group.id not in checked
+    assert second_group.current_origin_id == second_origin.id
+
+
+def test_evaluate_failover_groups_with_empty_group_ids_is_a_noop(monkeypatch):
+    db = make_session()
+    setup_two_groups(db)
+    checked = []
+    monkeypatch.setattr("app.failover.current_dns_matches_origin", lambda _db, group, _origin: checked.append(group.id) or True)
+
+    assert evaluate_failover_groups(db, group_ids=[]) == 0
+    assert checked == []
+
+
+def test_evaluate_failover_groups_skips_drift_check_when_disabled(monkeypatch):
+    db = make_session()
+    setup_two_groups(db)
+    checked = []
+    monkeypatch.setattr("app.failover.current_dns_matches_origin", lambda _db, group, _origin: checked.append(group.id) or True)
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+
+    # A settled group costs zero Cloudflare calls, which is the whole point of the
+    # API path opting out — drift repair stays with the scheduler.
+    assert evaluate_failover_groups(db, check_dns_consistency=False) == 0
+    assert checked == []
+
+
+def test_evaluate_failover_groups_still_publishes_when_current_origin_is_gone(monkeypatch):
+    """Deleting the published origin must republish immediately, drift check or not."""
+    db = make_session()
+    (group, origin_model), _second = setup_two_groups(db)
+    backup = Origin(group_id=group.id, target="192.0.2.90", target_type="ipv4", port=443, status="healthy", priority=20)
+    db.add(backup)
+    db.delete(origin_model)
+    group.current_origin_id = None
+    db.commit()
+    events = capture_dns_switches(monkeypatch)
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.failover.current_dns_matches_origin", lambda *args, **kwargs: True)
+
+    switches = evaluate_failover_groups(db, group_ids=[group.id], check_dns_consistency=False, trigger_ip_changes=False)
+
+    assert switches == 1
+    assert group.current_origin_id == backup.id
+    assert events[-1]["content"] == "192.0.2.90"
+
+
+def test_evaluate_failover_groups_skips_ip_change_when_disabled(monkeypatch):
+    db = make_session()
+    (group, origin_model), _second = setup_two_groups(db)
+    origin_model.status = "blocked"
+    db.commit()
+    triggered = []
+    monkeypatch.setattr("app.failover.trigger_ip_change_for_origin", lambda _db, origin_arg, _reason: triggered.append(origin_arg.id))
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.failover.current_dns_matches_origin", lambda *args, **kwargs: True)
+    capture_dns_switches(monkeypatch)
+
+    evaluate_failover_groups(db, group_ids=[group.id], check_dns_consistency=False, trigger_ip_changes=False)
+    assert triggered == []
+
+    # The scheduler still rotates the IP on its own tick.
+    evaluate_failover_groups(db, group_ids=[group.id])
+    assert triggered == [origin_model.id]

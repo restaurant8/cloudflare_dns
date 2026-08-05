@@ -414,3 +414,25 @@
   border-radius: 8px;
   padding: 10px 12px;
 }
+
+/* The inherited-backups summary is a full-width disclosure row, not a button —
+ * drop the shared button chrome so it reads as part of the card. */
+.legacy-ui .inheritedSummary {
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow: none;
+  border-radius: 0;
+  font-weight: 500;
+}
+.legacy-ui button.inheritedSummary:not(:disabled):hover {
+  background: var(--muted);
+  color: var(--foreground);
+  opacity: 1;
+}
+.legacy-ui .inheritedSummary:not(:disabled):active,
+.legacy-ui .inheritedSummary.buttonClicked:not(:disabled) {
+  transform: none;
+}
+.legacy-ui .inheritedSummary svg {
+  color: var(--muted-foreground);
+}

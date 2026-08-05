@@ -2443,3 +2443,151 @@ form.panel {
 }
 
 }
+
+/* Inherited global backups: one summary row per group, expanding into a compact
+   read-only table. Ten domains inheriting ten machines would otherwise render a
+   hundred full-height origin cards. */
+.inheritedOrigins {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 0 16px 8px;
+  overflow: hidden;
+}
+
+.inheritedSummary {
+  align-items: center;
+  background: var(--card);
+  border: none;
+  border-radius: 0;
+  color: var(--foreground);
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-start;
+  padding: 9px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.inheritedSummary:hover {
+  background: var(--muted);
+}
+
+.inheritedSummaryText {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.inheritedSummaryText strong {
+  font-size: 13px;
+}
+
+.inheritedCounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inheritedCount {
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 7px;
+  white-space: nowrap;
+}
+
+.inheritedCount.healthy {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.inheritedCount.unhealthy {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.inheritedCount.disabled {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.inheritedSummaryHint {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.inheritedTableScroll {
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.inheritedTable {
+  border-collapse: collapse;
+  font-size: 12px;
+  min-width: 100%;
+  width: 100%;
+}
+
+.inheritedTable th,
+.inheritedTable td {
+  padding: 7px 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.inheritedTable th {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.inheritedTable tbody tr {
+  border-top: 1px solid var(--border);
+}
+
+.inheritedTable tbody tr.inheritedCurrent {
+  background: var(--secondary);
+}
+
+.inheritedMachine {
+  font-weight: 700;
+  margin-right: 6px;
+}
+
+.inheritedTarget {
+  color: var(--muted-foreground);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.inheritedChecked {
+  color: var(--muted-foreground);
+}
+
+.inheritedHint {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  margin: 0;
+  padding: 6px 12px 8px;
+}
+
+@media (max-width: 720px) {
+  .inheritedOrigins {
+    margin: 0 10px 8px;
+  }
+
+  .inheritedSummaryHint {
+    display: none;
+  }
+}
+
+.modalHint {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  margin: -4px 0 0;
+}

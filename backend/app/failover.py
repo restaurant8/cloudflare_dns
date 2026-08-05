@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -523,15 +524,30 @@ def evaluate_failover_groups(
     commit_per_group: bool = False,
     consistency_check_interval_seconds: int = 0,
     now: datetime | None = None,
+    group_ids: Collection[int] | None = None,
+    check_dns_consistency: bool = True,
+    trigger_ip_changes: bool = True,
 ) -> int:
-    """Evaluate all enabled groups and publish DNS changes where needed.
+    """Evaluate enabled groups and publish DNS changes where needed.
 
     ``commit_per_group`` commits after each group so external side effects
     (Cloudflare writes, azpanel IP changes) stay recorded even if a later group
     fails — used by the scheduler. ``consistency_check_interval_seconds`` throttles
     the steady-state Cloudflare drift check (0 = check every call).
+
+    ``group_ids`` limits evaluation to those groups. API handlers editing one
+    group (or one collection) pass it so a local edit never probes, rotates IPs
+    for, or writes DNS for unrelated groups.
+
+    ``check_dns_consistency=False`` skips the steady-state Cloudflare drift check
+    entirely — an already-published group that needs no switch then costs zero
+    API calls. Drift repair stays the scheduler's job.
+
+    ``trigger_ip_changes=False`` suppresses the automatic azpanel/SynexVM IP
+    rotation for blocked origins. Editing a target must not rotate a VPS IP as a
+    side effect; the scheduler still does it on its own tick.
     """
-    groups = (
+    query = (
         db.query(FailoverGroup)
         .options(
             selectinload(FailoverGroup.origins),
@@ -540,8 +556,13 @@ def evaluate_failover_groups(
             selectinload(FailoverGroup.time_rule),
         )
         .filter(FailoverGroup.enabled.is_(True))
-        .all()
     )
+    if group_ids is not None:
+        wanted = {int(value) for value in group_ids}
+        if not wanted:
+            return 0
+        query = query.filter(FailoverGroup.id.in_(wanted))
+    groups = query.all()
     switches = 0
     if now is None:
         now = datetime.utcnow()
@@ -550,7 +571,15 @@ def evaluate_failover_groups(
     settings = get_runtime_settings(db)
     for group in groups:
         try:
-            switched = _evaluate_single_group(db, group, now, settings, consistency_check_interval_seconds)
+            switched = _evaluate_single_group(
+                db,
+                group,
+                now,
+                settings,
+                consistency_check_interval_seconds,
+                check_dns_consistency=check_dns_consistency,
+                trigger_ip_changes=trigger_ip_changes,
+            )
         except Exception:
             # One broken group (bad credential, unexpected API shape…) must not stop
             # failover for every other group in this tick.
@@ -570,6 +599,8 @@ def _evaluate_single_group(
     now: datetime,
     settings,
     consistency_check_interval_seconds: int,
+    check_dns_consistency: bool = True,
+    trigger_ip_changes: bool = True,
 ) -> bool:
     if _should_probe_group_before_switch(group):
         run_local_checks(db, group_id=group.id, include_all=False)
@@ -583,14 +614,15 @@ def _evaluate_single_group(
     # down on a new IP, so machine_down/unhealthy do NOT trigger a change. The one
     # exception is probe_mode=china_only, which has no foreign probes to tell the
     # two apart and reports a suspected block as "unhealthy".
-    for group_origin in group.origins:
-        if not group_origin.enabled:
-            continue
-        suspected_block = group_origin.status == "blocked" or (
-            group_origin.status == "unhealthy" and origin_probe_mode(group_origin) == PROBE_MODE_CHINA_ONLY
-        )
-        if suspected_block:
-            trigger_ip_change_for_origin(db, group_origin, f"{group.hostname} origin {group_origin.target} is {group_origin.status}")
+    if trigger_ip_changes:
+        for group_origin in group.origins:
+            if not group_origin.enabled:
+                continue
+            suspected_block = group_origin.status == "blocked" or (
+                group_origin.status == "unhealthy" and origin_probe_mode(group_origin) == PROBE_MODE_CHINA_ONLY
+            )
+            if suspected_block:
+                trigger_ip_change_for_origin(db, group_origin, f"{group.hostname} origin {group_origin.target} is {group_origin.status}")
 
     selection = _choose_group_origin(group, now)
     desired = selection.origin
@@ -609,6 +641,11 @@ def _evaluate_single_group(
     if group.last_error in RECOVERABLE_GROUP_ERRORS:
         group.last_error = None
     if desired.id == group.current_origin_id and not group.last_error:
+        # Nothing to switch. Verifying that Cloudflare still matches costs one API
+        # call per hostname, so API handlers editing an unrelated origin opt out and
+        # return here for free; the scheduler keeps repairing drift on its own tick.
+        if not check_dns_consistency:
+            return False
         desired_expanded_ip = selected_publish_ip(desired)
         expanded_metadata_mismatch = is_expanded_origin(desired) and published_ips(desired) != ([desired_expanded_ip] if desired_expanded_ip else [])
         checked_at = _consistency_checked_at.get(group.id)

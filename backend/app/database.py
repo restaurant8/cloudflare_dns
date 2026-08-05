@@ -1,10 +1,13 @@
+import logging
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import get_settings
 
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -41,12 +44,33 @@ def _migrate_existing_schema() -> None:
             for column_name, statement in _origin_migration_statements(dialect).items():
                 if column_name not in existing:
                     connection.execute(text(statement))
+            if "azpanel_resource_id" not in existing and "azpanel_resources" in table_names:
+                # The binding moved from azpanel_resources.origin_id onto the origin, so
+                # that one resource can drive many backups. Carry existing bindings over
+                # once, gated on the column having just been added so it cannot re-fire.
+                # MIN(id) reproduces the pre-upgrade winner (the old code sorted resources
+                # by id and acted on the first), so nothing changes hands on upgrade.
+                connection.execute(
+                    text(
+                        """
+                        UPDATE origins
+                        SET azpanel_resource_id = (
+                            SELECT MIN(r.id) FROM azpanel_resources r WHERE r.origin_id = origins.id
+                        )
+                        WHERE EXISTS (
+                            SELECT 1 FROM azpanel_resources r WHERE r.origin_id = origins.id
+                        )
+                        """
+                    )
+                )
 
         if "failover_global_origins" in table_names:
             existing = {column["name"] for column in inspector.get_columns("failover_global_origins")}
             for column_name, statement in _global_origin_migration_statements(dialect).items():
                 if column_name not in existing:
                     connection.execute(text(statement))
+            # Constraint changes need their own transactions (see below), so they run
+            # after this block rather than inline with the column additions.
 
         if "target_pool_items" in table_names:
             existing = {column["name"] for column in inspector.get_columns("target_pool_items")}
@@ -124,6 +148,41 @@ def _migrate_existing_schema() -> None:
             if "last_status_sync_at" not in existing:
                 connection.execute(text(f"ALTER TABLE azpanel_resources ADD COLUMN last_status_sync_at {timestamp_type} NULL"))
 
+    if "failover_global_origins" in table_names:
+        _migrate_global_origin_constraints(dialect)
+
+
+def _global_origin_constraint_names() -> set[str]:
+    inspector = inspect(engine)
+    names = {index["name"] for index in inspector.get_indexes("failover_global_origins")}
+    return names | {unique["name"] for unique in inspector.get_unique_constraints("failover_global_origins")}
+
+
+def _migrate_global_origin_constraints(dialect: str) -> None:
+    """Swap the target-based uniqueness for the machine-based one.
+
+    Each step gets its own transaction: the SQLite path rebuilds the table, and a
+    failure part-way through must roll back on its own without poisoning the rest
+    of the migration.
+    """
+    if _LEGACY_GLOBAL_ORIGIN_UNIQUE in _global_origin_constraint_names():
+        try:
+            with engine.begin() as connection:
+                _drop_legacy_global_origin_unique(connection, dialect)
+        except Exception:
+            # Keeping the old constraint only degrades a rare edge case (two machines
+            # briefly sharing an address). A database that refuses to start is worse.
+            logger.exception("could not drop the legacy global-origin unique constraint; keeping the old schema")
+
+    if "uq_failover_global_origin_machine" not in _global_origin_constraint_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX uq_failover_global_origin_machine "
+                    "ON failover_global_origins (collection_id, external_source_id, external_machine_key, port)"
+                )
+            )
+
 
 def _origin_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":
@@ -139,6 +198,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
             "expanded_ip_priorities_json": "ALTER TABLE origins ADD COLUMN expanded_ip_priorities_json TEXT NULL",
             "external_source_id": "ALTER TABLE origins ADD COLUMN external_source_id INT NULL",
             "external_machine_key": "ALTER TABLE origins ADD COLUMN external_machine_key VARCHAR(255) NULL",
+            "azpanel_resource_id": "ALTER TABLE origins ADD COLUMN azpanel_resource_id INT NULL",
             "ignore_health_check": "ALTER TABLE origins ADD COLUMN ignore_health_check TINYINT(1) NOT NULL DEFAULT 0",
         }
     return {
@@ -153,6 +213,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
         "expanded_ip_priorities_json": "ALTER TABLE origins ADD COLUMN expanded_ip_priorities_json TEXT NOT NULL DEFAULT '{}'",
         "external_source_id": "ALTER TABLE origins ADD COLUMN external_source_id INTEGER",
         "external_machine_key": "ALTER TABLE origins ADD COLUMN external_machine_key VARCHAR(255)",
+        "azpanel_resource_id": "ALTER TABLE origins ADD COLUMN azpanel_resource_id INTEGER",
         "ignore_health_check": "ALTER TABLE origins ADD COLUMN ignore_health_check BOOLEAN NOT NULL DEFAULT FALSE",
     }
 
@@ -165,6 +226,49 @@ def _agent_default_migration_statement(dialect: str) -> str:
     return "ALTER TABLE agents ADD COLUMN is_default BOOLEAN NOT NULL DEFAULT 0"
 
 
+_LEGACY_GLOBAL_ORIGIN_UNIQUE = "uq_failover_global_origin_target_port"
+
+
+def _drop_legacy_global_origin_unique(connection, dialect: str) -> None:
+    """Drop the old (collection_id, target, port) uniqueness on global backups.
+
+    Machine-bound backups follow their machine's current IP, so two of them may
+    hold the same address for a sync cycle — most often when a provider recycles
+    an IP between machines. The old constraint turns that into an IntegrityError
+    mid-sync. SQLite cannot drop a table-level constraint, so it needs the usual
+    create/copy/swap; the other dialects drop it in place.
+    """
+    from .models import FailoverGlobalOrigin
+
+    if dialect == "mysql":
+        connection.execute(text(f"ALTER TABLE failover_global_origins DROP INDEX {_LEGACY_GLOBAL_ORIGIN_UNIQUE}"))
+        return
+    if dialect == "postgresql":
+        connection.execute(text(f"ALTER TABLE failover_global_origins DROP CONSTRAINT IF EXISTS {_LEGACY_GLOBAL_ORIGIN_UNIQUE}"))
+        return
+
+    # SQLite: rebuild the table from the current model definition. The rebuilt table
+    # carries the machine constraint, so its name must be free before we start.
+    connection.execute(text("DROP INDEX IF EXISTS uq_failover_global_origin_machine"))
+    source_table = FailoverGlobalOrigin.__table__
+    rebuild_metadata = MetaData()
+    # to_metadata resolves foreign keys by table name inside the target metadata, so
+    # the referenced tables have to be copied across first. Only the rebuilt table is
+    # ever created — the copies exist purely to satisfy that lookup.
+    for foreign_key in source_table.foreign_keys:
+        referenced = foreign_key.column.table
+        if referenced.name not in rebuild_metadata.tables:
+            referenced.to_metadata(rebuild_metadata)
+    rebuilt = source_table.to_metadata(rebuild_metadata, name="failover_global_origins_rebuild")
+    rebuilt.create(bind=connection)
+    columns = ", ".join(column.name for column in FailoverGlobalOrigin.__table__.columns)
+    connection.execute(
+        text(f"INSERT INTO failover_global_origins_rebuild ({columns}) SELECT {columns} FROM failover_global_origins")
+    )
+    connection.execute(text("DROP TABLE failover_global_origins"))
+    connection.execute(text("ALTER TABLE failover_global_origins_rebuild RENAME TO failover_global_origins"))
+
+
 def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":
         return {
@@ -172,12 +276,18 @@ def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
             "probe_mode": "ALTER TABLE failover_global_origins ADD COLUMN probe_mode VARCHAR(20) NOT NULL DEFAULT 'default'",
             "expanded_ip_priorities_json": "ALTER TABLE failover_global_origins ADD COLUMN expanded_ip_priorities_json TEXT NULL",
             "ignore_health_check": "ALTER TABLE failover_global_origins ADD COLUMN ignore_health_check TINYINT(1) NOT NULL DEFAULT 0",
+            "external_source_id": "ALTER TABLE failover_global_origins ADD COLUMN external_source_id INT NULL",
+            "external_machine_key": "ALTER TABLE failover_global_origins ADD COLUMN external_machine_key VARCHAR(255) NULL",
+            "azpanel_resource_id": "ALTER TABLE failover_global_origins ADD COLUMN azpanel_resource_id INT NULL",
         }
     return {
         "preferred_agent_id": "ALTER TABLE failover_global_origins ADD COLUMN preferred_agent_id INTEGER",
         "probe_mode": "ALTER TABLE failover_global_origins ADD COLUMN probe_mode VARCHAR(20) NOT NULL DEFAULT 'default'",
         "expanded_ip_priorities_json": "ALTER TABLE failover_global_origins ADD COLUMN expanded_ip_priorities_json TEXT NOT NULL DEFAULT '{}'",
         "ignore_health_check": "ALTER TABLE failover_global_origins ADD COLUMN ignore_health_check BOOLEAN NOT NULL DEFAULT FALSE",
+        "external_source_id": "ALTER TABLE failover_global_origins ADD COLUMN external_source_id INTEGER",
+        "external_machine_key": "ALTER TABLE failover_global_origins ADD COLUMN external_machine_key VARCHAR(255)",
+        "azpanel_resource_id": "ALTER TABLE failover_global_origins ADD COLUMN azpanel_resource_id INTEGER",
     }
 
 

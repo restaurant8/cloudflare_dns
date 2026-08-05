@@ -176,3 +176,126 @@ def test_mark_external_ip_sources_due_clears_last_synced(monkeypatch):
     assert mark_external_ip_sources_due(db) == 1
     assert enabled_source.last_synced_at is None
     assert disabled_source.last_synced_at is not None
+
+
+def make_collection_with_bound_global(db, source, machine_key="hk:node-a", target="8.8.8.8", group_count=3):
+    """A collection whose global backup is bound to a machine, mirrored into N groups."""
+    from app.models import CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, Zone
+
+    credential = CloudflareCredential(name="cf", token_encrypted=encrypt_secret("token"))
+    db.add(credential)
+    db.flush()
+    zone = Zone(credential_id=credential.id, cf_zone_id="zone-1", name="example.com")
+    db.add(zone)
+    db.flush()
+    collection = FailoverCollection(name="出海业务")
+    db.add(collection)
+    db.flush()
+    global_origin = FailoverGlobalOrigin(
+        collection_id=collection.id,
+        target=target,
+        target_type="ipv4",
+        port=443,
+        priority=10,
+        external_source_id=source.id,
+        external_machine_key=machine_key,
+    )
+    db.add(global_origin)
+    db.flush()
+    mirrors = []
+    for index in range(group_count):
+        group = FailoverGroup(zone_id=zone.id, hostname=f"h{index}.example.com", collection_id=collection.id)
+        db.add(group)
+        db.flush()
+        mirror = Origin(
+            group_id=group.id,
+            global_origin_id=global_origin.id,
+            target=target,
+            target_type="ipv4",
+            port=443,
+            priority=10,
+            status="healthy",
+            external_source_id=source.id,
+            external_machine_key=machine_key,
+        )
+        db.add(mirror)
+        mirrors.append(mirror)
+    db.commit()
+    return global_origin, mirrors
+
+
+def make_source(db):
+    source = ExternalIpSource(
+        name="nyanpass",
+        base_url="https://ny.example.com",
+        token_encrypted=encrypt_secret("token"),
+        default_port=443,
+        sync_interval_seconds=10,
+    )
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+    return source
+
+
+def test_sync_updates_machine_bound_global_origin_and_all_its_mirrors(monkeypatch):
+    db = make_session()
+    source = make_source(db)
+    global_origin, mirrors = make_collection_with_bound_global(db, source)
+
+    monkeypatch.setattr(
+        "app.external_ips.fetch_nyanpass_ips",
+        lambda item: [
+            ImportedExternalIp(name="node-a", group_name="hk", machine_key="hk:node-a", country=None, target="9.9.9.9", target_type="ipv4", port=443),
+        ],
+    )
+    sync_external_ip_source(db, source)
+    db.commit()
+
+    db.refresh(global_origin)
+    assert global_origin.target == "9.9.9.9"
+    # One machine, one global backup, N domains — no new backup row was needed.
+    for mirror in mirrors:
+        db.refresh(mirror)
+        assert mirror.target == "9.9.9.9"
+        assert mirror.status == "unknown"
+
+
+def test_sync_keeps_machine_bound_global_origin_when_machine_missing(monkeypatch):
+    db = make_session()
+    source = make_source(db)
+    global_origin, mirrors = make_collection_with_bound_global(db, source)
+
+    monkeypatch.setattr("app.external_ips.fetch_nyanpass_ips", lambda item: [])
+    sync_external_ip_source(db, source)
+    db.commit()
+
+    db.refresh(global_origin)
+    assert global_origin.target == "8.8.8.8"
+    assert global_origin.external_machine_key == "hk:node-a"
+    for mirror in mirrors:
+        db.refresh(mirror)
+        assert mirror.target == "8.8.8.8"
+        assert mirror.status == "healthy"
+
+
+def test_sync_emits_one_global_event_not_one_per_mirror(monkeypatch):
+    from app.models import Event
+
+    db = make_session()
+    source = make_source(db)
+    make_collection_with_bound_global(db, source, group_count=4)
+
+    monkeypatch.setattr(
+        "app.external_ips.fetch_nyanpass_ips",
+        lambda item: [
+            ImportedExternalIp(name="node-a", group_name="hk", machine_key="hk:node-a", country=None, target="9.9.9.9", target_type="ipv4", port=443),
+        ],
+    )
+    sync_external_ip_source(db, source)
+    db.commit()
+
+    events = db.query(Event).filter(Event.type == "external_ip.global_origin_synced").all()
+    assert len(events) == 1
+    # Mirrors are driven by the global backup, so they must not also be synced directly.
+    assert db.query(Event).filter(Event.type == "external_ip.origin_synced").count() == 0

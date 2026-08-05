@@ -138,7 +138,7 @@ def test_upsert_time_rule_creates_then_updates_single_group_rule(monkeypatch):
     db.add_all([first, second])
     db.commit()
     evaluate_calls = []
-    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda session: evaluate_calls.append(session))
+    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda session, **kwargs: evaluate_calls.append((session, kwargs)))
 
     created = upsert_time_rule(
         group.id,
@@ -193,6 +193,11 @@ def test_upsert_time_rule_creates_then_updates_single_group_rule(monkeypatch):
     assert output.time_rule.id == updated.id
     assert output.time_rule.last_active is True
     assert len(evaluate_calls) == 2
+    # A time-rule edit must only re-evaluate its own group, and must not spend
+    # Cloudflare calls on the drift check or rotate any IP as a side effect.
+    assert all(kwargs["group_ids"] == [group.id] for _session, kwargs in evaluate_calls)
+    assert all(kwargs["check_dns_consistency"] is False for _session, kwargs in evaluate_calls)
+    assert all(kwargs["trigger_ip_changes"] is False for _session, kwargs in evaluate_calls)
 
 
 @pytest.mark.parametrize(
@@ -228,7 +233,7 @@ def test_upsert_time_rule_rejects_origin_from_another_group(monkeypatch):
     foreign_origin = Origin(group_id=second_group.id, target="192.0.2.20", target_type="ipv4", port=443)
     db.add(foreign_origin)
     db.commit()
-    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda _db: None)
+    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda _db, **_kwargs: None)
 
     with pytest.raises(HTTPException) as exc_info:
         upsert_time_rule(
@@ -262,14 +267,14 @@ def test_delete_active_time_rule_clears_switch_cooldown_and_evaluates(monkeypatc
     )
     db.commit()
     evaluate_calls = []
-    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda session: evaluate_calls.append(session))
+    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda session, **kwargs: evaluate_calls.append((session, kwargs)))
 
     result = delete_time_rule(group.id, user, db)
 
     assert result.message == "时间规则已删除"
     assert db.query(FailoverTimeRule).count() == 0
     assert db.get(FailoverGroup, group.id).last_switch_at is None
-    assert evaluate_calls == [db]
+    assert evaluate_calls == [(db, {"group_ids": [group.id], "check_dns_consistency": False, "trigger_ip_changes": False})]
 
 
 def test_delete_origin_explicitly_removes_its_time_rule_and_re_evaluates_current(monkeypatch):
@@ -294,7 +299,7 @@ def test_delete_origin_explicitly_removes_its_time_rule_and_re_evaluates_current
     group.last_switch_at = datetime.utcnow()
     db.commit()
     evaluate_calls = []
-    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda session: evaluate_calls.append(session))
+    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda session, **kwargs: evaluate_calls.append((session, kwargs)))
 
     delete_origin(origin.id, user, db)
 
@@ -302,7 +307,7 @@ def test_delete_origin_explicitly_removes_its_time_rule_and_re_evaluates_current
     db.refresh(group)
     assert group.current_origin_id is None
     assert group.last_switch_at is None
-    assert evaluate_calls == [db]
+    assert evaluate_calls == [(db, {"group_ids": [group.id], "check_dns_consistency": False, "trigger_ip_changes": False})]
 
 
 def test_add_group_hostname_publishes_current_origin(monkeypatch):
@@ -937,3 +942,222 @@ def test_create_origin_rejects_unknown_remote_key():
         )
 
     assert exc_info.value.status_code == 404
+
+
+def make_external_machine(db, name="node-a", machine_key="hk:node-a", target="192.0.2.50", source=None):
+    from app.models import ExternalIpItem, ExternalIpSource
+
+    if source is None:
+        source = ExternalIpSource(
+            name="nyanpass",
+            base_url="https://ny.example.com",
+            token_encrypted=encrypt_secret("token"),
+            default_port=443,
+            sync_interval_seconds=10,
+        )
+        db.add(source)
+        db.flush()
+    item = ExternalIpItem(
+        source_id=source.id,
+        name=name,
+        machine_key=machine_key,
+        target=target,
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return source, item
+
+
+def test_create_global_origin_binds_external_machine_and_mirrors_the_binding():
+    db = make_session()
+    zone, user = setup_zone(db)
+    _source, item = make_external_machine(db)
+    collection = create_collection(FailoverCollectionCreate(name="出海业务"), user, db)
+    db.add_all([
+        FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="a.example.com"),
+        FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="b.example.com"),
+    ])
+    db.commit()
+
+    updated = create_global_origin(
+        collection.id,
+        FailoverGlobalOriginCreate(target=item.target, port=443, priority=10, external_ip_item_id=item.id),
+        user,
+        db,
+    )
+
+    global_origin = updated.global_origins[0]
+    assert global_origin.external_source_id == item.source_id
+    assert global_origin.external_machine_key == "hk:node-a"
+    mirrors = db.query(Origin).filter(Origin.global_origin_id == global_origin.id).all()
+    assert len(mirrors) == 2
+    assert all(mirror.external_machine_key == "hk:node-a" for mirror in mirrors)
+
+
+def test_global_origin_uniqueness_is_by_machine_not_by_current_ip():
+    """Two machines that momentarily report the same IP are still two backups."""
+    db = make_session()
+    _zone, user = setup_zone(db)
+    # Same address, different panels — external_ip_items is unique per (source, target, port),
+    # so this collision can only come from two sources, which is exactly the case
+    # that a target-based identity would wrongly merge.
+    _first_source, first = make_external_machine(db, name="node-a", machine_key="hk:node-a", target="192.0.2.50")
+    _second_source, second = make_external_machine(db, name="node-b", machine_key="hk:node-b", target="192.0.2.50")
+    collection = create_collection(FailoverCollectionCreate(name="出海业务"), user, db)
+
+    create_global_origin(
+        collection.id,
+        FailoverGlobalOriginCreate(target=first.target, port=443, external_ip_item_id=first.id),
+        user,
+        db,
+    )
+    updated = create_global_origin(
+        collection.id,
+        FailoverGlobalOriginCreate(target=second.target, port=443, external_ip_item_id=second.id),
+        user,
+        db,
+    )
+    assert len(updated.global_origins) == 2
+
+    # The same machine twice is one backup.
+    with pytest.raises(HTTPException) as exc_info:
+        create_global_origin(
+            collection.id,
+            FailoverGlobalOriginCreate(target=first.target, port=443, external_ip_item_id=first.id),
+            user,
+            db,
+        )
+    assert exc_info.value.status_code == 409
+
+
+def test_global_origin_machine_key_is_scoped_to_its_source():
+    """Same machine number from two panels must not be treated as one machine."""
+    db = make_session()
+    _zone, user = setup_zone(db)
+    _first_source, first = make_external_machine(db, name="a", machine_key="node-1", target="192.0.2.60")
+    _second_source, second = make_external_machine(db, name="b", machine_key="node-1", target="192.0.2.61")
+    assert first.source_id != second.source_id
+    collection = create_collection(FailoverCollectionCreate(name="出海业务"), user, db)
+
+    create_global_origin(collection.id, FailoverGlobalOriginCreate(target=first.target, port=443, external_ip_item_id=first.id), user, db)
+    updated = create_global_origin(collection.id, FailoverGlobalOriginCreate(target=second.target, port=443, external_ip_item_id=second.id), user, db)
+
+    assert len(updated.global_origins) == 2
+
+
+def test_update_global_origin_binding_adopts_the_machines_current_ip():
+    db = make_session()
+    zone, user = setup_zone(db)
+    _source, item = make_external_machine(db, target="192.0.2.77")
+    collection = create_collection(FailoverCollectionCreate(name="出海业务"), user, db)
+    db.add(FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="a.example.com"))
+    db.commit()
+    created = create_global_origin(collection.id, FailoverGlobalOriginCreate(target="192.0.2.20", port=443), user, db)
+    global_origin_id = created.global_origins[0].id
+
+    updated = update_global_origin(global_origin_id, FailoverGlobalOriginUpdate(external_ip_item_id=item.id), user, db)
+
+    assert updated.external_machine_key == "hk:node-a"
+    assert updated.target == "192.0.2.77"
+    mirror = db.query(Origin).filter(Origin.global_origin_id == global_origin_id).one()
+    assert mirror.target == "192.0.2.77"
+    assert mirror.external_machine_key == "hk:node-a"
+
+
+def test_global_origin_azpanel_binding_fans_out_and_can_be_rebound_or_unbound():
+    db = make_session()
+    zone, user = setup_zone(db)
+    collection = create_collection(FailoverCollectionCreate(name="出海业务"), user, db)
+    db.add_all(
+        [
+            FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="a.example.com"),
+            FailoverGroup(zone_id=zone.id, collection_id=collection.id, hostname="b.example.com"),
+        ]
+    )
+    first_resource = AzPanelResource(
+        name="aws-a", provider="aws", resource_id="i-a", current_ip="203.0.113.10", port=443, auto_update_origin=True
+    )
+    second_resource = AzPanelResource(
+        name="aws-b", provider="aws", resource_id="i-b", current_ip="203.0.113.20", port=8443, auto_update_origin=True
+    )
+    db.add_all([first_resource, second_resource])
+    db.commit()
+
+    created = create_global_origin(
+        collection.id,
+        FailoverGlobalOriginCreate(target="192.0.2.10", port=22, azpanel_resource_id=first_resource.id),
+        user,
+        db,
+    )
+    global_origin = created.global_origins[0]
+    mirrors = db.query(Origin).filter(Origin.global_origin_id == global_origin.id).order_by(Origin.id).all()
+
+    assert global_origin.target == "203.0.113.10"
+    assert global_origin.port == 443
+    assert global_origin.azpanel_resource_id == first_resource.id
+    assert len(mirrors) == 2
+    assert all(mirror.target == "203.0.113.10" and mirror.azpanel_resource_id == first_resource.id for mirror in mirrors)
+    db.refresh(first_resource)
+    assert first_resource.origin_id == mirrors[0].id
+
+    rebound = update_global_origin(
+        global_origin.id,
+        FailoverGlobalOriginUpdate(azpanel_resource_id=second_resource.id),
+        user,
+        db,
+    )
+    mirrors = db.query(Origin).filter(Origin.global_origin_id == global_origin.id).all()
+    assert rebound.target == "203.0.113.20"
+    assert rebound.port == 8443
+    assert all(mirror.target == "203.0.113.20" and mirror.azpanel_resource_id == second_resource.id for mirror in mirrors)
+    db.refresh(first_resource)
+    db.refresh(second_resource)
+    assert first_resource.origin_id is None
+    assert second_resource.origin_id in {mirror.id for mirror in mirrors}
+
+    unbound = update_global_origin(
+        global_origin.id,
+        FailoverGlobalOriginUpdate(azpanel_resource_id=None),
+        user,
+        db,
+    )
+    assert unbound.azpanel_resource_id is None
+    assert all(mirror.azpanel_resource_id is None for mirror in db.query(Origin).filter(Origin.global_origin_id == global_origin.id))
+    db.refresh(second_resource)
+    assert second_resource.origin_id is None
+
+
+def test_update_origin_adds_and_removes_azpanel_binding_without_touching_other_backups():
+    db = make_session()
+    zone, user = setup_zone(db)
+    first_group = FailoverGroup(zone_id=zone.id, hostname="a.example.com")
+    second_group = FailoverGroup(zone_id=zone.id, hostname="b.example.com")
+    db.add_all([first_group, second_group])
+    db.flush()
+    first = Origin(group_id=first_group.id, target="192.0.2.10", target_type="ipv4", port=22, priority=10)
+    second = Origin(group_id=second_group.id, target="192.0.2.11", target_type="ipv4", port=22, priority=20)
+    resource = AzPanelResource(
+        name="aws-a", provider="aws", resource_id="i-a", current_ip="203.0.113.10", port=443, auto_update_origin=True
+    )
+    db.add_all([first, second, resource])
+    db.commit()
+
+    first_updated = update_origin(first.id, OriginUpdate(azpanel_resource_id=resource.id), user, db)
+    second_updated = update_origin(second.id, OriginUpdate(azpanel_resource_id=resource.id), user, db)
+
+    assert first_updated.target == second_updated.target == "203.0.113.10"
+    assert first_updated.azpanel_resource_id == second_updated.azpanel_resource_id == resource.id
+    db.refresh(resource)
+    assert resource.origin_id == min(first.id, second.id)
+
+    update_origin(first.id, OriginUpdate(azpanel_resource_id=None), user, db)
+    db.refresh(first)
+    db.refresh(second)
+    db.refresh(resource)
+    assert first.azpanel_resource_id is None
+    assert second.azpanel_resource_id == resource.id
+    assert resource.origin_id == second.id
