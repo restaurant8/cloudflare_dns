@@ -57,6 +57,19 @@ curl -fsSL 'https://your-controller.example.com/api/agent/install.sh' -o /tmp/cl
 
 The agent only makes outbound HTTPS requests to the controller.
 View logs with `journalctl -u cloudflare-dns-agent -f`.
+It runs up to 16 TCP checks concurrently by default; pass `AGENT_MAX_WORKERS`
+to the installer to tune the limit between 1 and 64.
+Set `AGENT_LOG_ROUNDS=1` to log a summary for every completed probe round;
+by default only errors and rounds slower than their configured interval are logged.
+
+Controller-side checks, including expanded hostname IP pools, also run concurrently.
+Set `LOCAL_PROBE_MAX_WORKERS` between 1 and 64 to tune the controller limit
+(default: 16).
+
+Health-check values saved from the dashboard are stored in `app_settings` and
+override `.env` and code defaults. Existing deployments should change timeout and
+failure/recovery thresholds in **Settings → Health checks**; changing code defaults
+only affects deployments without saved or environment-provided values.
 
 ## Security notes
 

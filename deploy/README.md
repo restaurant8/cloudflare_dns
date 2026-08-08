@@ -22,6 +22,7 @@ CHECK_INTERVAL_SECONDS=30
 CHECK_TIMEOUT_SECONDS=3
 FAIL_THRESHOLD=3
 RECOVERY_THRESHOLD=2
+LOCAL_PROBE_MAX_WORKERS=16
 ```
 
 Generate a Fernet key:
@@ -53,6 +54,19 @@ curl -fsSL 'https://your-panel.example.com/api/agent/install.sh' -o /tmp/cloudfl
 ```
 
 It installs the agent under `/opt/cloudflare-dns-agent`, writes `/etc/cloudflare-dns-agent.env`, creates the `cloudflare-dns-agent` systemd service, and starts it automatically.
+
+The agent runs up to 16 TCP checks concurrently by default. Set `AGENT_MAX_WORKERS`
+when running the installer if the probe server needs a smaller or larger limit
+(the accepted range is 1–64).
+Set `AGENT_LOG_ROUNDS=1` to emit one summary line per probe round. It defaults to
+`0`, so routine failed targets do not generate a log line every interval.
+
+The controller runs local TCP checks concurrently too, including expanded hostname
+IP pools. `LOCAL_PROBE_MAX_WORKERS` controls that limit (default 16, maximum 64).
+
+Health-check settings saved in the dashboard override `.env` and application
+defaults. For an existing deployment, change these values in the dashboard rather
+than expecting a new code default to replace rows already stored in `app_settings`.
 
 Useful commands:
 

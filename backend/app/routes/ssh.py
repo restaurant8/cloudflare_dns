@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import cloudflare_access_allowed, get_current_user, require_cloudflare_access
 from ..models import AppSetting, User
+from ..runtime_settings import invalidate_runtime_settings_cache
 from ..schemas import Message, SshSessionOut, SshSettingsOut, SshSettingsUpdate
 from ..security import create_access_token, verify_access_token
 
@@ -48,6 +49,7 @@ def _set_setting_value(db: Session, key: str, value: str) -> None:
         db.add(AppSetting(key=key, value=value))
     else:
         row.value = value
+    invalidate_runtime_settings_cache(db, key)
 
 
 def _bool_setting(value: str) -> bool:

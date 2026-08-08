@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session, selectinload
 
+from .config import get_settings
 from .dns_utils import tcp_check
 from .events import add_event
 from .models import Agent, FailoverGroup, Origin, ProbeResult, ProbeState, TargetPoolItem, TargetPoolProbeState
@@ -33,6 +34,7 @@ PROBE_MODES = {PROBE_MODE_DEFAULT, PROBE_MODE_LOCAL_ONLY, PROBE_MODE_CHINA_ONLY,
 ORIGIN_AVAILABLE_STATUS = "healthy"
 ORIGIN_UNAVAILABLE_STATUSES = {"unhealthy", "blocked", "machine_down", "regional_issue"}
 FINAL_ORIGIN_STATUSES = {ORIGIN_AVAILABLE_STATUS, *ORIGIN_UNAVAILABLE_STATUSES}
+DnsCache = dict[str, list[str] | OSError]
 
 
 def origin_probe_mode(origin: Origin) -> str:
@@ -820,11 +822,28 @@ def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
         send_webhooks(db, "origin.status_changed", payload)
 
 
-def refresh_expanded_origin_ips(origin: Origin) -> list[str]:
+def refresh_expanded_origin_ips(
+    origin: Origin,
+    dns_cache: DnsCache | None = None,
+) -> list[str]:
     if origin.target_type != "hostname" or getattr(origin, "publish_mode", None) != EXPANDED_PUBLISH_MODE:
         return []
-    ips = resolve_hostname_ips(origin.target)
-    ips = sorted(set(ips + published_ips(origin)))
+    cache_key = _normalized_probe_target(origin.target)
+    if dns_cache is not None and cache_key in dns_cache:
+        cached = dns_cache[cache_key]
+        if isinstance(cached, OSError):
+            raise cached
+        resolved = cached
+    else:
+        try:
+            resolved = resolve_hostname_ips(origin.target)
+        except OSError as exc:
+            if dns_cache is not None:
+                dns_cache[cache_key] = exc
+            raise
+        if dns_cache is not None:
+            dns_cache[cache_key] = resolved
+    ips = sorted(set(resolved + published_ips(origin)))
     set_resolved_ips(origin, ips)
     return ips
 
@@ -835,6 +854,7 @@ def run_local_checks(
     origin_id: int | None = None,
     include_all: bool = False,
     check_cache: dict[tuple[str, int], object] | None = None,
+    dns_cache: DnsCache | None = None,
 ) -> int:
     settings = get_runtime_settings(db)
     query = (
@@ -857,6 +877,8 @@ def run_local_checks(
     checked = 0
     if check_cache is None:
         check_cache = {}
+    if dns_cache is None:
+        dns_cache = {}
 
     def check_once(target: str, port: int):
         nonlocal checked
@@ -870,21 +892,40 @@ def run_local_checks(
         if origin.id in global_origin_ids:
             sync_probe_states_from_origin(db, origin, origins_to_check)
 
-    # Pre-probe every direct (non-expanded) target concurrently so the sequential
-    # evaluation below never blocks on TCP I/O. These results are keyed by
-    # (target, port) exactly like check_once, so the loop reuses them verbatim and
-    # the outcome — probe results, `checked` count, and apply_probe_result order —
-    # is identical to probing inline. Expanded origins still resolve+probe inside
-    # the loop to avoid resolving DNS twice.
+    # The controller is the sole authority for expanded hostname resolution.
+    # Resolve every enabled expanded origin once per scheduler pass, including
+    # china_only origins that do not receive a local TCP probe. A failed lookup is
+    # cached too, so origins sharing a hostname pay at most one resolver timeout.
+    expanded_ips: dict[int, list[str]] = {}
+    expanded_errors: dict[int, OSError] = {}
+    for origin in origins:
+        if not origin.group.enabled or not origin_needs_probe(origin, include_all=include_all) or not is_expanded_origin(origin):
+            continue
+        try:
+            expanded_ips[origin.id] = refresh_expanded_origin_ips(origin, dns_cache=dns_cache)
+        except OSError as exc:
+            expanded_errors[origin.id] = exc
+            # Keep the last known pool during a transient resolver failure so
+            # agents can continue checking addresses already issued by the
+            # controller. A never-resolved hostname remains empty and unhealthy.
+            expanded_ips[origin.id] = resolved_ips(origin)
+
+    # Pre-probe direct targets and every expanded IP concurrently. The sequential
+    # evaluation below only applies already-computed results, preserving database
+    # update ordering without serial TCP waits.
     prefetch_keys: dict[tuple[str, int], tuple[str, int]] = {}
     for origin in origins_to_probe:
         if is_expanded_origin(origin):
-            continue
-        key = (origin.target.strip().rstrip(".").lower(), int(origin.port))
-        if key not in check_cache and key not in prefetch_keys:
-            prefetch_keys[key] = (origin.target, origin.port)
+            targets = expanded_ips.get(origin.id, [])
+        else:
+            targets = [origin.target]
+        for target in targets:
+            key = (target.strip().rstrip(".").lower(), int(origin.port))
+            if key not in check_cache and key not in prefetch_keys:
+                prefetch_keys[key] = (target, origin.port)
     if prefetch_keys:
-        with ThreadPoolExecutor(max_workers=min(len(prefetch_keys), 16)) as executor:
+        configured_workers = max(1, min(int(get_settings().local_probe_max_workers), 64))
+        with ThreadPoolExecutor(max_workers=min(len(prefetch_keys), configured_workers)) as executor:
             futures = {
                 key: executor.submit(tcp_check, target, port, settings.check_timeout_seconds)
                 for key, (target, port) in prefetch_keys.items()
@@ -895,13 +936,12 @@ def run_local_checks(
 
     for origin in origins_to_probe:
         if is_expanded_origin(origin):
-            try:
-                ips = refresh_expanded_origin_ips(origin)
-            except OSError as exc:
-                set_resolved_ips(origin, [])
+            ips = expanded_ips.get(origin.id, [])
+            resolve_error = expanded_errors.get(origin.id)
+            if resolve_error is not None and not ips:
                 set_healthy_ips(origin, [])
                 origin.status = "unhealthy"
-                origin.last_error = f"展开域名解析失败: {exc}"
+                origin.last_error = f"展开域名解析失败: {resolve_error}"
                 sync_if_global(origin)
                 continue
             for ip in ips:
@@ -978,6 +1018,9 @@ def mark_agent_online(db: Session, agent: Agent, last_ip: str | None) -> None:
         payload = {"agent_id": agent.id, "name": agent.name, "region": agent_region(agent), "status": "online", "last_ip": agent.last_ip}
         add_event(db, "agent.status_changed", "info", f"探针 {agent.name} 已上线", payload)
         send_webhooks(db, "agent.status_changed", payload)
+    # SessionLocal disables autoflush. The task-selection queries that immediately
+    # follow must see a newly connected/offline agent as online in this same request.
+    db.flush()
 
 
 def mark_stale_agents(db: Session) -> int:

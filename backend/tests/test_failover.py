@@ -554,9 +554,18 @@ def test_evaluate_probes_group_before_switching_from_failed_current(monkeypatch)
     db.refresh(current)
     db.refresh(backup)
     calls = []
+    check_cache = {}
+    dns_cache = {}
 
-    def fake_run_local_checks(db, group_id=None, include_all=False, **_kwargs):
-        calls.append((group_id, include_all))
+    def fake_run_local_checks(db, group_id=None, include_all=False, **kwargs):
+        calls.append(
+            (
+                group_id,
+                include_all,
+                kwargs.get("check_cache") is check_cache,
+                kwargs.get("dns_cache") is dns_cache,
+            )
+        )
         current.status = "machine_down"
         backup.status = "healthy"
         return 2
@@ -567,10 +576,10 @@ def test_evaluate_probes_group_before_switching_from_failed_current(monkeypatch)
     monkeypatch.setattr("app.failover.run_local_checks", fake_run_local_checks)
     monkeypatch.setattr("app.failover.publish_origin", fake_publish_origin)
 
-    switches = evaluate_failover_groups(db)
+    switches = evaluate_failover_groups(db, check_cache=check_cache, dns_cache=dns_cache)
 
     assert switches == 1
-    assert calls == [(group.id, False)]
+    assert calls == [(group.id, False, True, True)]
     assert group.current_origin_id == backup.id
 
 

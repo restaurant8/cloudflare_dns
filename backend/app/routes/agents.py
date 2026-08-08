@@ -21,7 +21,6 @@ from ..health import (
     origin_needs_probe,
     origin_probe_mode,
     prioritize_global_origin_checks,
-    refresh_expanded_origin_ips,
     sync_probe_states_from_origin,
 )
 from ..models import Agent, FailoverGlobalOrigin, FailoverGroup, Origin, User
@@ -194,6 +193,9 @@ def delete_agent(agent_id: int, _: User = Depends(get_current_user), db: Session
 def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session = Depends(get_db)):
     settings = get_runtime_settings(db)
     mark_agent_online(db, agent, client_ip_from_request(request))
+    # Persist liveness before task construction. This makes the agent eligible in
+    # its first request and keeps the online update even if later selection fails.
+    db.commit()
     origins = (
         db.query(Origin)
         .options(selectinload(Origin.group).selectinload(FailoverGroup.origins), selectinload(Origin.probe_states))
@@ -235,17 +237,15 @@ def agent_tasks(request: Request, agent: Agent = Depends(get_agent), db: Session
         else:
             agent_chain = same_region_agents
         if is_expanded_origin(origin):
-            try:
-                ips = refresh_expanded_origin_ips(origin)
-            except OSError:
-                ips = resolved_ips(origin)
-            for ip in ips:
+            # Expanded pools are resolved and persisted by the controller
+            # scheduler. Agents only consume that authoritative snapshot, so
+            # GeoDNS answers from probe request paths cannot overwrite each other.
+            for ip in resolved_ips(origin):
                 if _should_agent_probe_target(agent, agent_chain, origin, stale_before, ip):
                     add_task(origin.id, ip, origin.port)
             continue
         if _should_agent_probe_target(agent, agent_chain, origin, stale_before):
             add_task(origin.id, origin.target, origin.port)
-    db.commit()
     return AgentTasksResponse(interval_seconds=settings.check_interval_seconds, tasks=tasks)
 
 

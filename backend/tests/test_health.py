@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -554,6 +555,137 @@ def test_refresh_expanded_origin_keeps_published_ip_in_probe_list(monkeypatch):
 
     assert ips == ["192.0.2.10", "192.0.2.20"]
     assert resolved_ips(origin) == ["192.0.2.10", "192.0.2.20"]
+
+
+def test_local_checks_resolve_same_expanded_hostname_once_per_pass(monkeypatch):
+    db = make_session()
+    _, current, backup = make_group_with_current_and_backup(db, "healthy")
+    for origin, port in [(current, 443), (backup, 8443)]:
+        origin.target = "backup.example.net"
+        origin.target_type = "hostname"
+        origin.publish_mode = EXPANDED_PUBLISH_MODE
+        origin.port = port
+    db.commit()
+    resolved = []
+
+    def fake_resolve(hostname):
+        resolved.append(hostname)
+        return ["192.0.2.10"]
+
+    monkeypatch.setattr("app.health.resolve_hostname_ips", fake_resolve)
+    monkeypatch.setattr("app.health.tcp_check", lambda target, port, timeout: SimpleNamespace(success=True, rtt_ms=1.0, error=None))
+
+    run_local_checks(db, include_all=True)
+
+    assert resolved == ["backup.example.net"]
+
+
+def test_local_checks_cache_failed_expanded_hostname_once_per_pass(monkeypatch):
+    db = make_session()
+    _, current, backup = make_group_with_current_and_backup(db, "healthy")
+    for origin, port in [(current, 443), (backup, 8443)]:
+        origin.target = "broken.example.net"
+        origin.target_type = "hostname"
+        origin.publish_mode = EXPANDED_PUBLISH_MODE
+        origin.port = port
+    db.commit()
+    attempts = []
+
+    def failed_resolve(hostname):
+        attempts.append(hostname)
+        raise OSError("temporary resolver timeout")
+
+    monkeypatch.setattr("app.health.resolve_hostname_ips", failed_resolve)
+
+    checked = run_local_checks(db, include_all=True)
+
+    assert checked == 0
+    assert attempts == ["broken.example.net"]
+    assert current.status == backup.status == "unhealthy"
+    assert "temporary resolver timeout" in current.last_error
+    assert "temporary resolver timeout" in backup.last_error
+
+
+def test_local_checks_keep_and_probe_last_pool_when_resolution_fails(monkeypatch):
+    db = make_session()
+    _, current, backup = make_group_with_current_and_backup(db, "healthy")
+    backup.enabled = False
+    current.target = "stale-if-error.example.net"
+    current.target_type = "hostname"
+    current.publish_mode = EXPANDED_PUBLISH_MODE
+    set_resolved_ips(current, ["192.0.2.50"])
+    db.commit()
+    resolution_attempts = []
+    probe_attempts = []
+
+    def failed_resolve(hostname):
+        resolution_attempts.append(hostname)
+        raise OSError("temporary resolver timeout")
+
+    def fake_tcp_check(target, port, timeout):
+        probe_attempts.append((target, port))
+        return SimpleNamespace(success=True, rtt_ms=1.0, error=None)
+
+    monkeypatch.setattr("app.health.resolve_hostname_ips", failed_resolve)
+    monkeypatch.setattr("app.health.tcp_check", fake_tcp_check)
+
+    checked = run_local_checks(db, include_all=True)
+
+    assert checked == 1
+    assert resolution_attempts == ["stale-if-error.example.net"]
+    assert probe_attempts == [("192.0.2.50", current.port)]
+    assert resolved_ips(current) == ["192.0.2.50"]
+    assert db.query(ProbeState).filter_by(
+        origin_id=current.id,
+        source_key=expanded_source_key(LOCAL_SOURCE, "192.0.2.50"),
+    ).one()
+
+
+def test_local_checks_resolve_china_only_expanded_origin_for_agents(monkeypatch):
+    db = make_session()
+    _, current, backup = make_group_with_current_and_backup(db, "healthy")
+    backup.enabled = False
+    current.target = "china-only.example.net"
+    current.target_type = "hostname"
+    current.publish_mode = EXPANDED_PUBLISH_MODE
+    current.probe_mode = "china_only"
+    db.commit()
+
+    monkeypatch.setattr("app.health.resolve_hostname_ips", lambda hostname: ["192.0.2.40"])
+    monkeypatch.setattr("app.health.tcp_check", lambda *args: (_ for _ in ()).throw(AssertionError("local TCP probe must be skipped")))
+
+    checked = run_local_checks(db)
+
+    assert checked == 0
+    assert resolved_ips(current) == ["192.0.2.40"]
+
+
+def test_local_checks_probe_expanded_ips_concurrently(monkeypatch):
+    db = make_session()
+    _, current, backup = make_group_with_current_and_backup(db, "healthy")
+    backup.enabled = False
+    current.target = "pool.example.net"
+    current.target_type = "hostname"
+    current.publish_mode = EXPANDED_PUBLISH_MODE
+    db.commit()
+    barrier = threading.Barrier(2)
+
+    monkeypatch.setattr("app.health.resolve_hostname_ips", lambda hostname: ["192.0.2.10", "192.0.2.20"])
+
+    def fake_tcp_check(target, port, timeout):
+        barrier.wait(timeout=2)
+        return SimpleNamespace(success=True, rtt_ms=1.0, error=None)
+
+    monkeypatch.setattr("app.health.tcp_check", fake_tcp_check)
+
+    checked = run_local_checks(db, include_all=True)
+
+    assert checked == 2
+    states = db.query(ProbeState).filter(ProbeState.origin_id == current.id).all()
+    assert {state.source_key for state in states} == {
+        expanded_source_key(LOCAL_SOURCE, "192.0.2.10"),
+        expanded_source_key(LOCAL_SOURCE, "192.0.2.20"),
+    }
 
 
 def test_expanded_hostname_checks_each_resolved_ip_and_keeps_healthy_pool(monkeypatch):

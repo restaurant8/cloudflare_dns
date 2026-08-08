@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 from .cloudflare import CloudflareClient, CloudflareError
 from .dns_utils import record_type_for_target_type
 from .events import add_event
-from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, PROBE_MODE_CHINA_ONLY, origin_probe_mode, run_local_checks
+from .health import DnsCache, FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, PROBE_MODE_CHINA_ONLY, origin_probe_mode, run_local_checks
 from .integrations import AutoIpChangeGuard, trigger_ip_change_for_origin
 from .models import DnsRecord, FailoverGroup, FailoverHostname, Origin, Zone
 from .notifier import send_webhooks
@@ -527,6 +527,8 @@ def evaluate_failover_groups(
     group_ids: Collection[int] | None = None,
     check_dns_consistency: bool = True,
     trigger_ip_changes: bool = True,
+    check_cache: dict[tuple[str, int], object] | None = None,
+    dns_cache: DnsCache | None = None,
 ) -> int:
     """Evaluate enabled groups and publish DNS changes where needed.
 
@@ -547,10 +549,20 @@ def evaluate_failover_groups(
     rotation for blocked origins. Editing a target must not rotate a VPS IP as a
     side effect; the scheduler still does it on its own tick.
 
+    ``check_cache`` and ``dns_cache`` let the scheduler or a manual run reuse one
+    set of network results across the initial probe and any re-check requested by
+    failover evaluation. When omitted, one shared pair is created for this entire
+    evaluation call.
+
     One shared ``AutoIpChangeGuard`` spans every selected group. This makes the
     safety limit apply to the whole scheduler pass instead of resetting for each
     hostname.
     """
+    if check_cache is None:
+        check_cache = {}
+    if dns_cache is None:
+        dns_cache = {}
+
     query = (
         db.query(FailoverGroup)
         .options(
@@ -585,6 +597,8 @@ def evaluate_failover_groups(
                 check_dns_consistency=check_dns_consistency,
                 trigger_ip_changes=trigger_ip_changes,
                 auto_ip_change_guard=auto_ip_change_guard,
+                check_cache=check_cache,
+                dns_cache=dns_cache,
             )
         except Exception:
             # One broken group (bad credential, unexpected API shape…) must not stop
@@ -608,9 +622,17 @@ def _evaluate_single_group(
     check_dns_consistency: bool = True,
     trigger_ip_changes: bool = True,
     auto_ip_change_guard: AutoIpChangeGuard | None = None,
+    check_cache: dict[tuple[str, int], object] | None = None,
+    dns_cache: DnsCache | None = None,
 ) -> bool:
     if _should_probe_group_before_switch(group):
-        run_local_checks(db, group_id=group.id, include_all=False)
+        run_local_checks(
+            db,
+            group_id=group.id,
+            include_all=False,
+            check_cache=check_cache,
+            dns_cache=dns_cache,
+        )
 
     # Trigger an automatic IP change for every blocked origin in the group, not
     # just the currently published one. Otherwise an origin that gets blocked and

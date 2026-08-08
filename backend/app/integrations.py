@@ -13,6 +13,7 @@ from .events import add_event
 from .external_ips import mark_external_ip_sources_due
 from .models import AppSetting, AzPanelRemoteResource, AzPanelResource, FailoverGlobalOrigin, IpChangeJob, Origin, XboardNodeBinding
 from .notifier import send_webhooks
+from .runtime_settings import invalidate_runtime_settings_cache
 from .security import decrypt_secret, encrypt_secret, json_dumps
 
 
@@ -72,6 +73,7 @@ def set_setting(db: Session, key: str, value: str) -> None:
     else:
         row.value = value
     db.flush()
+    invalidate_runtime_settings_cache(db, key)
 
 
 def _decrypt_setting(value: str) -> str:

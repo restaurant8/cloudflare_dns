@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:8080,http://localhost:5173"
     check_interval_seconds: int = 30
     check_timeout_seconds: float = 5.0
+    local_probe_max_workers: int = 16
     external_ip_sync_interval_seconds: int = 600
     no_healthy_notification_interval_seconds: int = 30 * 60
     fail_threshold: int = 5

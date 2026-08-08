@@ -34,7 +34,8 @@ def _run_scheduler_tick() -> int:
         runtime_settings = get_runtime_settings(db)
         mark_stale_agents(db)
         check_cache = {}
-        run_local_checks(db, check_cache=check_cache)
+        dns_cache = {}
+        run_local_checks(db, check_cache=check_cache, dns_cache=dns_cache)
         # 先把已下发但未确认的 SynexVM 换 IP 用 status 补上新 IP（并催外部来源重同步），
         # 再跑外部同步和故障切换评估，绑定的源站才能在本轮就跟上新 IP。
         reconcile_pending_synexvm_changes(db)
@@ -47,6 +48,8 @@ def _run_scheduler_tick() -> int:
             db,
             commit_per_group=True,
             consistency_check_interval_seconds=get_settings().dns_consistency_check_interval_seconds,
+            check_cache=check_cache,
+            dns_cache=dns_cache,
         )
         now = datetime.utcnow()
         if _last_prune_at is None or (now - _last_prune_at).total_seconds() >= _PRUNE_INTERVAL_SECONDS:

@@ -1264,10 +1264,23 @@ def run_origin_now(origin_id: int, _: User = Depends(get_current_user), db: Sess
     origin = db.get(Origin, origin_id)
     if origin is None:
         raise HTTPException(status_code=404, detail="源站不存在")
-    checked = run_local_checks(db, origin_id=origin_id, include_all=True)
+    check_cache = {}
+    dns_cache = {}
+    checked = run_local_checks(
+        db,
+        origin_id=origin_id,
+        include_all=True,
+        check_cache=check_cache,
+        dns_cache=dns_cache,
+    )
     # An explicit probe keeps the full semantics (drift check + auto IP change) but
     # only for the group that owns this origin.
-    switches = evaluate_failover_groups(db, group_ids=[origin.group_id])
+    switches = evaluate_failover_groups(
+        db,
+        group_ids=[origin.group_id],
+        check_cache=check_cache,
+        dns_cache=dns_cache,
+    )
     db.commit()
     return Message(message="目标检测已完成", detail={"checked": checked, "switches": switches})
 
@@ -1299,15 +1312,30 @@ def run_group_now(group_id: int, _: User = Depends(get_current_user), db: Sessio
     group = db.get(FailoverGroup, group_id)
     if group is None:
         raise HTTPException(status_code=404, detail="切换组不存在")
-    checked = run_local_checks(db, group_id=group_id, include_all=True)
-    switches = evaluate_failover_groups(db, group_ids=[group_id])
+    check_cache = {}
+    dns_cache = {}
+    checked = run_local_checks(
+        db,
+        group_id=group_id,
+        include_all=True,
+        check_cache=check_cache,
+        dns_cache=dns_cache,
+    )
+    switches = evaluate_failover_groups(
+        db,
+        group_ids=[group_id],
+        check_cache=check_cache,
+        dns_cache=dns_cache,
+    )
     db.commit()
     return Message(message="切换组检测已完成", detail={"checked": checked, "switches": switches})
 
 
 @router.post("/run", response_model=Message)
 def run_now(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    checked = run_local_checks(db, include_all=True)
-    switches = evaluate_failover_groups(db)
+    check_cache = {}
+    dns_cache = {}
+    checked = run_local_checks(db, include_all=True, check_cache=check_cache, dns_cache=dns_cache)
+    switches = evaluate_failover_groups(db, check_cache=check_cache, dns_cache=dns_cache)
     db.commit()
     return Message(message="健康检查已完成", detail={"checked": checked, "switches": switches})

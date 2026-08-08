@@ -30,6 +30,8 @@ SETTING_DEFINITIONS: dict[str, SettingDefinition] = {
     "cloudflare_access_enabled": SettingDefinition(int, 0, 1),
 }
 
+_SESSION_CACHE_KEY = "runtime_settings"
+
 
 class RuntimeSettings:
     def __init__(self, values: dict[str, int | float]):
@@ -57,12 +59,25 @@ def _coerce_setting_value(key: str, value: Any) -> int | float:
 
 
 def get_runtime_settings(db: Session | None = None) -> RuntimeSettings:
+    if db is not None:
+        cached = db.info.get(_SESSION_CACHE_KEY)
+        if isinstance(cached, RuntimeSettings):
+            return cached
     values = _default_values()
     if db is not None:
         rows = db.query(AppSetting).filter(AppSetting.key.in_(list(SETTING_DEFINITIONS))).all()
         for row in rows:
             values[row.key] = _coerce_setting_value(row.key, row.value)
-    return RuntimeSettings(values)
+    settings = RuntimeSettings(values)
+    if db is not None:
+        db.info[_SESSION_CACHE_KEY] = settings
+    return settings
+
+
+def invalidate_runtime_settings_cache(db: Session, key: str | None = None) -> None:
+    """Invalidate the session cache when a runtime-owned setting may have changed."""
+    if key is None or key in SETTING_DEFINITIONS:
+        db.info.pop(_SESSION_CACHE_KEY, None)
 
 
 def update_runtime_settings(db: Session, updates: dict[str, Any]) -> RuntimeSettings:
@@ -77,4 +92,5 @@ def update_runtime_settings(db: Session, updates: dict[str, Any]) -> RuntimeSett
         else:
             row.value = str(parsed)
     db.flush()
+    invalidate_runtime_settings_cache(db)
     return get_runtime_settings(db)
