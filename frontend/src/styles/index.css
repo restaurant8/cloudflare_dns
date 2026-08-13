@@ -3,6 +3,7 @@
 @import './theme.css';
 @import './legacy.css';
 @import './skin.css';
+@import './alibaba-httpdns.css';
 
 @custom-variant dark (&:is(.dark *));
 

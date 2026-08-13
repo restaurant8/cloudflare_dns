@@ -93,6 +93,60 @@ class DnsRecord(Base, TimestampMixin):
     zone: Mapped["Zone"] = relationship("Zone", back_populates="records")
 
 
+class AlibabaHttpDnsGroup(Base, TimestampMixin):
+    __tablename__ = "alibaba_httpdns_groups"
+    __table_args__ = (
+        UniqueConstraint("remote_account_id", "zone_id", "record_id", name="uq_alibaba_httpdns_managed_record"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    remote_account_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    account_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    zone_id: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    zone_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    record_id: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    rr: Mapped[str] = mapped_column(String(255), nullable=False)
+    record_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    ttl: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    request_source: Mapped[str] = mapped_column(String(80), default="default", nullable=False)
+    weight: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    remark: Mapped[str | None] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    min_switch_interval_seconds: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
+    current_origin_id: Mapped[int | None] = mapped_column(Integer)
+    last_switch_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_consistency_check_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    no_healthy_notified_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    origins: Mapped[list["AlibabaHttpDnsOrigin"]] = relationship(
+        "AlibabaHttpDnsOrigin", back_populates="group", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class AlibabaHttpDnsOrigin(Base, TimestampMixin):
+    __tablename__ = "alibaba_httpdns_origins"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("alibaba_httpdns_groups.id", ondelete="CASCADE"), nullable=False)
+    target: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    remark: Mapped[str | None] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    ignore_health_check: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)
+    success_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    fail_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    last_rtt_ms: Mapped[float | None] = mapped_column(Float)
+
+    group: Mapped["AlibabaHttpDnsGroup"] = relationship("AlibabaHttpDnsGroup", back_populates="origins")
+
+
 class FailoverCollection(Base, TimestampMixin):
     __tablename__ = "failover_collections"
 

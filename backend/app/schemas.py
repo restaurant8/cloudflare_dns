@@ -216,6 +216,121 @@ class DnsRecordUpdate(DnsRecordCreate):
     pass
 
 
+class AlibabaHttpDnsGroupCreate(BaseModel):
+    remote_account_id: int = Field(ge=1)
+    account_name: str = Field(min_length=1, max_length=160)
+    zone_id: str = Field(min_length=1, max_length=80)
+    zone_name: str = Field(min_length=1, max_length=255)
+    record_id: str = Field(min_length=1, max_length=80)
+    primary_port: int = Field(default=22, ge=1, le=65535)
+    enabled: bool = True
+    min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
+
+
+class AlibabaHttpDnsGroupUpdate(BaseModel):
+    enabled: bool | None = None
+    ttl: int | None = Field(default=None, ge=5, le=86400)
+    min_switch_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
+
+    @field_validator("ttl")
+    @classmethod
+    def validate_alibaba_ttl(cls, value: int | None) -> int | None:
+        if value is not None and value not in {5, 30, 60, 3600, 43200, 86400}:
+            raise ValueError("阿里云 HTTPDNS TTL 仅支持 5、30、60、3600、43200、86400 秒")
+        return value
+
+
+class AlibabaHttpDnsOriginCreate(BaseModel):
+    target: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=22, ge=1, le=65535)
+    priority: int = Field(default=10, ge=0, le=100000)
+    remark: str | None = Field(default=None, max_length=500)
+    enabled: bool = True
+    ignore_health_check: bool = False
+
+
+class AlibabaHttpDnsOriginUpdate(BaseModel):
+    target: str | None = Field(default=None, min_length=1, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    priority: int | None = Field(default=None, ge=0, le=100000)
+    remark: str | None = Field(default=None, max_length=500)
+    enabled: bool | None = None
+    ignore_health_check: bool | None = None
+
+
+class AlibabaHttpDnsOriginOut(BaseModel):
+    id: int
+    group_id: int
+    target: str
+    target_type: str
+    port: int
+    priority: int
+    remark: str | None
+    enabled: bool
+    ignore_health_check: bool
+    status: str
+    success_count: int
+    fail_count: int
+    last_checked_at: datetime | None
+    last_error: str | None
+    last_rtt_ms: float | None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AlibabaHttpDnsGroupOut(BaseModel):
+    id: int
+    remote_account_id: int
+    account_name: str
+    zone_id: str
+    zone_name: str
+    record_id: str
+    rr: str
+    record_type: str
+    ttl: int
+    request_source: str
+    weight: int
+    priority: int
+    remark: str | None
+    enabled: bool
+    min_switch_interval_seconds: int
+    current_origin_id: int | None
+    last_switch_at: datetime | None
+    last_error: str | None
+    origins: list[AlibabaHttpDnsOriginOut] = []
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AlibabaHttpDnsRemoteAccountOut(BaseModel):
+    id: int
+    name: str
+    access_key_hint: str = ""
+    proxy: str = ""
+
+
+class AlibabaHttpDnsRemoteZoneOut(BaseModel):
+    ZoneId: str
+    ZoneName: str
+    RecordCount: int = 0
+    Remark: str | None = ""
+
+
+class AlibabaHttpDnsRemoteRecordOut(BaseModel):
+    RecordId: str
+    Rr: str
+    Type: str
+    Value: str
+    Ttl: int = 60
+    RequestSource: str = "default"
+    Weight: int = 1
+    Priority: int = 1
+    Remark: str | None = ""
+    EnableStatus: str = "enable"
+
+
 class FailoverGroupCreate(BaseModel):
     zone_id: int
     collection_id: int | None = None

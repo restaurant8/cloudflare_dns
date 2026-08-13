@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
+from .alibaba_httpdns import evaluate_alibaba_httpdns_groups
 from .database import SessionLocal, init_db
 from .external_ips import sync_due_external_ip_sources
 from .failover import evaluate_failover_groups
@@ -48,6 +49,7 @@ def _run_scheduler_tick() -> int:
             commit_per_group=True,
             consistency_check_interval_seconds=get_settings().dns_consistency_check_interval_seconds,
         )
+        evaluate_alibaba_httpdns_groups(db, commit_per_group=True, check_cache=check_cache)
         now = datetime.utcnow()
         if _last_prune_at is None or (now - _last_prune_at).total_seconds() >= _PRUNE_INTERVAL_SECONDS:
             _last_prune_at = now

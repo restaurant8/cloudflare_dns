@@ -14,6 +14,13 @@ A self-hosted Cloudflare DNS failover dashboard for DNS-only A, AAAA, and CNAME 
 - Switches DNS by health and priority, then fails back automatically when better targets recover.
 - Supports a scheduled peak-hours entry while retaining health-based fallback to other origins.
 - Sends Telegram and webhook events for status changes and DNS switches.
+- Manages Alibaba Cloud Mobile HTTPDNS built-in authoritative records in a separate failover menu through the existing azpanel integration, including per-account proxy routing, health thresholds, cooldowns, drift repair, and A/AAAA/CNAME switching.
+
+## Alibaba Cloud HTTPDNS failover
+
+Configure and enable the existing **azpanel** integration under **Auto IP Change**, using the same internal token configured as `CLOUDFLARE_DNS_INTERNAL_TOKEN` on azpanel. Alibaba Cloud AccessKeys stay in azpanel; this application only stores the selected account/Zone/record IDs and calls azpanel's authenticated internal gateway. The proxy assigned to each Alibaba Cloud account in azpanel is therefore also used for zone reads and record updates.
+
+The separate **Alibaba Cloud HTTPDNS** menu adopts an existing Mobile HTTPDNS built-in authoritative A, AAAA, or CNAME record as the primary origin. Add backup origins, set their probe port and priority, and optionally adjust the supported Alibaba TTL and recovery cooldown. The regular scheduler then applies the same global probe timeout and fail/recovery thresholds used by Cloudflare failover.
 
 ## Quick start
 
