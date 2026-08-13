@@ -1,3 +1,4 @@
+import json
 from collections.abc import Collection
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,10 +10,11 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import normalize_hostname, parse_target
 from ..events import add_event
+from ..doh import sync_doh_endpoint, sync_group_doh_endpoint, validate_doh_hostname_conflicts
 from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records, zone_for_hostname
 from ..health import run_local_checks
 from ..integrations import azpanel_settings, refresh_legacy_origin_mirror, sync_resource_current_ip_to_origin
-from ..models import Agent, AzPanelRemoteResource, AzPanelResource, ExternalIpItem, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, User, Zone
+from ..models import Agent, AzPanelRemoteResource, AzPanelResource, DohEndpoint, ExternalIpItem, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
 from ..origin_expansion import (
     DIRECT_PUBLISH_MODE,
@@ -67,6 +69,13 @@ def _evaluate_locally(db: Session, group_ids: Collection[int]) -> None:
     evaluate_failover_groups(db, group_ids=ids, check_dns_consistency=False, trigger_ip_changes=False)
 
 
+def _require_group_doh_sync(db: Session, group: FailoverGroup) -> None:
+    if sync_group_doh_endpoint(db, group):
+        return
+    endpoint = db.get(DohEndpoint, group.doh_endpoint_id) if group.doh_endpoint_id else None
+    raise RuntimeError(endpoint.last_error if endpoint and endpoint.last_error else "DoH endpoint did not accept the snapshot")
+
+
 def _enabled_collection_group_ids(collection: FailoverCollection) -> list[int]:
     return [group.id for group in collection.groups if group.enabled]
 
@@ -114,6 +123,49 @@ def _refresh_azpanel_resource_bindings(db: Session, resource_ids: Collection[int
 
 def _normalize_probe_mode(value: str | None) -> str:
     return value if value in {"default", "local_only", "china_only", "any"} else "default"
+
+
+def _parse_target_or_400(value: str):
+    try:
+        return parse_target(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _normalize_doh_hostnames(values: list[str] | None, fallback: str) -> list[str]:
+    try:
+        normalized = [normalize_hostname(value) for value in (values or [])]
+        normalized_fallback = normalize_hostname(fallback)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result = list(dict.fromkeys(normalized))
+    return result or [normalized_fallback]
+
+
+def _validate_group_outputs(
+    db: Session,
+    *,
+    cloudflare_publish_enabled: bool,
+    doh_enabled: bool,
+    doh_endpoint_id: int | None,
+    doh_hostnames: list[str],
+    group_id: int | None = None,
+) -> None:
+    if not cloudflare_publish_enabled and not doh_enabled:
+        raise HTTPException(status_code=400, detail="At least one output channel must be enabled")
+    if doh_enabled:
+        endpoint = db.get(DohEndpoint, doh_endpoint_id) if doh_endpoint_id else None
+        if endpoint is None or not endpoint.enabled:
+            raise HTTPException(status_code=400, detail="Enabled DoH publishing requires an enabled DoH endpoint")
+        try:
+            validate_doh_hostname_conflicts(
+                db,
+                endpoint_id=endpoint.id,
+                hostnames=doh_hostnames,
+                exclude_group_id=group_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _group_query(db: Session):
@@ -181,7 +233,7 @@ def _external_binding_from_item_id(db: Session, item_id: int) -> tuple[int, str]
 
 
 def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreate) -> Origin:
-    target_info = parse_target(payload.target)
+    target_info = _parse_target_or_400(payload.target)
     if target_info.record_type == "CNAME" and target_info.value in _group_hostname_values(group):
         raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
     if payload.publish_mode == EXPANDED_PUBLISH_MODE and target_info.target_type != "hostname":
@@ -212,7 +264,7 @@ def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreat
 def _origin_from_dns_record(group: FailoverGroup, record: dict, port: int) -> Origin:
     if record.get("type") not in MANAGED_RECORD_TYPES:
         raise HTTPException(status_code=400, detail="只支持接管 A/AAAA/CNAME 记录")
-    target_info = parse_target(str(record.get("content") or ""))
+    target_info = _parse_target_or_400(str(record.get("content") or ""))
     if target_info.record_type == "CNAME" and target_info.value in _group_hostname_values(group):
         raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
     return Origin(
@@ -246,7 +298,7 @@ def _global_origin_from_payload(db: Session, collection: FailoverCollection, pay
     if payload.external_ip_item_id is None and resource is not None and resource.auto_update_origin and resource.current_ip:
         target = resource.current_ip
         port = resource.port
-    target_info = parse_target(target)
+    target_info = _parse_target_or_400(target)
     if target_info.record_type == "CNAME" and target_info.value in _collection_hostname_values(collection):
         raise HTTPException(status_code=400, detail="全局 CNAME 备用不能和当前业务分组内的主机名相同")
     if payload.publish_mode == EXPANDED_PUBLISH_MODE and target_info.target_type != "hostname":
@@ -447,7 +499,10 @@ def _publish_current_group_origin(db: Session, group: FailoverGroup) -> None:
     if current_origin is None or not current_origin.enabled:
         return
     try:
-        publish_origin(db, group, current_origin)
+        if group.cloudflare_publish_enabled:
+            publish_origin(db, group, current_origin)
+        if group.doh_enabled:
+            _require_group_doh_sync(db, group)
     except Exception as exc:
         group.last_error = str(exc)
     else:
@@ -593,7 +648,7 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
     new_preferred_agent_id = global_origin.preferred_agent_id
     new_probe_mode = global_origin.probe_mode
     if "target" in updates and updates["target"] is not None:
-        target_info = parse_target(updates.pop("target"))
+        target_info = _parse_target_or_400(updates.pop("target"))
         if target_info.record_type == "CNAME" and target_info.value in _collection_hostname_values(global_origin.collection):
             raise HTTPException(status_code=400, detail="全局 CNAME 备用不能和当前业务分组内的主机名相同")
         new_target = target_info.value
@@ -642,7 +697,7 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
         and azpanel_resource.auto_update_origin
         and azpanel_resource.current_ip
     ):
-        resource_target = parse_target(azpanel_resource.current_ip)
+        resource_target = _parse_target_or_400(azpanel_resource.current_ip)
         new_target = resource_target.value
         new_target_type = resource_target.target_type
         new_port = azpanel_resource.port
@@ -729,15 +784,29 @@ def create_group(payload: FailoverGroupCreate, _: User = Depends(get_current_use
     collection = db.get(FailoverCollection, payload.collection_id) if payload.collection_id else None
     if payload.collection_id and collection is None:
         raise HTTPException(status_code=404, detail="业务分组不存在")
-    hostname = normalize_hostname(payload.hostname)
+    try:
+        hostname = normalize_hostname(payload.hostname)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    doh_hostnames = _normalize_doh_hostnames(payload.doh_hostnames, hostname)
+    _validate_group_outputs(
+        db,
+        cloudflare_publish_enabled=payload.cloudflare_publish_enabled,
+        doh_enabled=payload.doh_enabled,
+        doh_endpoint_id=payload.doh_endpoint_id,
+        doh_hostnames=doh_hostnames,
+    )
     existing = db.query(FailoverGroup).filter(FailoverGroup.zone_id == zone.id, FailoverGroup.hostname == hostname).one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="该主机名已经存在故障切换组")
-    client = CloudflareClient(decrypt_secret(zone.credential.token_encrypted))
-    try:
-        existing_record_id = validate_group_hostname_records(client, zone.cf_zone_id, hostname, payload.adopt_record_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    client = None
+    existing_record_id = None
+    if payload.cloudflare_publish_enabled:
+        client = CloudflareClient(decrypt_secret(zone.credential.token_encrypted))
+        try:
+            existing_record_id = validate_group_hostname_records(client, zone.cf_zone_id, hostname, payload.adopt_record_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     group = FailoverGroup(
         zone_id=zone.id,
         collection_id=collection.id if collection else None,
@@ -746,13 +815,17 @@ def create_group(payload: FailoverGroupCreate, _: User = Depends(get_current_use
         enabled=payload.enabled,
         min_switch_interval_seconds=payload.min_switch_interval_seconds,
         current_record_id=payload.adopt_record_id or existing_record_id,
+        cloudflare_publish_enabled=payload.cloudflare_publish_enabled,
+        doh_enabled=payload.doh_enabled,
+        doh_endpoint_id=payload.doh_endpoint_id,
+        doh_hostnames_json=json.dumps(doh_hostnames),
     )
     db.add(group)
     db.flush()
     db.add(FailoverHostname(group_id=group.id, hostname=hostname, current_record_id=group.current_record_id))
     db.flush()
     managed_record_id = group.current_record_id
-    if managed_record_id:
+    if managed_record_id and client is not None:
         current_record = find_managed_dns_record_by_id(client, zone.cf_zone_id, managed_record_id)
         if current_record is None:
             raise HTTPException(status_code=404, detail="未找到要接管的当前解析记录")
@@ -784,7 +857,36 @@ def update_group(group_id: int, payload: FailoverGroupUpdate, _: User = Depends(
     )
     if group is None:
         raise HTTPException(status_code=404, detail="切换组不存在")
+    previous_doh_endpoint_id = group.doh_endpoint_id if group.doh_enabled else None
     updates = payload.model_dump(exclude_unset=True)
+    previous_doh_hostnames = group.doh_hostnames or [entry.hostname for entry in group.hostnames] or [group.hostname]
+    previous_outputs = (
+        group.cloudflare_publish_enabled,
+        group.doh_enabled,
+        group.doh_endpoint_id,
+        tuple(previous_doh_hostnames),
+    )
+    next_doh_enabled = updates.get("doh_enabled", group.doh_enabled)
+    next_doh_endpoint_id = updates.get("doh_endpoint_id", group.doh_endpoint_id)
+    if "doh_hostnames" in updates:
+        next_doh_hostnames = (
+            _normalize_doh_hostnames(updates["doh_hostnames"], group.hostname)
+            if updates["doh_hostnames"]
+            else [entry.hostname for entry in group.hostnames] or [group.hostname]
+        )
+    else:
+        next_doh_hostnames = group.doh_hostnames or [entry.hostname for entry in group.hostnames] or [group.hostname]
+    _validate_group_outputs(
+        db,
+        cloudflare_publish_enabled=updates.get("cloudflare_publish_enabled", group.cloudflare_publish_enabled),
+        doh_enabled=next_doh_enabled,
+        doh_endpoint_id=next_doh_endpoint_id,
+        doh_hostnames=next_doh_hostnames,
+        group_id=group.id,
+    )
+    if "doh_hostnames" in updates:
+        updates.pop("doh_hostnames")
+        updates["doh_hostnames_json"] = json.dumps(next_doh_hostnames)
     collection_changed = "collection_id" in updates and updates["collection_id"] != group.collection_id
     if "collection_id" in updates:
         collection_id = updates.pop("collection_id")
@@ -798,16 +900,29 @@ def update_group(group_id: int, payload: FailoverGroupUpdate, _: User = Depends(
     ttl_changed = "ttl" in updates and updates["ttl"] != group.ttl
     for key, value in updates.items():
         setattr(group, key, value)
-    if ttl_changed and group.enabled and group.current_origin_id:
+    outputs_changed = previous_outputs != (
+        group.cloudflare_publish_enabled,
+        group.doh_enabled,
+        group.doh_endpoint_id,
+        tuple(group.doh_hostnames or [entry.hostname for entry in group.hostnames] or [group.hostname]),
+    )
+    if group.enabled or collection_changed:
+        _evaluate_locally(db, [group.id])
+    if (outputs_changed or ttl_changed) and group.enabled and group.current_origin_id:
         current_origin = db.get(Origin, group.current_origin_id)
         if current_origin and current_origin.enabled:
             try:
-                publish_origin(db, group, current_origin)
+                if group.cloudflare_publish_enabled:
+                    publish_origin(db, group, current_origin)
+                if group.doh_enabled:
+                    _require_group_doh_sync(db, group)
             except Exception as exc:
                 db.rollback()
-                raise HTTPException(status_code=502, detail=f"DNS 发布失败，修改未保存：{exc}") from exc
-    if group.enabled or collection_changed:
-        _evaluate_locally(db, [group.id])
+                raise HTTPException(status_code=502, detail=f"Output publishing failed; changes were not saved: {exc}") from exc
+    if outputs_changed and previous_doh_endpoint_id and previous_doh_endpoint_id != (group.doh_endpoint_id if group.doh_enabled else None):
+        previous_endpoint = db.get(DohEndpoint, previous_doh_endpoint_id)
+        if previous_endpoint is not None:
+            sync_doh_endpoint(db, previous_endpoint, force=True)
     db.commit()
     return _group_query(db).filter(FailoverGroup.id == group_id).one()
 
@@ -870,7 +985,10 @@ def add_group_hostname(group_id: int, payload: FailoverHostnameCreate, _: User =
     if group is None:
         raise HTTPException(status_code=404, detail="切换组不存在")
     ensure_group_hostname_entries(db, group)
-    hostname = normalize_hostname(payload.hostname)
+    try:
+        hostname = normalize_hostname(payload.hostname)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     duplicate_in_group = (
         db.query(FailoverHostname)
         .filter(FailoverHostname.group_id == group.id, FailoverHostname.hostname == hostname)
@@ -891,6 +1009,16 @@ def add_group_hostname(group_id: int, payload: FailoverHostnameCreate, _: User =
     )
     if duplicate_in_zone or legacy_group:
         raise HTTPException(status_code=409, detail="该主域名已经被其他切换组接管")
+    if group.doh_enabled and group.doh_endpoint_id and not group.doh_hostnames:
+        try:
+            validate_doh_hostname_conflicts(
+                db,
+                endpoint_id=group.doh_endpoint_id,
+                hostnames=[entry.hostname for entry in group.hostnames] + [hostname],
+                exclude_group_id=group.id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     if group.collection:
         conflict = next(
             (
@@ -910,11 +1038,13 @@ def add_group_hostname(group_id: int, payload: FailoverHostnameCreate, _: User =
             detail=f"域名 {hostname} 所属的 Cloudflare 区域尚未在系统中添加，请先在区域页面同步该区域后再试",
         )
 
-    client = CloudflareClient(decrypt_secret(target_zone.credential.token_encrypted))
-    try:
-        existing_record_id = validate_group_hostname_records(client, target_zone.cf_zone_id, hostname, payload.adopt_record_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    existing_record_id = None
+    if group.cloudflare_publish_enabled:
+        client = CloudflareClient(decrypt_secret(target_zone.credential.token_encrypted))
+        try:
+            existing_record_id = validate_group_hostname_records(client, target_zone.cf_zone_id, hostname, payload.adopt_record_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     hostname_entry = FailoverHostname(
         group=group,
@@ -928,7 +1058,10 @@ def add_group_hostname(group_id: int, payload: FailoverHostnameCreate, _: User =
     current_origin = db.get(Origin, group.current_origin_id) if group.current_origin_id else None
     if group.enabled and current_origin and current_origin.enabled:
         try:
-            publish_origin(db, group, current_origin, hostname_entries=[hostname_entry])
+            if group.cloudflare_publish_enabled:
+                publish_origin(db, group, current_origin, hostname_entries=[hostname_entry])
+            if group.doh_enabled:
+                _require_group_doh_sync(db, group)
         except Exception as exc:
             message = f"DNS 发布失败，主域名已保存但暂未完全接管：{exc}"
             group.last_error = message
@@ -959,7 +1092,7 @@ def delete_group_hostname(hostname_id: int, _: User = Depends(get_current_user),
     removed_hostname = hostname_entry.hostname
     was_primary = removed_hostname == group.hostname
     record_ids = [item.strip() for item in (hostname_entry.current_record_id or "").split(",") if item.strip()]
-    if record_ids:
+    if record_ids and group.cloudflare_publish_enabled:
         zone = zone_for_hostname(db, group, hostname_entry)
         client = CloudflareClient(decrypt_secret(zone.credential.token_encrypted))
         for record_id in record_ids:
@@ -974,6 +1107,14 @@ def delete_group_hostname(hostname_id: int, _: User = Depends(get_current_user),
         next_primary = sorted(remaining, key=lambda item: item.id)[0]
         group.hostname = next_primary.hostname
         group.current_record_id = next_primary.current_record_id
+    db.flush()
+    if group.doh_enabled and group.doh_endpoint_id:
+        db.expire(group, ["hostnames"])
+        try:
+            _require_group_doh_sync(db, group)
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(status_code=502, detail=f"DoH output publishing failed; hostname was not removed: {exc}") from exc
     add_event(db, "group.hostname_removed", "info", f"{group.hostname} 已取消接管主域名 {removed_hostname}", {"group_id": group.id, "hostname": removed_hostname})
     db.commit()
     return _group_query(db).filter(FailoverGroup.id == group.id).one()
@@ -984,6 +1125,7 @@ def delete_group(group_id: int, _: User = Depends(get_current_user), db: Session
     group = db.get(FailoverGroup, group_id)
     if group is None:
         raise HTTPException(status_code=404, detail="切换组不存在")
+    doh_endpoint_id = group.doh_endpoint_id if group.doh_enabled else None
     azpanel_resource_ids = {origin.azpanel_resource_id for origin in group.origins if origin.azpanel_resource_id}
     for origin in group.origins:
         if origin.global_origin_id:
@@ -993,6 +1135,10 @@ def delete_group(group_id: int, _: User = Depends(get_current_user), db: Session
     db.delete(group)
     db.flush()
     _refresh_azpanel_resource_bindings(db, azpanel_resource_ids)
+    if doh_endpoint_id:
+        endpoint = db.get(DohEndpoint, doh_endpoint_id)
+        if endpoint is not None:
+            sync_doh_endpoint(db, endpoint, force=True)
     db.commit()
     return Message(message="切换组已删除")
 
@@ -1132,7 +1278,7 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     elif new_azpanel_resource_id is not None:
         azpanel_resource = db.get(AzPanelResource, new_azpanel_resource_id)
     if "target" in updates and updates["target"] is not None:
-        target_info = parse_target(updates.pop("target"))
+        target_info = _parse_target_or_400(updates.pop("target"))
         if target_info.record_type == "CNAME" and target_info.value in _group_hostname_values(group):
             raise HTTPException(status_code=400, detail="CNAME 目标不能和当前主机名相同")
         new_target = target_info.value
@@ -1145,7 +1291,7 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
         and azpanel_resource.auto_update_origin
         and azpanel_resource.current_ip
     ):
-        resource_target = parse_target(azpanel_resource.current_ip)
+        resource_target = _parse_target_or_400(azpanel_resource.current_ip)
         new_target = resource_target.value
         new_target_type = resource_target.target_type
         new_port = azpanel_resource.port
@@ -1231,11 +1377,13 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
                 group.last_error = "展开 IP 池已保存，当前没有健康 IP，暂不发布 DNS"
                 record = None
             else:
-                record = publish_origin(db, group, origin)
+                record = publish_origin(db, group, origin) if group.cloudflare_publish_enabled else None
+                if group.doh_enabled:
+                    _require_group_doh_sync(db, group)
         except Exception as exc:
             db.rollback()
             raise HTTPException(status_code=502, detail=f"DNS 发布失败，修改未保存：{exc}") from exc
-        if record is not None:
+        if record is not None or group.doh_enabled:
             group.current_origin_id = origin.id
             group.last_error = None
             payload = {
@@ -1243,10 +1391,16 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
                 "hostname": group.hostname,
                 "old_origin_id": origin.id,
                 "new_origin_id": origin.id,
-                "record_id": record["id"],
-                "record_type": record["type"],
-                "content": record["content"],
+                "record_id": record["id"] if record else None,
+                "record_type": record["type"] if record else None,
+                "content": record["content"] if record else origin.target,
             }
+            if record is None:
+                add_event(db, "doh.switched", "info", f"{group.hostname} DoH output updated", payload)
+                send_webhooks(db, "doh.switched", payload)
+                db.commit()
+                db.refresh(origin)
+                return origin
             add_event(db, "dns.switched", "info", f"{group.hostname} 已更新到 {record['type']} {record['content']}", payload)
             send_webhooks(db, "dns.switched", payload)
     elif group.enabled:

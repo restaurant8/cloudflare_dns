@@ -1,10 +1,11 @@
-from . import agents, alibaba_httpdns, auth, credentials, events, external_ips, groups, integrations, overview, settings, snippets, ssh, target_pool, telegram, webhooks, zones
+from . import agents, alibaba_httpdns, auth, credentials, doh, events, external_ips, groups, integrations, overview, settings, snippets, ssh, target_pool, telegram, webhooks, zones
 
 routers = [
     auth.router,
     credentials.router,
     zones.router,
     groups.router,
+    doh.router,
     alibaba_httpdns.router,
     agents.router,
     target_pool.router,

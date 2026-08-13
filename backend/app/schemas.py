@@ -355,6 +355,10 @@ class FailoverGroupCreate(BaseModel):
     enabled: bool = True
     min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
     adopt_record_id: str | None = None
+    cloudflare_publish_enabled: bool = True
+    doh_enabled: bool = False
+    doh_endpoint_id: int | None = None
+    doh_hostnames: list[str] = Field(default_factory=list, max_length=100)
 
 
 class FailoverGroupUpdate(BaseModel):
@@ -362,6 +366,10 @@ class FailoverGroupUpdate(BaseModel):
     ttl: int | None = Field(default=None, ge=30, le=86400)
     enabled: bool | None = None
     min_switch_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
+    cloudflare_publish_enabled: bool | None = None
+    doh_enabled: bool | None = None
+    doh_endpoint_id: int | None = None
+    doh_hostnames: list[str] | None = Field(default=None, max_length=100)
 
 
 class FailoverTimeRuleUpsert(BaseModel):
@@ -1010,11 +1018,73 @@ class FailoverGroupOut(BaseModel):
     current_record_id: str | None
     last_switch_at: datetime | None
     last_error: str | None
+    cloudflare_publish_enabled: bool
+    doh_enabled: bool
+    doh_endpoint_id: int | None
+    doh_hostnames: list[str] = []
     hostnames: list[FailoverHostnameOut] = []
     origins: list[OriginOut] = []
     time_rule: FailoverTimeRuleOut | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class DohEndpointCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    base_url: str = Field(min_length=1, max_length=500)
+    sync_path: str = Field(default="/_admin/doh-sync", min_length=1, max_length=255)
+    query_path: str = Field(default="/dns-query", min_length=1, max_length=255)
+    hmac_secret: str = Field(min_length=32, max_length=500)
+    timeout_seconds: int = Field(default=15, ge=1, le=120)
+    sync_interval_seconds: int = Field(default=300, ge=30, le=86400)
+    verify_tls: bool = True
+    enabled: bool = True
+
+
+class DohEndpointUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    base_url: str | None = Field(default=None, min_length=1, max_length=500)
+    sync_path: str | None = Field(default=None, min_length=1, max_length=255)
+    query_path: str | None = Field(default=None, min_length=1, max_length=255)
+    hmac_secret: str | None = Field(default=None, min_length=32, max_length=500)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=120)
+    sync_interval_seconds: int | None = Field(default=None, ge=30, le=86400)
+    verify_tls: bool | None = None
+    enabled: bool | None = None
+
+
+class DohEndpointOut(BaseModel):
+    id: int
+    name: str
+    base_url: str
+    sync_path: str
+    query_path: str
+    hmac_secret_configured: bool
+    timeout_seconds: int
+    sync_interval_seconds: int
+    verify_tls: bool
+    enabled: bool
+    last_synced_at: datetime | None
+    last_error: str | None
+    last_revision: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DohSnapshotRecordOut(BaseModel):
+    name: str
+    type: str
+    value: str
+    ttl: int
+    group_id: int
+
+
+class DohSnapshotOut(BaseModel):
+    version: int
+    revision: str
+    generated_at: int
+    records: list[DohSnapshotRecordOut]
 
 
 class AgentCreate(BaseModel):

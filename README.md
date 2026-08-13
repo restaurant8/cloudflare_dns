@@ -15,10 +15,16 @@ A self-hosted Cloudflare DNS failover dashboard for DNS-only A, AAAA, and CNAME 
 - Supports a scheduled peak-hours entry while retaining health-based fallback to other origins.
 - Sends Telegram and webhook events for status changes and DNS switches.
 - Manages Alibaba Cloud Mobile HTTPDNS built-in authoritative records in a separate failover menu through the existing azpanel integration, including per-account proxy routing, health thresholds, cooldowns, drift repair, and A/AAAA/CNAME switching.
+- Supports split-view publishing for self-hosted DoH: disable failover ownership of the existing Cloudflare decoy record while an HMAC-authenticated DoH endpoint receives the real origin selected by the existing health checks, priorities, failover/failback, and automatic IP rotation.
 
 ## Alibaba Cloud HTTPDNS failover
 
 Configure and enable the existing **azpanel** integration under **Auto IP Change**, using the same internal token configured as `CLOUDFLARE_DNS_INTERNAL_TOKEN` on azpanel. Alibaba Cloud AccessKeys stay in azpanel; this application only stores the selected account/Zone/record IDs and calls azpanel's authenticated internal gateway. The proxy assigned to each Alibaba Cloud account in azpanel is therefore also used for zone reads and record updates.
+
+For the AWS EC2 + CloudFront allowlist DoH deployment, see
+[`deploy/AWS_DOH_UPGRADE_ZH.md`](deploy/AWS_DOH_UPGRADE_ZH.md). Existing failover
+groups retain legacy Cloudflare-follow-failover behaviour after upgrade until
+Cloudflare ownership is explicitly disabled and DoH publishing is enabled.
 
 The separate **Alibaba Cloud HTTPDNS** menu adopts a Mobile HTTPDNS built-in authoritative Zone. It automatically imports every enabled A, AAAA, and CNAME record in that Zone, treating each current record value as its primary origin. Add backup IPs or hostnames per record, set their probe port and priority, and optionally adjust the supported Alibaba TTL and recovery cooldown. **Sync records** safely imports records later added to the Zone without duplicating existing failover settings. The regular scheduler then applies the same global probe timeout and fail/recovery thresholds used by Cloudflare failover.
 

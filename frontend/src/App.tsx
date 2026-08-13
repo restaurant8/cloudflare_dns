@@ -33,7 +33,7 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteAccount, AlibabaHttpDnsRemoteZone, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SynexVmSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
+import type { Agent, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteAccount, AlibabaHttpDnsRemoteZone, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SynexVmSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
 import {
   Sidebar,
   SidebarContent,
@@ -53,7 +53,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { ThemeToggle } from "@/components/theme-toggle";
 
-type Section = "overview" | "cloudflare" | "records" | "groups" | "alibabaHttpDns" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
+type Section = "overview" | "cloudflare" | "records" | "groups" | "doh" | "alibabaHttpDns" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
 type ProbeMode = "default" | "local_only" | "china_only" | "any";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
@@ -63,7 +63,8 @@ type GlobalOriginDraft = OriginAddDraft;
 // binding so the same form can keep, change or clear it explicitly.
 type GlobalOriginEditDraft = Omit<GlobalOriginDraft, "azpanel_remote_key"> & { unbind_external: boolean };
 type CollectionDraft = { name: string };
-type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | "" };
+type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | ""; cloudflare_publish_enabled: boolean; doh_enabled: boolean; doh_endpoint_id: number | ""; doh_hostnames: string };
+type DohEndpointDraft = { name: string; base_url: string; sync_path: string; query_path: string; hmac_secret: string; timeout_seconds: number; sync_interval_seconds: number; verify_tls: boolean; enabled: boolean };
 type GroupTimeRuleDraft = { enabled: boolean; name: string; origin_id: number | ""; timezone: string; weekdays: number[]; start_time: string; end_time: string };
 type HostnameAddDraft = { hostname: string; adopt_record_id: string };
 type DnsRecordType = "A" | "AAAA" | "CNAME";
@@ -92,6 +93,7 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "cloudflare", label: "Cloudflare", icon: KeyRound },
   { id: "records", label: "解析记录", icon: Cloud },
   { id: "groups", label: "故障切换", icon: ListRestart },
+  { id: "doh", label: "DoH", icon: ShieldCheck },
   { id: "alibabaHttpDns", label: "阿里云 HTTPDNS", icon: Router },
   { id: "targetPool", label: "IP 池子", icon: Server },
   { id: "externalIps", label: "外部 IP", icon: Globe2 },
@@ -157,6 +159,8 @@ const eventTypeLabels: Record<string, string> = {
   "failover.no_healthy_origin": "无健康源站",
   "dns.publish_failed": "DNS 发布失败",
   "dns.switched": "DNS 已切换",
+  "doh.synced": "DoH 白名单已同步",
+  "doh.sync_failed": "DoH 白名单同步失败",
   "alibaba_httpdns.group_created": "阿里云 HTTPDNS 切换组已创建",
   "alibaba_httpdns.zone_adopted": "阿里云 HTTPDNS 权威域名已接管",
   "alibaba_httpdns.origin_status_changed": "阿里云 HTTPDNS 源站状态变化",
@@ -498,6 +502,7 @@ export default function App() {
   const [records, setRecords] = useState<DnsRecord[]>([]);
   const [failoverCollections, setFailoverCollections] = useState<FailoverCollection[]>([]);
   const [groups, setGroups] = useState<FailoverGroup[]>([]);
+  const [dohEndpoints, setDohEndpoints] = useState<DohEndpoint[]>([]);
   const [alibabaHttpDnsGroups, setAlibabaHttpDnsGroups] = useState<AlibabaHttpDnsGroup[]>([]);
   const [targetPool, setTargetPool] = useState<TargetPoolItem[]>([]);
   const [externalIpSources, setExternalIpSources] = useState<ExternalIpSource[]>([]);
@@ -535,12 +540,13 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextAlibabaHttpDnsGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelSettings, nextSynexVmSettings, nextAzPanelResources, nextIpChangeJobs, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextDohEndpoints, nextAlibabaHttpDnsGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelSettings, nextSynexVmSettings, nextAzPanelResources, nextIpChangeJobs, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
       apiFetch<FailoverCollection[]>("/api/groups/collections", activeToken),
       apiFetch<FailoverGroup[]>("/api/groups", activeToken),
+      apiFetch<DohEndpoint[]>("/api/doh/endpoints", activeToken),
       apiFetch<AlibabaHttpDnsGroup[]>("/api/alibaba-httpdns/groups", activeToken),
       apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
@@ -562,6 +568,7 @@ export default function App() {
     setZones(nextZones);
     setFailoverCollections(nextCollections);
     setGroups(nextGroups);
+    setDohEndpoints(nextDohEndpoints);
     setAlibabaHttpDnsGroups(nextAlibabaHttpDnsGroups);
     setTargetPool(nextTargetPool);
     setExternalIpSources(nextExternalIpSources);
@@ -635,6 +642,8 @@ export default function App() {
       setGroups(nextGroups);
     } else if (current === "alibabaHttpDns") {
       await loadAlibabaHttpDnsSection(activeToken);
+    } else if (current === "doh") {
+      setDohEndpoints(await apiFetch<DohEndpoint[]>("/api/doh/endpoints", activeToken));
     } else if (current === "targetPool") {
       setTargetPool(await apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken));
     } else if (current === "externalIps") {
@@ -943,8 +952,9 @@ export default function App() {
           />
         )}
         {section === "groups" && (
-          <GroupsPanel token={token} collections={failoverCollections} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
+          <GroupsPanel token={token} collections={failoverCollections} groups={groups} dohEndpoints={dohEndpoints} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
         )}
+        {section === "doh" && <DohPanel token={token} endpoints={dohEndpoints} act={act} />}
         {section === "alibabaHttpDns" && (
           <AlibabaHttpDnsPanel token={token} groups={alibabaHttpDnsGroups} busy={busy} act={actAlibabaHttpDns} />
         )}
@@ -2127,10 +2137,72 @@ function TargetPoolPanel({ token, targetPool, groups, act }: { token: string; ta
   );
 }
 
+function DohPanel({ token, endpoints, act }: { token: string; endpoints: DohEndpoint[]; act: ActionRunner }) {
+  const emptyDraft: DohEndpointDraft = {
+    name: "AWS Hong Kong DoH",
+    base_url: "",
+    sync_path: "/_admin/doh-sync",
+    query_path: "/dns-query",
+    hmac_secret: "",
+    timeout_seconds: 15,
+    sync_interval_seconds: 300,
+    verify_tls: true,
+    enabled: true
+  };
+  const [draft, setDraft] = useState<DohEndpointDraft>(emptyDraft);
+
+  async function createEndpoint(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () => apiFetch("/api/doh/endpoints", token, { method: "POST", body: JSON.stringify(draft) }),
+      "DoH 服务已添加",
+      () => setDraft(emptyDraft)
+    );
+  }
+
+  return (
+    <section className="stack">
+      <div className="panelTitle">
+        <h2>DoH 分视图发布</h2>
+        <p>Cloudflare 可以保留固定迷惑值；DoH 白名单只接收故障切换组当前选中的真实健康源站。</p>
+      </div>
+      <form className="panel" onSubmit={createEndpoint}>
+        <h2>添加 AWS DoH 服务</h2>
+        <div className="formGrid">
+          <label>名称<input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
+          <label>CloudFront 地址<input placeholder="https://dxxxxxxxx.cloudfront.net" value={draft.base_url} onChange={(event) => setDraft({ ...draft, base_url: event.target.value })} /></label>
+          <label>管理同步路径<input value={draft.sync_path} onChange={(event) => setDraft({ ...draft, sync_path: event.target.value })} /></label>
+          <label>公开查询路径<input value={draft.query_path} onChange={(event) => setDraft({ ...draft, query_path: event.target.value })} /></label>
+          <label>HMAC 管理密钥<input type="password" minLength={32} placeholder="与 EC2 配置完全相同，至少 32 位" value={draft.hmac_secret} onChange={(event) => setDraft({ ...draft, hmac_secret: event.target.value })} /></label>
+          <label>强制对账间隔（秒）<input type="number" min={30} max={86400} value={draft.sync_interval_seconds} onChange={(event) => setDraft({ ...draft, sync_interval_seconds: Number(event.target.value) })} /></label>
+        </div>
+        <label className="inlineCheck"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />启用</label>
+        <button type="submit"><Plus size={16} /><span>添加 DoH 服务</span></button>
+      </form>
+      <div className="panel">
+        <h2>已配置服务</h2>
+        <div className="recordTable">
+          {endpoints.map((endpoint) => (
+            <div className="recordRow" key={endpoint.id}>
+              <div><strong>{endpoint.name}</strong><small>{endpoint.base_url}{endpoint.query_path} · 最近同步 {fmtDate(endpoint.last_synced_at)}</small>{endpoint.last_error && <small className="error">{endpoint.last_error}</small>}</div>
+              <div className="rowActions">
+                <button className="secondary" onClick={() => act(() => apiFetch(`/api/doh/endpoints/${endpoint.id}/sync`, token, { method: "POST" }), "DoH 白名单已同步")}><RefreshCw size={14} />立即同步</button>
+                <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/doh/endpoints/${endpoint.id}`, token, { method: "DELETE" }), "DoH 服务已删除")}><Trash2 size={14} /></button>
+              </div>
+            </div>
+          ))}
+          {endpoints.length === 0 && <div className="emptyCell">还没有 DoH 服务</div>}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function GroupsPanel({
   token,
   collections,
   groups,
+  dohEndpoints,
   targetPool,
   externalIpItems,
   azPanelResources,
@@ -2140,6 +2212,7 @@ function GroupsPanel({
   token: string;
   collections: FailoverCollection[];
   groups: FailoverGroup[];
+  dohEndpoints: DohEndpoint[];
   targetPool: TargetPoolItem[];
   externalIpItems: ExternalIpItem[];
   azPanelResources: AzPanelResource[];
@@ -2565,7 +2638,11 @@ function GroupsPanel({
         ttl: group.ttl,
         min_switch_interval_seconds: group.min_switch_interval_seconds,
         enabled: group.enabled,
-        collection_id: group.collection_id || ""
+        collection_id: group.collection_id || "",
+        cloudflare_publish_enabled: group.cloudflare_publish_enabled,
+        doh_enabled: group.doh_enabled,
+        doh_endpoint_id: group.doh_endpoint_id || "",
+        doh_hostnames: (group.doh_hostnames?.length ? group.doh_hostnames : group.hostnames?.map((item) => item.hostname).length ? group.hostnames.map((item) => item.hostname) : [group.hostname]).join("\n")
       }
     }));
   }
@@ -2573,14 +2650,36 @@ function GroupsPanel({
   async function saveGroupEdit(groupId: number) {
     const draft = groupEdits[groupId];
     if (!draft) return;
+    const group = groups.find((item) => item.id === groupId);
+    if (!group) return;
+    const nextDohHostnames = draft.doh_hostnames.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
+    const body: Record<string, unknown> = {
+      ttl: draft.ttl,
+      min_switch_interval_seconds: draft.min_switch_interval_seconds,
+      enabled: draft.enabled,
+      collection_id: draft.collection_id === "" ? null : draft.collection_id
+    };
+    const currentDohHostnames = group.doh_hostnames?.length
+      ? group.doh_hostnames
+      : group.hostnames?.map((item) => item.hostname).length
+        ? group.hostnames.map((item) => item.hostname)
+        : [group.hostname];
+    if (
+      draft.cloudflare_publish_enabled !== group.cloudflare_publish_enabled ||
+      draft.doh_enabled !== group.doh_enabled ||
+      (draft.doh_endpoint_id === "" ? null : draft.doh_endpoint_id) !== group.doh_endpoint_id ||
+      JSON.stringify(nextDohHostnames) !== JSON.stringify(currentDohHostnames)
+    ) {
+      body.cloudflare_publish_enabled = draft.cloudflare_publish_enabled;
+      body.doh_enabled = draft.doh_enabled;
+      body.doh_endpoint_id = draft.doh_endpoint_id === "" ? null : draft.doh_endpoint_id;
+      body.doh_hostnames = nextDohHostnames;
+    }
     await act(
       () =>
         apiFetch(`/api/groups/${groupId}`, token, {
           method: "PATCH",
-          body: JSON.stringify({
-            ...draft,
-            collection_id: draft.collection_id === "" ? null : draft.collection_id
-          })
+          body: JSON.stringify(body)
         }),
       "切换组已更新并应用",
       () => setEditingGroupId(null)
@@ -3133,7 +3232,11 @@ function GroupsPanel({
             ttl: group.ttl,
             min_switch_interval_seconds: group.min_switch_interval_seconds,
             enabled: group.enabled,
-            collection_id: group.collection_id || ""
+            collection_id: group.collection_id || "",
+            cloudflare_publish_enabled: group.cloudflare_publish_enabled,
+            doh_enabled: group.doh_enabled,
+            doh_endpoint_id: group.doh_endpoint_id || "",
+            doh_hostnames: (group.doh_hostnames?.length ? group.doh_hostnames : group.hostnames?.map((item) => item.hostname).length ? group.hostnames.map((item) => item.hostname) : [group.hostname]).join("\n")
           };
           const sortedOrigins = [...group.origins].sort((left, right) => left.priority - right.priority || left.id - right.id);
           const primaryPriority = sortedOrigins[0]?.priority;
@@ -3252,6 +3355,32 @@ function GroupsPanel({
                           ))}
                         </select>
                       </label>
+                      <label>
+                        Cloudflare 公网输出
+                        <select value={groupEdit.cloudflare_publish_enabled ? "enabled" : "disabled"} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, cloudflare_publish_enabled: event.target.value === "enabled" } }))}>
+                          <option value="enabled">由故障切换接管真实源站</option>
+                          <option value="disabled">保留现有迷惑记录，不接管</option>
+                        </select>
+                      </label>
+                      <label className="inlineCheck">
+                        <input type="checkbox" checked={groupEdit.doh_enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, doh_enabled: event.target.checked } }))} />
+                        DoH 返回真实健康源站
+                      </label>
+                      {groupEdit.doh_enabled && (
+                        <>
+                          <label>
+                            DoH 服务
+                            <select value={groupEdit.doh_endpoint_id} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, doh_endpoint_id: event.target.value ? Number(event.target.value) : "" } }))}>
+                              <option value="">请选择 DoH 服务</option>
+                              {dohEndpoints.filter((endpoint) => endpoint.enabled).map((endpoint) => <option value={endpoint.id} key={endpoint.id}>{endpoint.name}</option>)}
+                            </select>
+                          </label>
+                          <label>
+                            DoH 白名单域名
+                            <textarea rows={3} placeholder={group.hostname} value={groupEdit.doh_hostnames} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, doh_hostnames: event.target.value } }))} />
+                          </label>
+                        </>
+                      )}
                       <label className="inlineCheck">
                         <input type="checkbox" checked={groupEdit.enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, enabled: event.target.checked } }))} />
                         启用这个切换组

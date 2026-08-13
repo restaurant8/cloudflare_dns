@@ -998,7 +998,57 @@ def test_ordinary_healthy_priority_change_still_obeys_cooldown(monkeypatch):
 
     assert switches == 0
     assert group.current_origin_id == current.id
+
+
+def test_cloudflare_disabled_group_does_not_read_write_or_emit_fake_dns_events(monkeypatch):
+    db = make_session()
+    group, current = setup_group(db, "192.0.2.10")
+    group.current_origin_id = current.id
+    group.cloudflare_publish_enabled = False
+    group.doh_enabled = False
+    current.target = "expanded.example.net"
+    current.target_type = "hostname"
+    current.publish_mode = EXPANDED_PUBLISH_MODE
+    set_healthy_ips(current, ["192.0.2.20"])
+    set_published_ips(current, [])
+    db.commit()
+    events = []
+
+    monkeypatch.setattr("app.failover.current_dns_matches_origin", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Cloudflare read")))
+    monkeypatch.setattr("app.failover.publish_origin", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Cloudflare write")))
+    monkeypatch.setattr("app.failover.add_event", lambda _db, event_type, *_args: events.append(event_type))
+
+    for _ in range(5):
+        assert evaluate_failover_groups(db) == 0
+
     assert events == []
+
+
+def test_cloudflare_failure_and_unavailable_doh_does_not_advance_selection(monkeypatch):
+    db = make_session()
+    group, failed = setup_group(db, "192.0.2.10")
+    healthy = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=2,
+    )
+    failed.status = "unhealthy"
+    failed.priority = 1
+    group.current_origin_id = failed.id
+    group.doh_enabled = True
+    group.doh_endpoint_id = None
+    db.add(healthy)
+    db.commit()
+
+    monkeypatch.setattr("app.failover.publish_origin", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("cf unavailable")))
+    monkeypatch.setattr("app.failover.add_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
+
+    assert evaluate_failover_groups(db) == 0
+    assert group.current_origin_id == failed.id
 
 
 def test_failed_current_origin_escapes_cooldown(monkeypatch):

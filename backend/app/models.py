@@ -177,6 +177,13 @@ class FailoverGroup(Base, TimestampMixin):
     last_switch_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
     no_healthy_notified_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Publishing is deliberately independent from origin selection. Existing
+    # installations default to the legacy behaviour (Cloudflare follows the
+    # selected healthy origin, DoH disabled), so the migration is non-disruptive.
+    cloudflare_publish_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    doh_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    doh_endpoint_id: Mapped[int | None] = mapped_column(ForeignKey("doh_endpoints.id", ondelete="SET NULL"))
+    doh_hostnames_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
 
     zone: Mapped["Zone"] = relationship("Zone", back_populates="groups")
     collection: Mapped["FailoverCollection | None"] = relationship("FailoverCollection", back_populates="groups")
@@ -188,6 +195,41 @@ class FailoverGroup(Base, TimestampMixin):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    doh_endpoint: Mapped["DohEndpoint | None"] = relationship("DohEndpoint", back_populates="groups")
+
+    @property
+    def doh_hostnames(self) -> list[str]:
+        import json
+
+        try:
+            values = json.loads(self.doh_hostnames_json or "[]")
+        except (TypeError, ValueError):
+            values = []
+        return [str(value) for value in values if value]
+
+
+class DohEndpoint(Base, TimestampMixin):
+    __tablename__ = "doh_endpoints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    sync_path: Mapped[str] = mapped_column(String(255), default="/_admin/doh-sync", nullable=False)
+    query_path: Mapped[str] = mapped_column(String(255), default="/dns-query", nullable=False)
+    hmac_secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=15, nullable=False)
+    sync_interval_seconds: Mapped[int] = mapped_column(Integer, default=300, nullable=False)
+    verify_tls: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    last_revision: Mapped[str | None] = mapped_column(String(80))
+
+    groups: Mapped[list["FailoverGroup"]] = relationship("FailoverGroup", back_populates="doh_endpoint")
+
+    @property
+    def hmac_secret_configured(self) -> bool:
+        return bool(self.hmac_secret_encrypted)
 
 
 class FailoverHostname(Base, TimestampMixin):

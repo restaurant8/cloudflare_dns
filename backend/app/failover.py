@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from .cloudflare import CloudflareClient, CloudflareError
 from .dns_utils import record_type_for_target_type
+from .doh import sync_group_doh_endpoint
 from .events import add_event
 from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, PROBE_MODE_CHINA_ONLY, origin_probe_mode, run_local_checks
 from .integrations import AutoIpChangeGuard, trigger_ip_change_for_origin
@@ -654,7 +655,15 @@ def _evaluate_single_group(
     group.no_healthy_notified_at = None
     if group.last_error in RECOVERABLE_GROUP_ERRORS:
         group.last_error = None
+    if not group.cloudflare_publish_enabled:
+        # Cloudflare errors are no longer actionable once the group relinquishes
+        # ownership. DoH errors live on the endpoint itself.
+        group.last_error = None
     if desired.id == group.current_origin_id and not group.last_error:
+        if not group.cloudflare_publish_enabled:
+            # DoH reconciliation has its own revision-aware scheduler. When this
+            # group does not own the public record, do not even read Cloudflare.
+            return False
         # Nothing to switch. Verifying that Cloudflare still matches costs one API
         # call per hostname, so API handlers editing an unrelated origin opt out and
         # return here for free; the scheduler keeps repairing drift on its own tick.
@@ -722,8 +731,10 @@ def _evaluate_single_group(
         if elapsed < group.min_switch_interval_seconds and desired.id != group.current_origin_id and not bypass_switch_interval:
             return False
     old_origin_id = group.current_origin_id
+    record = None
     try:
-        record = publish_origin(db, group, desired)
+        if group.cloudflare_publish_enabled:
+            record = publish_origin(db, group, desired)
     except Exception as exc:
         message = str(exc)
         if group.last_error != message:
@@ -732,36 +743,89 @@ def _evaluate_single_group(
             payload = {"group_id": group.id, "hostname": failed_hostname, "error": message}
             add_event(db, "dns.publish_failed", "error", f"{group.hostname} 发布 DNS 失败: {message}", payload)
             send_webhooks(db, "dns.publish_failed", payload)
+        if group.doh_enabled:
+            # Output channels are independent. A temporary Cloudflare failure
+            # must not keep private DoH clients on a failed real origin.
+            previous_origin_id = group.current_origin_id
+            if previous_origin_id == desired.id:
+                # DoH already accepted this selection on the earlier attempt;
+                # this tick is only retrying Cloudflare, so do not force another
+                # DoH POST or emit another switch webhook.
+                return False
+            group.current_origin_id = desired.id
+            if sync_group_doh_endpoint(db, group):
+                group.last_switch_at = now
+                switch_reason = selection.switch_reason
+                old_origin = next((origin for origin in group.origins if origin.id == previous_origin_id), None)
+                if switch_reason == "priority" and previous_origin_id is not None and not _origin_is_available(old_origin):
+                    switch_reason = "health_failover"
+                switch_payload = {
+                    "group_id": group.id,
+                    "hostname": group.hostname,
+                    "hostnames": group.doh_hostnames or [group.hostname],
+                    "old_origin_id": previous_origin_id,
+                    "new_origin_id": desired.id,
+                    "record_id": None,
+                    "record_type": None,
+                    "content": desired.target,
+                    "switch_reason": switch_reason,
+                    "time_rule_id": selection.time_rule_id,
+                }
+                add_event(db, "doh.switched", "info", f"{group.hostname} DoH switched to {desired.target}", switch_payload)
+                send_webhooks(db, "doh.switched", switch_payload)
+                return desired.id != previous_origin_id
+            group.current_origin_id = previous_origin_id
         return False
 
+    retrying_cloudflare = old_origin_id == desired.id and bool(group.last_error)
     group.current_origin_id = desired.id
+    db.flush()
+    doh_succeeded = (
+        True
+        if retrying_cloudflare and group.doh_enabled
+        else sync_group_doh_endpoint(db, group)
+        if group.doh_enabled
+        else False
+    )
+    if not group.cloudflare_publish_enabled and not doh_succeeded:
+        group.current_origin_id = old_origin_id
+        return False
     group.last_switch_at = now
-    group.last_error = None
-    _consistency_checked_at[group.id] = now
-    published_hostnames = record.get("hostnames") or [group.hostname]
+    if group.cloudflare_publish_enabled:
+        group.last_error = None
+        _consistency_checked_at[group.id] = now
+    # Cloudflare and DoH are independent outputs. They share the health decision,
+    # while a Cloudflare-disabled group leaves its existing public decoy untouched.
+    published_hostnames = (record or {}).get("hostnames") or group.doh_hostnames or [group.hostname]
     hostname_label = ", ".join(str(item) for item in published_hostnames)
     switch_reason = selection.switch_reason
     old_origin = next((origin for origin in group.origins if origin.id == old_origin_id), None)
     if switch_reason == "priority" and old_origin_id is not None and not _origin_is_available(old_origin):
         switch_reason = "health_failover"
+    if retrying_cloudflare and record is not None:
+        switch_reason = "consistency_repair"
     payload = {
         "group_id": group.id,
         "hostname": hostname_label,
         "hostnames": published_hostnames,
         "old_origin_id": old_origin_id,
         "new_origin_id": desired.id,
-        "record_id": record["id"],
-        "record_type": record["type"],
-        "content": record["content"],
+        "record_id": record["id"] if record else None,
+        "record_type": record["type"] if record else None,
+        "content": record["content"] if record else desired.target,
         "switch_reason": switch_reason,
         "time_rule_id": selection.time_rule_id,
     }
-    add_event(
-        db,
-        "dns.switched",
-        "info",
-        f"{group.hostname} 已切换到 {record['type']} {record['content']}",
-        payload,
+    if record is None:
+        add_event(db, "doh.switched", "info", f"{group.hostname} DoH switched to {desired.target}", payload)
+        send_webhooks(db, "doh.switched", payload)
+        return old_origin_id != desired.id
+    event_type = "dns.consistency_repaired" if retrying_cloudflare else "dns.switched"
+    message = (
+        f"{group.hostname} 已修复 Cloudflare 输出为 {record['type']} {record['content']}"
+        if retrying_cloudflare
+        else f"{group.hostname} 已切换到 {record['type']} {record['content']}"
     )
-    send_webhooks(db, "dns.switched", payload)
-    return True
+    add_event(db, event_type, "info", message, payload)
+    send_webhooks(db, event_type, payload)
+    return old_origin_id != desired.id

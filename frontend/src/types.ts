@@ -252,9 +252,30 @@ export type FailoverGroup = {
   current_record_id: string | null;
   last_switch_at: string | null;
   last_error: string | null;
+  cloudflare_publish_enabled: boolean;
+  doh_enabled: boolean;
+  doh_endpoint_id: number | null;
+  doh_hostnames: string[];
   time_rule: FailoverTimeRule | null;
   hostnames: FailoverHostname[];
   origins: Origin[];
+};
+
+export type DohEndpoint = {
+  id: number;
+  name: string;
+  base_url: string;
+  sync_path: string;
+  query_path: string;
+  hmac_secret_configured: boolean;
+  timeout_seconds: number;
+  sync_interval_seconds: number;
+  verify_tls: boolean;
+  enabled: boolean;
+  last_synced_at: string | null;
+  last_error: string | null;
+  last_revision: string | null;
+  created_at: string;
 };
 
 export type Agent = {

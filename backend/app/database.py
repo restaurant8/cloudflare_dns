@@ -97,6 +97,19 @@ def _migrate_existing_schema() -> None:
                 connection.execute(text(_failover_group_collection_migration_statement(dialect)))
             if "no_healthy_notified_at" not in existing_columns:
                 connection.execute(text(_failover_group_no_healthy_migration_statement(dialect)))
+            for column_name, statement in _failover_group_output_migration_statements(dialect).items():
+                if column_name not in existing_columns:
+                    connection.execute(text(statement))
+            # A short-lived development build used fixed/disabled modes. Map both
+            # to the corrected semantics: leave the existing Cloudflare record
+            # untouched and let DoH publish the selected real origin.
+            if "cloudflare_publish_enabled" not in existing_columns and "cloudflare_publish_mode" in existing_columns:
+                connection.execute(
+                    text(
+                        "UPDATE failover_groups SET cloudflare_publish_enabled = "
+                        "CASE WHEN cloudflare_publish_mode IN ('fixed', 'disabled') THEN FALSE ELSE TRUE END"
+                    )
+                )
             current_record_id = existing_columns.get("current_record_id")
             if current_record_id is not None:
                 column_type = str(current_record_id["type"]).lower()
@@ -345,6 +358,22 @@ def _failover_group_collection_migration_statement(dialect: str) -> str:
     if dialect == "mysql":
         return "ALTER TABLE failover_groups ADD COLUMN collection_id INT NULL"
     return "ALTER TABLE failover_groups ADD COLUMN collection_id INTEGER"
+
+
+def _failover_group_output_migration_statements(dialect: str) -> dict[str, str]:
+    if dialect == "mysql":
+        return {
+            "cloudflare_publish_enabled": "ALTER TABLE failover_groups ADD COLUMN cloudflare_publish_enabled TINYINT(1) NOT NULL DEFAULT 1",
+            "doh_enabled": "ALTER TABLE failover_groups ADD COLUMN doh_enabled TINYINT(1) NOT NULL DEFAULT 0",
+            "doh_endpoint_id": "ALTER TABLE failover_groups ADD COLUMN doh_endpoint_id INT NULL",
+            "doh_hostnames_json": "ALTER TABLE failover_groups ADD COLUMN doh_hostnames_json TEXT NULL",
+        }
+    return {
+        "cloudflare_publish_enabled": "ALTER TABLE failover_groups ADD COLUMN cloudflare_publish_enabled BOOLEAN NOT NULL DEFAULT TRUE",
+        "doh_enabled": "ALTER TABLE failover_groups ADD COLUMN doh_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+        "doh_endpoint_id": "ALTER TABLE failover_groups ADD COLUMN doh_endpoint_id INTEGER",
+        "doh_hostnames_json": "ALTER TABLE failover_groups ADD COLUMN doh_hostnames_json TEXT NOT NULL DEFAULT '[]'",
+    }
 
 
 def get_db():

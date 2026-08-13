@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.database import Base
-from app.models import Agent, AzPanelRemoteResource, AzPanelResource, CloudflareCredential, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, User, Zone
+from app.models import Agent, AzPanelRemoteResource, AzPanelResource, CloudflareCredential, DohEndpoint, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, User, Zone
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, resolved_ips
 from app.routes.groups import add_group_hostname, create_collection, create_global_origin, create_group, create_origin, delete_global_origin, delete_group_hostname, delete_origin, delete_time_rule, update_global_origin, update_group, update_origin, upsert_time_rule
 from app.schemas import FailoverCollectionCreate, FailoverGlobalOriginCreate, FailoverGlobalOriginUpdate, FailoverGroupCreate, FailoverGroupOut, FailoverGroupUpdate, FailoverHostnameCreate, FailoverTimeRuleUpsert, OriginCreate, OriginOut, OriginUpdate
@@ -125,6 +125,19 @@ def test_create_group_adopts_record_by_id_when_name_filter_misses(monkeypatch):
 
     assert group.current_record_id == "record-1"
     assert group.origins[0].target == "192.0.2.10"
+
+
+def test_invalid_origin_target_returns_400_instead_of_500():
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(zone_id=zone.id, hostname="www.example.com")
+    db.add(group)
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        create_origin(group.id, OriginCreate(target="https://bad target/", port=443), user, db)
+
+    assert exc_info.value.status_code == 400
 
 
 def test_upsert_time_rule_creates_then_updates_single_group_rule(monkeypatch):
@@ -692,6 +705,81 @@ def test_update_group_collection_adds_and_removes_global_origin_mirrors():
     assert group is not None
     assert group.collection_id is None
     assert [origin for origin in group.origins if origin.global_origin_id] == []
+
+
+def test_update_group_with_unchanged_output_fields_does_not_republish(monkeypatch):
+    db = make_session()
+    zone, user = setup_zone(db)
+    group = FailoverGroup(
+        zone_id=zone.id,
+        hostname="www.example.com",
+        ttl=60,
+        enabled=True,
+        cloudflare_publish_enabled=True,
+        doh_enabled=False,
+        doh_hostnames_json='["www.example.com"]',
+    )
+    db.add(group)
+    db.flush()
+    origin = Origin(group_id=group.id, target="192.0.2.10", target_type="ipv4", port=443, status="healthy")
+    db.add(origin)
+    db.flush()
+    group.current_origin_id = origin.id
+    db.commit()
+
+    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.routes.groups.publish_origin", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected publish")))
+
+    update_group(
+        group.id,
+        FailoverGroupUpdate(
+            ttl=60,
+            enabled=True,
+            cloudflare_publish_enabled=True,
+            doh_enabled=False,
+            doh_endpoint_id=None,
+            doh_hostnames=["www.example.com"],
+        ),
+        user,
+        db,
+    )
+
+
+def test_update_group_rejects_doh_hostname_conflict_immediately():
+    db = make_session()
+    zone, user = setup_zone(db)
+    endpoint = DohEndpoint(
+        name="aws-hk",
+        base_url="https://example.cloudfront.net",
+        hmac_secret_encrypted=encrypt_secret("x" * 40),
+        enabled=True,
+    )
+    db.add(endpoint)
+    db.flush()
+    first = FailoverGroup(
+        zone_id=zone.id,
+        hostname="one.example.com",
+        doh_enabled=True,
+        doh_endpoint_id=endpoint.id,
+        doh_hostnames_json='["private.example.com"]',
+    )
+    second = FailoverGroup(zone_id=zone.id, hostname="two.example.com")
+    db.add_all([first, second])
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_group(
+            second.id,
+            FailoverGroupUpdate(
+                doh_enabled=True,
+                doh_endpoint_id=endpoint.id,
+                doh_hostnames=["private.example.com"],
+            ),
+            user,
+            db,
+        )
+
+    assert exc_info.value.status_code == 409
 
 
 def test_update_current_origin_publishes_new_dns_target(monkeypatch):
