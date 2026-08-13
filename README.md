@@ -16,6 +16,7 @@ A self-hosted Cloudflare DNS failover dashboard for DNS-only A, AAAA, and CNAME 
 - Sends Telegram and webhook events for status changes and DNS switches.
 - Manages Alibaba Cloud Mobile HTTPDNS built-in authoritative records in a separate failover menu through the existing azpanel integration, including per-account proxy routing, health thresholds, cooldowns, drift repair, and A/AAAA/CNAME switching.
 - Supports split-view publishing for self-hosted DoH: disable failover ownership of the existing Cloudflare decoy record while an HMAC-authenticated DoH endpoint receives the real origin selected by the existing health checks, priorities, failover/failback, and automatic IP rotation.
+- Adds a separate **DoH Failover** menu for arbitrary query names. Each rule owns independent candidate IPs/hostnames, TCP health checks, priorities, failover state, and DoH-only publishing without touching Cloudflare.
 
 ## Alibaba Cloud HTTPDNS failover
 
@@ -26,7 +27,9 @@ For the AWS EC2 + CloudFront allowlist DoH deployment, see
 groups retain legacy Cloudflare-follow-failover behaviour after upgrade until
 Cloudflare ownership is explicitly disabled and DoH publishing is enabled.
 
-The separate **Alibaba Cloud HTTPDNS** menu adopts a Mobile HTTPDNS built-in authoritative Zone. It automatically imports every enabled A, AAAA, and CNAME record in that Zone, treating each current record value as its primary origin. Add backup IPs or hostnames per record, set their probe port and priority, and optionally adjust the supported Alibaba TTL and recovery cooldown. **Sync records** safely imports records later added to the Zone without duplicating existing failover settings. The regular scheduler then applies the same global probe timeout and fail/recovery thresholds used by Cloudflare failover.
+The separate **Alibaba Cloud HTTPDNS** menu adopts a Mobile HTTPDNS built-in authoritative Zone. It automatically imports every enabled A, AAAA, and CNAME record in that Zone, treating each current record value as its primary origin. Add backup IPs or hostnames per record, set their probe port and priority, and optionally adjust the supported Alibaba TTL and recovery cooldown. Hostname targets are resolved with a bounded timeout and checked per address; only healthy addresses matching the record family are published. The last successful remote value is retained while an edited target is still recovering, and account-level exponential backoff prevents a gateway outage from generating one request per record per scheduler tick.
+
+Cloudflare public DNS, Alibaba HTTPDNS, and AWS private DoH are independent output channels. The same hostname may exist in all three at once, with separate candidates, health state, selected targets, and different published values.
 
 ## Quick start
 

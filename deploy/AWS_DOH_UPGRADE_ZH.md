@@ -250,4 +250,15 @@ sudo systemctl restart private-doh
 sudo systemctl status private-doh --no-pager
 ```
 
+## 独立 DoH 故障切换
+
+侧边栏的“DoH 故障切换”与 Cloudflare 故障切换组完全独立。适合查询域名不属于
+自己的 Cloudflare 账号，或私有 DoH 需要使用另一套候选 IP 的场景。
+
+1. 在“DoH 服务”中先配置 CloudFront 与 HMAC；
+2. 打开“DoH 故障切换”，创建查询域名（例如 `snejsat.baidu.com`）；
+3. 在该规则下添加主 IP 和备用 IP，并填写实际业务端口；
+4. 优先级数字越小越优先；健康检查失败达到阈值后自动发布下一健康目标；
+5. 该功能只更新 EC2 DoH 白名单，不读取、写入或删除任何 Cloudflare 记录。
+
 最终只保留标准公开查询入口 `/dns-query`；HMAC 管理密钥继续保留，不能取消。

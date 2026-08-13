@@ -33,7 +33,7 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteAccount, AlibabaHttpDnsRemoteZone, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SynexVmSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
+import type { Agent, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteAccount, AlibabaHttpDnsRemoteZone, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, DohFailoverGroup, DohFailoverOrigin, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SynexVmSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
 import {
   Sidebar,
   SidebarContent,
@@ -53,7 +53,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { ThemeToggle } from "@/components/theme-toggle";
 
-type Section = "overview" | "cloudflare" | "records" | "groups" | "doh" | "alibabaHttpDns" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
+type Section = "overview" | "cloudflare" | "records" | "groups" | "doh" | "dohFailover" | "alibabaHttpDns" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
 type ProbeMode = "default" | "local_only" | "china_only" | "any";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
@@ -65,6 +65,8 @@ type GlobalOriginEditDraft = Omit<GlobalOriginDraft, "azpanel_remote_key"> & { u
 type CollectionDraft = { name: string };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | ""; cloudflare_publish_enabled: boolean; doh_enabled: boolean; doh_endpoint_id: number | ""; doh_hostnames: string };
 type DohEndpointDraft = { name: string; base_url: string; sync_path: string; query_path: string; hmac_secret: string; timeout_seconds: number; sync_interval_seconds: number; verify_tls: boolean; enabled: boolean };
+type DohFailoverGroupDraft = { doh_endpoint_id: number | ""; hostname: string; ttl: number; min_switch_interval_seconds: number; enabled: boolean };
+type DohFailoverOriginDraft = { target: string; port: number; priority: number; remark: string; enabled: boolean; ignore_health_check: boolean };
 type GroupTimeRuleDraft = { enabled: boolean; name: string; origin_id: number | ""; timezone: string; weekdays: number[]; start_time: string; end_time: string };
 type HostnameAddDraft = { hostname: string; adopt_record_id: string };
 type DnsRecordType = "A" | "AAAA" | "CNAME";
@@ -93,7 +95,8 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "cloudflare", label: "Cloudflare", icon: KeyRound },
   { id: "records", label: "解析记录", icon: Cloud },
   { id: "groups", label: "故障切换", icon: ListRestart },
-  { id: "doh", label: "DoH", icon: ShieldCheck },
+  { id: "doh", label: "DoH 服务", icon: ShieldCheck },
+  { id: "dohFailover", label: "DoH 故障切换", icon: ListRestart },
   { id: "alibabaHttpDns", label: "阿里云 HTTPDNS", icon: Router },
   { id: "targetPool", label: "IP 池子", icon: Server },
   { id: "externalIps", label: "外部 IP", icon: Globe2 },
@@ -167,6 +170,7 @@ const eventTypeLabels: Record<string, string> = {
   "alibaba_httpdns.no_healthy_origin": "阿里云 HTTPDNS 无健康源站",
   "alibaba_httpdns.publish_failed": "阿里云 HTTPDNS 发布失败",
   "alibaba_httpdns.switched": "阿里云 HTTPDNS 已切换",
+  "alibaba_httpdns.records_updated": "阿里云 HTTPDNS 健康地址已更新",
   "webhook.failed": "Webhook 发送失败",
   "telegram.failed": "Telegram 发送失败",
   "telegram.test": "Telegram 测试",
@@ -503,6 +507,7 @@ export default function App() {
   const [failoverCollections, setFailoverCollections] = useState<FailoverCollection[]>([]);
   const [groups, setGroups] = useState<FailoverGroup[]>([]);
   const [dohEndpoints, setDohEndpoints] = useState<DohEndpoint[]>([]);
+  const [dohFailoverGroups, setDohFailoverGroups] = useState<DohFailoverGroup[]>([]);
   const [alibabaHttpDnsGroups, setAlibabaHttpDnsGroups] = useState<AlibabaHttpDnsGroup[]>([]);
   const [targetPool, setTargetPool] = useState<TargetPoolItem[]>([]);
   const [externalIpSources, setExternalIpSources] = useState<ExternalIpSource[]>([]);
@@ -540,13 +545,14 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextDohEndpoints, nextAlibabaHttpDnsGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelSettings, nextSynexVmSettings, nextAzPanelResources, nextIpChangeJobs, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextDohEndpoints, nextDohFailoverGroups, nextAlibabaHttpDnsGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelSettings, nextSynexVmSettings, nextAzPanelResources, nextIpChangeJobs, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
       apiFetch<FailoverCollection[]>("/api/groups/collections", activeToken),
       apiFetch<FailoverGroup[]>("/api/groups", activeToken),
       apiFetch<DohEndpoint[]>("/api/doh/endpoints", activeToken),
+      apiFetch<DohFailoverGroup[]>("/api/doh-failover/groups", activeToken),
       apiFetch<AlibabaHttpDnsGroup[]>("/api/alibaba-httpdns/groups", activeToken),
       apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
@@ -569,6 +575,7 @@ export default function App() {
     setFailoverCollections(nextCollections);
     setGroups(nextGroups);
     setDohEndpoints(nextDohEndpoints);
+    setDohFailoverGroups(nextDohFailoverGroups);
     setAlibabaHttpDnsGroups(nextAlibabaHttpDnsGroups);
     setTargetPool(nextTargetPool);
     setExternalIpSources(nextExternalIpSources);
@@ -644,6 +651,13 @@ export default function App() {
       await loadAlibabaHttpDnsSection(activeToken);
     } else if (current === "doh") {
       setDohEndpoints(await apiFetch<DohEndpoint[]>("/api/doh/endpoints", activeToken));
+    } else if (current === "dohFailover") {
+      const [nextDohEndpoints, nextDohFailoverGroups] = await Promise.all([
+        apiFetch<DohEndpoint[]>("/api/doh/endpoints", activeToken),
+        apiFetch<DohFailoverGroup[]>("/api/doh-failover/groups", activeToken)
+      ]);
+      setDohEndpoints(nextDohEndpoints);
+      setDohFailoverGroups(nextDohFailoverGroups);
     } else if (current === "targetPool") {
       setTargetPool(await apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken));
     } else if (current === "externalIps") {
@@ -952,9 +966,10 @@ export default function App() {
           />
         )}
         {section === "groups" && (
-          <GroupsPanel token={token} collections={failoverCollections} groups={groups} dohEndpoints={dohEndpoints} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
+          <GroupsPanel token={token} collections={failoverCollections} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
         )}
         {section === "doh" && <DohPanel token={token} endpoints={dohEndpoints} act={act} />}
+        {section === "dohFailover" && <DohFailoverPanel token={token} endpoints={dohEndpoints} groups={dohFailoverGroups} cloudflareGroups={groups} act={act} />}
         {section === "alibabaHttpDns" && (
           <AlibabaHttpDnsPanel token={token} groups={alibabaHttpDnsGroups} busy={busy} act={actAlibabaHttpDns} />
         )}
@@ -1643,7 +1658,7 @@ function AlibabaHttpDnsPanel({ token, groups, busy, act }: { token: string; grou
       <div className="panel alibabaHttpDnsIntro">
         <div className="panelTitle">
           <h2>移动解析 HTTPDNS · 内置权威域名故障切换</h2>
-          <p>添加一个权威域名后，自动读取其中全部 A、AAAA、CNAME 记录；逐条检测当前解析值，不可用时切换到备用并在恢复后自动回切。</p>
+          <p>与 Cloudflare 公网 DNS、AWS 私有 DoH 并列运行；同一域名可在三边发布不同目标。域名型候选会逐 IP 检测，只发布健康地址。</p>
         </div>
         <div className="rowActions">
           <button className="secondary" disabled={busy} onClick={() => act(() => loadAccounts(), "阿里云账户已刷新")}><RefreshCw size={15} />刷新账户</button>
@@ -1724,12 +1739,12 @@ function AlibabaHttpDnsRecordCard({ token, group, busy, act }: { token: string; 
         </div>
       </div>
       {editingGroup && <div className="alibabaGroupSettings"><label>解析 TTL<select value={groupEdit.ttl} onChange={(event) => setGroupEdit({ ...groupEdit, ttl: Number(event.target.value) })}>{[5, 30, 60, 3600, 43200, 86400].map((ttl) => <option value={ttl} key={ttl}>{ttl} 秒</option>)}</select></label><label>自动回切冷却<input type="number" min={0} max={86400} value={groupEdit.min_switch_interval_seconds} onChange={(event) => setGroupEdit({ ...groupEdit, min_switch_interval_seconds: Number(event.target.value) })} /></label><button onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "PATCH", body: JSON.stringify(groupEdit) }), "切换设置已保存", () => setEditingGroup(false))}><Save size={14} />保存设置</button><button className="secondary" onClick={() => setEditingGroup(false)}>取消</button></div>}
-      <div className="alibabaHttpDnsSummary"><div><span>阿里云当前解析</span><strong>{current?.target || "尚未发布"}</strong></div><div><span>TTL / 线路</span><strong>{group.ttl}s · {group.request_source}</strong></div><div><span>最后切换</span><strong>{fmtDate(group.last_switch_at)}</strong></div><div><span>自动切换状态</span><strong className={group.last_error ? "textDanger" : ""}>{group.last_error || "运行正常"}</strong></div></div>
+      <div className="alibabaHttpDnsSummary"><div><span>阿里云实际已发布</span><strong>{group.last_published_value || current?.target || "尚未发布"}</strong></div><div><span>TTL / 线路</span><strong>{group.ttl}s · {group.request_source}</strong></div><div><span>最后切换</span><strong>{fmtDate(group.last_switch_at)}</strong></div><div><span>自动切换状态</span><strong className={group.last_error ? "textDanger" : ""}>{group.last_error || "运行正常"}</strong></div></div>
       <div className="originList">
         {group.origins.slice().sort((a, b) => a.priority - b.priority || a.id - b.id).map((origin) => editingOriginId === origin.id ? (
           <div className="origin originEditing" key={origin.id}><div className="originEditGrid alibabaOriginEditGrid"><label>IP / 域名<input value={originEdit.target} onChange={(event) => setOriginEdit({ ...originEdit, target: event.target.value })} /></label><label>检查端口<input type="number" min={1} max={65535} value={originEdit.port} onChange={(event) => setOriginEdit({ ...originEdit, port: Number(event.target.value) })} /></label><label>优先级<input type="number" min={0} value={originEdit.priority} onChange={(event) => setOriginEdit({ ...originEdit, priority: Number(event.target.value) })} /></label><label>备注<input value={originEdit.remark} onChange={(event) => setOriginEdit({ ...originEdit, remark: event.target.value })} /></label><label className="inlineCheck"><input type="checkbox" checked={originEdit.enabled} onChange={(event) => setOriginEdit({ ...originEdit, enabled: event.target.checked })} />启用</label><label className="inlineCheck"><input type="checkbox" checked={originEdit.ignore_health_check} onChange={(event) => setOriginEdit({ ...originEdit, ignore_health_check: event.target.checked })} />无视健康检查</label><button onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/origins/${origin.id}`, token, { method: "PATCH", body: JSON.stringify(originEdit) }), "目标已更新", () => setEditingOriginId(null))}><Save size={14} />保存</button><button className="secondary" onClick={() => setEditingOriginId(null)}>取消</button></div></div>
         ) : (
-          <div className={`origin ${origin.id === group.current_origin_id ? "originCurrent" : ""}`} key={origin.id}><span className={`status ${origin.enabled ? origin.status : "disabled"}`}>{statusText(origin.enabled ? origin.status : "disabled")}</span><div><div className="originTitleLine"><strong>{origin.remark || origin.target}</strong><span className={`originBadge ${origin.priority === 0 ? "primary" : "backup"}`}>{origin.priority === 0 ? "主用" : `备用 #${origin.priority}`}</span>{origin.id === group.current_origin_id && <span className="originBadge current">当前解析</span>}</div><span>{origin.target}:{origin.port} · {targetTypeText(origin.target_type)} · 最后检测 {fmtDate(origin.last_checked_at)}{origin.last_rtt_ms != null ? ` · ${origin.last_rtt_ms}ms` : ""}</span>{origin.last_error && <span className="textDanger">{origin.last_error}</span>}</div><button className="icon secondaryIcon" title="编辑目标" onClick={() => beginEditOrigin(origin)}><Pencil size={14} /></button><button className="icon dangerBtn" title="删除目标" disabled={group.origins.length <= 1} onClick={() => window.confirm(`确认删除目标 ${origin.target} 吗？`) && act(() => apiFetch(`/api/alibaba-httpdns/origins/${origin.id}/delete`, token, { method: "POST" }), "目标已删除")}><Trash2 size={14} /></button></div>
+          <div className={`origin ${origin.id === group.current_origin_id ? "originCurrent" : ""}`} key={origin.id}><span className={`status ${origin.enabled ? origin.status : "disabled"}`}>{statusText(origin.enabled ? origin.status : "disabled")}</span><div><div className="originTitleLine"><strong>{origin.remark || origin.target}</strong><span className={`originBadge ${origin.priority === 0 ? "primary" : "backup"}`}>{origin.priority === 0 ? "主用" : `备用 #${origin.priority}`}</span>{origin.id === group.current_origin_id && <span className="originBadge current">当前解析</span>}</div><span>{origin.target}:{origin.port} · {targetTypeText(origin.target_type)} · 最后检测 {fmtDate(origin.last_checked_at)}{origin.last_rtt_ms != null ? ` · ${origin.last_rtt_ms}ms` : ""}</span>{origin.target_type === "hostname" && origin.resolved_ips.length > 0 && <small>解析：{origin.resolved_ips.join(", ")}</small>}{origin.target_type === "hostname" && origin.healthy_ips.length > 0 && <small>健康：{origin.healthy_ips.join(", ")}</small>}{origin.id === group.current_origin_id && origin.published_ips.length > 0 && <small>阿里云已发布：{origin.published_ips.join(", ")}</small>}{origin.last_error && <span className="textDanger">{origin.last_error}</span>}</div><button className="icon secondaryIcon" title="编辑目标" onClick={() => beginEditOrigin(origin)}><Pencil size={14} /></button><button className="icon dangerBtn" title="删除目标" disabled={group.origins.length <= 1} onClick={() => window.confirm(`确认删除目标 ${origin.target} 吗？`) && act(() => apiFetch(`/api/alibaba-httpdns/origins/${origin.id}/delete`, token, { method: "POST" }), "目标已删除")}><Trash2 size={14} /></button></div>
         ))}
         {adding ? <div className="alibabaOriginAdd"><label>备用 IP / 域名<input autoFocus placeholder={group.record_type === "CNAME" ? "请输入实际备用域名，例如 backup.example.com" : "请输入实际备用 IP，例如 203.0.113.10"} value={originDraft.target} onChange={(event) => setOriginDraft({ ...originDraft, target: event.target.value })} /></label><label>检查端口<input type="number" min={1} max={65535} value={originDraft.port} onChange={(event) => setOriginDraft({ ...originDraft, port: Number(event.target.value) })} /></label><label>优先级<input type="number" min={0} value={originDraft.priority} onChange={(event) => setOriginDraft({ ...originDraft, priority: Number(event.target.value) })} /></label><label>备注<input placeholder="例如 香港备用" value={originDraft.remark} onChange={(event) => setOriginDraft({ ...originDraft, remark: event.target.value })} /></label><label className="inlineCheck"><input type="checkbox" checked={originDraft.ignore_health_check} onChange={(event) => setOriginDraft({ ...originDraft, ignore_health_check: event.target.checked })} />无视健康检查</label><button disabled={busy} onClick={() => act(addOrigin, "备用目标已添加", () => setAdding(false))}><Plus size={14} />确认添加</button><button className="secondary" onClick={() => setAdding(false)}>取消</button><p className="alibabaOriginInputHint">灰色示例不是已填写内容，请在第一个输入框中输入真实备用地址。</p></div> : <button className="secondary alibabaAddOriginButton" onClick={beginAdd}><Plus size={14} />添加备用 IP / 域名</button>}
       </div>
@@ -2198,11 +2213,282 @@ function DohPanel({ token, endpoints, act }: { token: string; endpoints: DohEndp
   );
 }
 
+function DohFailoverPanel({
+  token,
+  endpoints,
+  groups,
+  cloudflareGroups,
+  act
+}: {
+  token: string;
+  endpoints: DohEndpoint[];
+  groups: DohFailoverGroup[];
+  cloudflareGroups: FailoverGroup[];
+  act: ActionRunner;
+}) {
+  const enabledEndpoints = endpoints.filter((endpoint) => endpoint.enabled);
+  const legacyBindings = cloudflareGroups.filter((group) => group.doh_enabled);
+  const emptyGroupDraft: DohFailoverGroupDraft = {
+    doh_endpoint_id: enabledEndpoints[0]?.id || "",
+    hostname: "",
+    ttl: 60,
+    min_switch_interval_seconds: 120,
+    enabled: true
+  };
+  const emptyOriginDraft: DohFailoverOriginDraft = {
+    target: "",
+    port: 22,
+    priority: 10,
+    remark: "",
+    enabled: true,
+    ignore_health_check: false
+  };
+  const [groupDraft, setGroupDraft] = useState<DohFailoverGroupDraft>(emptyGroupDraft);
+  const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
+  const [groupEdits, setGroupEdits] = useState<Record<number, DohFailoverGroupDraft>>({});
+  const [addingOriginGroupId, setAddingOriginGroupId] = useState<number | null>(null);
+  const [originDraft, setOriginDraft] = useState<DohFailoverOriginDraft>(emptyOriginDraft);
+  const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
+  const [originEdits, setOriginEdits] = useState<Record<number, DohFailoverOriginDraft>>({});
+
+  useEffect(() => {
+    if (groupDraft.doh_endpoint_id === "" && enabledEndpoints[0]) {
+      setGroupDraft((current) => ({ ...current, doh_endpoint_id: enabledEndpoints[0].id }));
+    }
+  }, [enabledEndpoints.map((endpoint) => endpoint.id).join(",")]);
+
+  async function createGroup(event: FormEvent) {
+    event.preventDefault();
+    if (groupDraft.doh_endpoint_id === "") return;
+    await act(
+      () => apiFetch("/api/doh-failover/groups", token, { method: "POST", body: JSON.stringify(groupDraft) }),
+      "DoH 故障切换规则已创建",
+      () => setGroupDraft({ ...emptyGroupDraft, doh_endpoint_id: groupDraft.doh_endpoint_id })
+    );
+  }
+
+  async function createOrigin(groupId: number) {
+    const ok = await act(
+      () => apiFetch(`/api/doh-failover/groups/${groupId}/origins`, token, { method: "POST", body: JSON.stringify(originDraft) }),
+      "候选目标已添加"
+    );
+    if (ok) {
+      setAddingOriginGroupId(null);
+      setOriginDraft(emptyOriginDraft);
+    }
+  }
+
+  function beginGroupEdit(group: DohFailoverGroup) {
+    setEditingGroupId(group.id);
+    setGroupEdits((current) => ({
+      ...current,
+      [group.id]: {
+        doh_endpoint_id: group.doh_endpoint_id,
+        hostname: group.hostname,
+        ttl: group.ttl,
+        min_switch_interval_seconds: group.min_switch_interval_seconds,
+        enabled: group.enabled
+      }
+    }));
+  }
+
+  async function saveGroup(groupId: number) {
+    const edit = groupEdits[groupId];
+    if (!edit || edit.doh_endpoint_id === "") return;
+    const ok = await act(
+      () => apiFetch(`/api/doh-failover/groups/${groupId}`, token, { method: "PATCH", body: JSON.stringify(edit) }),
+      "DoH 故障切换规则已保存"
+    );
+    if (ok) setEditingGroupId(null);
+  }
+
+  function beginOriginEdit(origin: DohFailoverOrigin) {
+    setEditingOriginId(origin.id);
+    setOriginEdits((current) => ({
+      ...current,
+      [origin.id]: {
+        target: origin.target,
+        port: origin.port,
+        priority: origin.priority,
+        remark: origin.remark || "",
+        enabled: origin.enabled,
+        ignore_health_check: origin.ignore_health_check
+      }
+    }));
+  }
+
+  async function saveOrigin(originId: number) {
+    const draft = originEdits[originId];
+    if (!draft) return;
+    const ok = await act(
+      () => apiFetch(`/api/doh-failover/origins/${originId}`, token, { method: "PATCH", body: JSON.stringify(draft) }),
+      "候选目标已保存"
+    );
+    if (ok) setEditingOriginId(null);
+  }
+
+  return (
+    <section className="stack">
+      <div className="panelTitle">
+        <h2>DoH 独立故障切换</h2>
+        <p>自定义域名和候选 IP 独立运行，只发布到私有 DoH；不会读取或修改 Cloudflare 公网记录。</p>
+      </div>
+      {legacyBindings.length > 0 && (
+        <div className="panel">
+          <h2>旧版跟随型 DoH 绑定</h2>
+          <p>这些 Cloudflare 故障组仍在向 DoH 发布自己的当前源站。迁移到独立规则前，请先关闭对应旧绑定。</p>
+          <div className="recordTable">
+            {legacyBindings.map((group) => (
+              <div className="recordRow" key={group.id}>
+                <div>
+                  <strong>{group.hostname}</strong>
+                  <small>白名单：{(group.doh_hostnames?.length ? group.doh_hostnames : [group.hostname]).join(", ")}</small>
+                </div>
+                <button
+                  className="secondary"
+                  disabled={!group.cloudflare_publish_enabled}
+                  onClick={() => act(
+                    () => apiFetch(`/api/groups/${group.id}`, token, {
+                      method: "PATCH",
+                      body: JSON.stringify({ doh_enabled: false, doh_endpoint_id: null, doh_hostnames: [] })
+                    }),
+                    "旧版 DoH 绑定已关闭"
+                  )}
+                >
+                  <PowerOff size={14} />{group.cloudflare_publish_enabled ? "关闭旧绑定" : "需先恢复公网输出"}
+                </button>
+              </div>
+            ))}
+          </div>
+          {legacyBindings.some((group) => !group.cloudflare_publish_enabled) && <small className="error">仅使用 DoH 输出的旧组必须先恢复 Cloudflare 公网输出，才能关闭最后一个输出通道。</small>}
+        </div>
+      )}
+      <form className="panel" onSubmit={createGroup}>
+        <h2>新建 DoH 故障切换规则</h2>
+        <div className="formGrid">
+          <label>
+            DoH 服务
+            <select value={groupDraft.doh_endpoint_id} onChange={(event) => setGroupDraft({ ...groupDraft, doh_endpoint_id: event.target.value ? Number(event.target.value) : "" })} required>
+              <option value="">请选择 DoH 服务</option>
+              {enabledEndpoints.map((endpoint) => <option value={endpoint.id} key={endpoint.id}>{endpoint.name}</option>)}
+            </select>
+          </label>
+          <label>DoH 查询域名<input placeholder="snejsat.baidu.com" value={groupDraft.hostname} onChange={(event) => setGroupDraft({ ...groupDraft, hostname: event.target.value })} required /></label>
+          <label>TTL（秒）<input type="number" min={0} max={86400} value={groupDraft.ttl} onChange={(event) => setGroupDraft({ ...groupDraft, ttl: Number(event.target.value) })} /></label>
+          <label>最小切换间隔（秒）<input type="number" min={0} max={86400} value={groupDraft.min_switch_interval_seconds} onChange={(event) => setGroupDraft({ ...groupDraft, min_switch_interval_seconds: Number(event.target.value) })} /></label>
+        </div>
+        <label className="inlineCheck"><input type="checkbox" checked={groupDraft.enabled} onChange={(event) => setGroupDraft({ ...groupDraft, enabled: event.target.checked })} />启用</label>
+        <button type="submit" disabled={enabledEndpoints.length === 0}><Plus size={16} /><span>创建规则</span></button>
+        {enabledEndpoints.length === 0 && <small className="error">请先在“DoH”菜单配置并启用一个服务。</small>}
+      </form>
+
+      {groups.map((group) => {
+        const endpoint = endpoints.find((item) => item.id === group.doh_endpoint_id);
+        const sortedOrigins = [...group.origins].sort((left, right) => left.priority - right.priority || left.id - right.id);
+        const groupEdit = groupEdits[group.id];
+        return (
+          <div className="panel" key={group.id}>
+            <div className="recordRow">
+              <div>
+                <strong>{group.hostname}</strong>
+                <small>{endpoint?.name || `DoH #${group.doh_endpoint_id}`} · TTL {group.ttl} · 当前 {group.current_origin_id ? `目标 #${group.current_origin_id}` : "尚未选中"} · 最后切换 {fmtDate(group.last_switch_at)}</small>
+                {group.last_error && <small className="error">{group.last_error}</small>}
+              </div>
+              <div className="rowActions">
+                <button className="secondary" onClick={() => act(() => apiFetch(`/api/doh-failover/groups/${group.id}/run`, token, { method: "POST" }), "检查完成")}><Play size={14} />立即检查</button>
+                <button className="secondary" onClick={() => { setAddingOriginGroupId(group.id); setOriginDraft(emptyOriginDraft); }}><Plus size={14} />候选目标</button>
+                <button className="icon" title="编辑规则" onClick={() => beginGroupEdit(group)}><Pencil size={14} /></button>
+                <button className="icon dangerBtn" title="删除规则" onClick={() => act(() => apiFetch(`/api/doh-failover/groups/${group.id}`, token, { method: "DELETE" }), "DoH 故障切换规则已删除")}><Trash2 size={14} /></button>
+              </div>
+            </div>
+
+            {editingGroupId === group.id && groupEdit && (
+              <div className="groupSettingsEdit">
+                <label>
+                  DoH 服务
+                  <select value={groupEdit.doh_endpoint_id} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, doh_endpoint_id: event.target.value ? Number(event.target.value) : "" } }))}>
+                    {enabledEndpoints.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+                  </select>
+                </label>
+                <label>DoH 查询域名<input value={groupEdit.hostname} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, hostname: event.target.value } }))} /></label>
+                <label>TTL（秒）<input type="number" min={0} max={86400} value={groupEdit.ttl} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, ttl: Number(event.target.value) } }))} /></label>
+                <label>最小切换间隔（秒）<input type="number" min={0} max={86400} value={groupEdit.min_switch_interval_seconds} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, min_switch_interval_seconds: Number(event.target.value) } }))} /></label>
+                <label className="inlineCheck"><input type="checkbox" checked={groupEdit.enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, enabled: event.target.checked } }))} />启用</label>
+                <div className="rowActions">
+                  <button onClick={() => saveGroup(group.id)}><Save size={14} />保存</button>
+                  <button className="secondary" onClick={() => setEditingGroupId(null)}>取消</button>
+                </div>
+              </div>
+            )}
+
+            {addingOriginGroupId === group.id && (
+              <div className="origin originEditing">
+                <div className="originEditGrid">
+                  <label>候选 IP 或域名<input placeholder="136.110.30.173" value={originDraft.target} onChange={(event) => setOriginDraft({ ...originDraft, target: event.target.value })} /></label>
+                  <label>健康检查端口<input type="number" min={1} max={65535} value={originDraft.port} onChange={(event) => setOriginDraft({ ...originDraft, port: Number(event.target.value) })} /></label>
+                  <label>优先级<input type="number" min={0} max={100000} value={originDraft.priority} onChange={(event) => setOriginDraft({ ...originDraft, priority: Number(event.target.value) })} /></label>
+                  <label>备注<input value={originDraft.remark} onChange={(event) => setOriginDraft({ ...originDraft, remark: event.target.value })} /></label>
+                </div>
+                <label className="inlineCheck"><input type="checkbox" checked={originDraft.ignore_health_check} onChange={(event) => setOriginDraft({ ...originDraft, ignore_health_check: event.target.checked })} />固定可用（跳过健康检查）</label>
+                <div className="rowActions">
+                  <button onClick={() => createOrigin(group.id)}><Save size={14} />保存</button>
+                  <button className="secondary" onClick={() => setAddingOriginGroupId(null)}>取消</button>
+                </div>
+              </div>
+            )}
+
+            <div className="originList">
+              {sortedOrigins.map((origin) => {
+                const edit = originEdits[origin.id];
+                if (editingOriginId === origin.id && edit) {
+                  return (
+                    <div className="origin originEditing" key={origin.id}>
+                      <div className="originEditGrid">
+                        <label>候选 IP 或域名<input value={edit.target} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...edit, target: event.target.value } }))} /></label>
+                        <label>健康检查端口<input type="number" min={1} max={65535} value={edit.port} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...edit, port: Number(event.target.value) } }))} /></label>
+                        <label>优先级<input type="number" min={0} max={100000} value={edit.priority} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...edit, priority: Number(event.target.value) } }))} /></label>
+                        <label>备注<input value={edit.remark} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...edit, remark: event.target.value } }))} /></label>
+                      </div>
+                      <label className="inlineCheck"><input type="checkbox" checked={edit.enabled} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...edit, enabled: event.target.checked } }))} />启用</label>
+                      <label className="inlineCheck"><input type="checkbox" checked={edit.ignore_health_check} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...edit, ignore_health_check: event.target.checked } }))} />固定可用（跳过健康检查）</label>
+                      <div className="rowActions">
+                        <button onClick={() => saveOrigin(origin.id)}><Save size={14} />保存</button>
+                        <button className="secondary" onClick={() => setEditingOriginId(null)}>取消</button>
+                      </div>
+                    </div>
+                  );
+                }
+                return (
+                  <div className={`origin ${group.current_origin_id === origin.id ? "originCurrent" : ""}`} key={origin.id}>
+                    <div>
+                      <div className="originTitleLine"><strong>{origin.target}:{origin.port}</strong><span className={`status ${origin.status}`}>{statusLabels[origin.status] || origin.status}</span>{group.current_origin_id === origin.id && <span className="originBadge current">当前发布</span>}</div>
+                      <span>优先级 {origin.priority} · {origin.ignore_health_check ? "跳过健康检查" : `最后检测 ${fmtDate(origin.last_checked_at)}`} {origin.remark ? `· ${origin.remark}` : ""}</span>
+                      {origin.target_type === "hostname" && origin.resolved_ips.length > 0 && <small>解析：{origin.resolved_ips.join(", ")}</small>}
+                      {origin.target_type === "hostname" && origin.healthy_ips.length > 0 && <small>健康：{origin.healthy_ips.join(", ")}</small>}
+                      {group.current_origin_id === origin.id && origin.published_ips.length > 0 && <small>DoH 已发布：{origin.published_ips.join(", ")}</small>}
+                      {origin.last_error && <small className="error">{origin.last_error}</small>}
+                    </div>
+                    <div className="rowActions">
+                      <button className="icon" title="编辑" onClick={() => beginOriginEdit(origin)}><Pencil size={14} /></button>
+                      <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/doh-failover/origins/${origin.id}`, token, { method: "DELETE" }), "候选目标已删除")}><Trash2 size={14} /></button>
+                    </div>
+                  </div>
+                );
+              })}
+              {sortedOrigins.length === 0 && <div className="emptyCell">还没有候选目标，请至少添加一个主 IP 和一个备用 IP。</div>}
+            </div>
+          </div>
+        );
+      })}
+      {groups.length === 0 && <div className="panel"><div className="emptyCell">还没有独立 DoH 故障切换规则。</div></div>}
+    </section>
+  );
+}
+
 function GroupsPanel({
   token,
   collections,
   groups,
-  dohEndpoints,
   targetPool,
   externalIpItems,
   azPanelResources,
@@ -2212,7 +2498,6 @@ function GroupsPanel({
   token: string;
   collections: FailoverCollection[];
   groups: FailoverGroup[];
-  dohEndpoints: DohEndpoint[];
   targetPool: TargetPoolItem[];
   externalIpItems: ExternalIpItem[];
   azPanelResources: AzPanelResource[];
@@ -3362,25 +3647,6 @@ function GroupsPanel({
                           <option value="disabled">保留现有迷惑记录，不接管</option>
                         </select>
                       </label>
-                      <label className="inlineCheck">
-                        <input type="checkbox" checked={groupEdit.doh_enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, doh_enabled: event.target.checked } }))} />
-                        DoH 返回真实健康源站
-                      </label>
-                      {groupEdit.doh_enabled && (
-                        <>
-                          <label>
-                            DoH 服务
-                            <select value={groupEdit.doh_endpoint_id} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, doh_endpoint_id: event.target.value ? Number(event.target.value) : "" } }))}>
-                              <option value="">请选择 DoH 服务</option>
-                              {dohEndpoints.filter((endpoint) => endpoint.enabled).map((endpoint) => <option value={endpoint.id} key={endpoint.id}>{endpoint.name}</option>)}
-                            </select>
-                          </label>
-                          <label>
-                            DoH 白名单域名
-                            <textarea rows={3} placeholder={group.hostname} value={groupEdit.doh_hostnames} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, doh_hostnames: event.target.value } }))} />
-                          </label>
-                        </>
-                      )}
                       <label className="inlineCheck">
                         <input type="checkbox" checked={groupEdit.enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, enabled: event.target.checked } }))} />
                         启用这个切换组

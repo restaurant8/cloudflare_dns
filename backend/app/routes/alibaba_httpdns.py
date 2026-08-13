@@ -21,6 +21,7 @@ from ..schemas import (
     AlibabaHttpDnsZoneRelease,
     Message,
 )
+from ..origin_expansion import published_ips, set_published_ips
 
 
 router = APIRouter(prefix="/alibaba-httpdns", tags=["alibaba-httpdns"])
@@ -41,6 +42,14 @@ def _find_remote_record(db: Session, account_id: int, zone_id: str, record_id: s
 
 def _record_enabled(record: dict) -> bool:
     return str(record.get("EnableStatus") or "enable").strip().lower() not in {"disable", "disabled", "false", "0"}
+
+
+def _target_allowed(record_type: str, target_type: str) -> bool:
+    if record_type == "CNAME":
+        return target_type == "hostname"
+    if target_type == "hostname":
+        return record_type in {"A", "AAAA"}
+    return (record_type, target_type) in {("A", "ipv4"), ("AAAA", "ipv6")}
 
 
 def _adopt_record(
@@ -86,6 +95,7 @@ def _adopt_record(
         remark=str(record.get("Remark") or "").strip() or None,
         enabled=enabled,
         min_switch_interval_seconds=min_switch_interval_seconds,
+        last_published_value=target.value,
     )
     db.add(group)
     db.flush()
@@ -100,6 +110,8 @@ def _adopt_record(
     )
     db.add(origin)
     db.flush()
+    if target.target_type != "hostname":
+        set_published_ips(origin, [target.value])
     group.current_origin_id = origin.id
     return group
 
@@ -251,9 +263,10 @@ def update_group(group_id: int, payload: AlibabaHttpDnsGroupUpdate, _: User = De
         raise HTTPException(status_code=404, detail="阿里云 HTTPDNS 切换组不存在")
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(group, key, value)
-    if group.enabled:
-        evaluate_alibaba_httpdns_groups(db, [group.id])
     db.commit()
+    if group.enabled:
+        evaluate_alibaba_httpdns_groups(db, [group.id], force_consistency=True)
+        db.commit()
     return _group_query(db).filter(AlibabaHttpDnsGroup.id == group.id).one()
 
 
@@ -276,7 +289,7 @@ def create_origin(group_id: int, payload: AlibabaHttpDnsOriginCreate, _: User = 
         target = parse_target(payload.target)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if target.record_type != group.record_type:
+    if not _target_allowed(group.record_type, target.target_type):
         raise HTTPException(status_code=400, detail=f"当前记录是 {group.record_type}，目标将被识别为 {target.record_type}")
     if target.record_type == "CNAME" and target.value.rstrip(".").lower() == f"{group.rr}.{group.zone_name}".replace("@.", "").rstrip(".").lower():
         raise HTTPException(status_code=400, detail="CNAME 目标不能和当前记录名称相同")
@@ -290,6 +303,10 @@ def create_origin(group_id: int, payload: AlibabaHttpDnsOriginCreate, _: User = 
     db.add(origin)
     db.commit()
     db.refresh(origin)
+    if group.enabled:
+        evaluate_alibaba_httpdns_groups(db, [group.id])
+        db.commit()
+        db.refresh(origin)
     return origin
 
 
@@ -299,22 +316,22 @@ def update_origin(origin_id: int, payload: AlibabaHttpDnsOriginUpdate, _: User =
     if origin is None:
         raise HTTPException(status_code=404, detail="阿里云 HTTPDNS 源站不存在")
     updates = payload.model_dump(exclude_unset=True)
+    old_target = origin.target
+    old_target_type = origin.target_type
     next_target_value = origin.target
+    next_target_type = origin.target_type
     if "target" in updates:
         try:
             target = parse_target(updates["target"])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if target.record_type != origin.group.record_type:
+        if not _target_allowed(origin.group.record_type, target.target_type):
             raise HTTPException(status_code=400, detail=f"当前记录是 {origin.group.record_type}，目标将被识别为 {target.record_type}")
         if target.record_type == "CNAME" and target.value.rstrip(".").lower() == f"{origin.group.rr}.{origin.group.zone_name}".replace("@.", "").rstrip(".").lower():
             raise HTTPException(status_code=400, detail="CNAME 目标不能和当前记录名称相同")
         next_target_value = target.value
+        next_target_type = target.target_type
         updates["target"] = target.value
-        origin.target_type = target.target_type
-        origin.status = "unknown"
-        origin.success_count = 0
-        origin.fail_count = 0
     next_port = int(updates.get("port", origin.port))
     duplicate = next(
         (
@@ -328,12 +345,31 @@ def update_origin(origin_id: int, payload: AlibabaHttpDnsOriginUpdate, _: User =
     )
     if duplicate is not None:
         raise HTTPException(status_code=409, detail="相同目标和端口已经存在")
+    endpoint_changed = next_target_value != origin.target or next_port != origin.port
+    if endpoint_changed and origin.group.current_origin_id == origin.id:
+        if not origin.group.last_published_value:
+            origin.group.last_published_value = old_target
+        if not published_ips(origin) and old_target_type != "hostname":
+            set_published_ips(origin, [old_target])
+    origin.target_type = next_target_type
     for key, value in updates.items():
         if key == "remark" and isinstance(value, str):
             value = value.strip() or None
         setattr(origin, key, value)
-    evaluate_alibaba_httpdns_groups(db, [origin.group_id])
+    if endpoint_changed:
+        origin.status = "unknown"
+        origin.success_count = 0
+        origin.fail_count = 0
+        origin.last_checked_at = None
+        origin.last_error = None
+        origin.last_rtt_ms = None
+        origin.resolved_ips_json = "[]"
+        origin.healthy_ips_json = "[]"
+        origin.ip_probe_states_json = "{}"
     db.commit()
+    if origin.group.enabled:
+        evaluate_alibaba_httpdns_groups(db, [origin.group_id])
+        db.commit()
     db.refresh(origin)
     return origin
 

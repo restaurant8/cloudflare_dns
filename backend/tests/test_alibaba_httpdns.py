@@ -5,9 +5,22 @@ from app.alibaba_httpdns import _desired_origin, call_azpanel_httpdns, evaluate_
 from app.database import Base
 from app.dns_utils import TcpCheckResult
 from app.integrations import update_azpanel_settings
-from app.models import AlibabaHttpDnsGroup, AlibabaHttpDnsOrigin, Event, User
-from app.routes.alibaba_httpdns import adopt_zone, delete_origin_action, release_zone_action, router
-from app.schemas import AlibabaHttpDnsZoneAdopt, AlibabaHttpDnsZoneRelease
+from app.models import (
+    AlibabaHttpDnsAccountState,
+    AlibabaHttpDnsGroup,
+    AlibabaHttpDnsOrigin,
+    CloudflareCredential,
+    DohEndpoint,
+    DohFailoverGroup,
+    DohFailoverOrigin,
+    Event,
+    FailoverGroup,
+    Origin,
+    User,
+    Zone,
+)
+from app.routes.alibaba_httpdns import adopt_zone, delete_origin_action, release_zone_action, router, update_origin
+from app.schemas import AlibabaHttpDnsOriginUpdate, AlibabaHttpDnsZoneAdopt, AlibabaHttpDnsZoneRelease
 
 
 def make_session():
@@ -205,3 +218,185 @@ def test_post_compatibility_routes_are_registered():
 
     assert "/alibaba-httpdns/zones/release" in post_paths
     assert "/alibaba-httpdns/origins/{origin_id}/delete" in post_paths
+
+
+def test_editing_active_origin_keeps_last_remote_value_until_recovered(monkeypatch):
+    db = make_session()
+    group, primary, backup = add_group(db)
+    group.last_published_value = primary.target
+    primary.published_ips_json = '["192.0.2.10"]'
+    primary.status = "healthy"
+    backup.enabled = False
+    db.commit()
+    writes = []
+    monkeypatch.setattr("app.alibaba_httpdns.tcp_check", lambda *args: TcpCheckResult(True, 2.0, None))
+    monkeypatch.setattr("app.alibaba_httpdns.publish_origin", lambda *_args, **_kwargs: writes.append(1) or {})
+    monkeypatch.setattr("app.alibaba_httpdns.send_webhooks", lambda *args, **kwargs: None)
+
+    update_origin(primary.id, AlibabaHttpDnsOriginUpdate(target="192.0.2.99"), None, db)
+
+    assert group.current_origin_id == primary.id
+    assert group.last_published_value == "192.0.2.10"
+    assert primary.status == "unknown"
+    assert primary.success_count == 1
+    assert writes == []
+
+
+def test_hostname_origin_publishes_only_healthy_ip_of_record_family(monkeypatch):
+    db = make_session()
+    group, primary, backup = add_group(db)
+    primary.target = "multi.example.net"
+    primary.target_type = "hostname"
+    primary.status = "unknown"
+    primary.success_count = 0
+    primary.published_ips_json = "[]"
+    group.current_origin_id = None
+    group.last_published_value = None
+    backup.enabled = False
+    db.commit()
+    writes = []
+    monkeypatch.setattr(
+        "app.alibaba_httpdns.resolve_hostname_ips_bounded",
+        lambda *args: ["192.0.2.10", "192.0.2.11", "2001:db8::10"],
+    )
+    monkeypatch.setattr(
+        "app.alibaba_httpdns.tcp_check",
+        lambda ip, *args: TcpCheckResult(ip == "192.0.2.10", 2.0, None if ip == "192.0.2.10" else "blocked"),
+    )
+    monkeypatch.setattr(
+        "app.alibaba_httpdns.publish_origin",
+        lambda _db, _group, origin: writes.append(__import__("app.alibaba_httpdns", fromlist=["_desired_value"])._desired_value(_group, origin)) or {},
+    )
+    monkeypatch.setattr("app.alibaba_httpdns.send_webhooks", lambda *args, **kwargs: None)
+
+    evaluate_alibaba_httpdns_groups(db, [group.id])
+    evaluate_alibaba_httpdns_groups(db, [group.id])
+
+    assert primary.resolved_ips == ["192.0.2.10", "192.0.2.11"]
+    assert primary.healthy_ips == ["192.0.2.10"]
+    assert group.last_published_value == "192.0.2.10"
+    assert writes == ["192.0.2.10"]
+
+
+def test_broken_hostname_rule_does_not_block_other_group(monkeypatch):
+    db = make_session()
+    healthy_group, primary, backup = add_group(db)
+    primary.enabled = False
+    broken = AlibabaHttpDnsGroup(
+        remote_account_id=8,
+        account_name="Alibaba Second",
+        zone_id="zone-2",
+        zone_name="example.net",
+        record_id="record-2",
+        rr="www",
+        record_type="A",
+        ttl=60,
+        enabled=True,
+    )
+    db.add(broken)
+    db.flush()
+    broken_origin = AlibabaHttpDnsOrigin(
+        group_id=broken.id,
+        target="gone.example.net",
+        target_type="hostname",
+        port=443,
+        priority=0,
+        enabled=True,
+    )
+    db.add(broken_origin)
+    db.commit()
+    published = []
+    monkeypatch.setattr("app.alibaba_httpdns.tcp_check", lambda *args: TcpCheckResult(True, 2.0, None))
+    monkeypatch.setattr(
+        "app.alibaba_httpdns.resolve_hostname_ips_bounded",
+        lambda *args: (_ for _ in ()).throw(ValueError("NXDOMAIN")),
+    )
+    monkeypatch.setattr("app.alibaba_httpdns.publish_origin", lambda _db, group, origin: published.append((group.id, origin.id)) or {})
+    monkeypatch.setattr("app.alibaba_httpdns.send_webhooks", lambda *args, **kwargs: None)
+
+    evaluate_alibaba_httpdns_groups(db)
+    assert evaluate_alibaba_httpdns_groups(db) == 1
+    assert healthy_group.current_origin_id == backup.id
+    assert published == [(healthy_group.id, backup.id)]
+    assert "NXDOMAIN" in (broken_origin.last_error or "")
+
+
+def test_account_backoff_suppresses_repeated_gateway_requests(monkeypatch):
+    db = make_session()
+    group, _, _ = add_group(db)
+    group.last_published_value = group.origins[0].target
+    update_azpanel_settings(
+        db,
+        {"enabled": True, "base_url": "https://az.example.com", "api_token": "secret-token", "timeout_seconds": 15},
+    )
+    db.commit()
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("azpanel unavailable")
+
+    monkeypatch.setattr("app.alibaba_httpdns.httpx.request", fail)
+    monkeypatch.setattr("app.alibaba_httpdns.tcp_check", lambda *args: TcpCheckResult(True, 2.0, None))
+    monkeypatch.setattr("app.alibaba_httpdns.send_webhooks", lambda *args, **kwargs: None)
+    for _ in range(5):
+        evaluate_alibaba_httpdns_groups(db, [group.id], force_consistency=True)
+        db.commit()
+
+    state = db.query(AlibabaHttpDnsAccountState).filter_by(remote_account_id=group.remote_account_id).one()
+    assert calls == [1]
+    assert state.failure_count == 1
+    assert state.next_retry_at is not None
+
+
+def test_same_hostname_can_have_independent_cloudflare_alibaba_and_aws_outputs():
+    db = make_session()
+    hostname = "shared.example.com"
+    credential = CloudflareCredential(name="cf", token_encrypted="secret")
+    db.add(credential)
+    db.flush()
+    zone = Zone(credential_id=credential.id, cf_zone_id="zone-cf", name="example.com")
+    db.add(zone)
+    db.flush()
+    cloudflare = FailoverGroup(zone_id=zone.id, hostname=hostname, ttl=60, enabled=True)
+    db.add(cloudflare)
+    db.flush()
+    db.add(Origin(group_id=cloudflare.id, target="192.0.2.1", target_type="ipv4", port=443, priority=0))
+
+    alibaba = AlibabaHttpDnsGroup(
+        remote_account_id=7,
+        account_name="Alibaba",
+        zone_id="zone-ali",
+        zone_name="example.com",
+        record_id="record-ali",
+        rr="shared",
+        record_type="A",
+        ttl=60,
+        enabled=True,
+        last_published_value="192.0.2.2",
+    )
+    db.add(alibaba)
+    db.flush()
+    db.add(AlibabaHttpDnsOrigin(group_id=alibaba.id, target="192.0.2.2", target_type="ipv4", port=443, priority=0))
+
+    endpoint = DohEndpoint(
+        name="aws",
+        base_url="https://example.cloudfront.net",
+        hmac_secret_encrypted="secret",
+    )
+    db.add(endpoint)
+    db.flush()
+    aws = DohFailoverGroup(doh_endpoint_id=endpoint.id, hostname=hostname, ttl=60, enabled=True)
+    db.add(aws)
+    db.flush()
+    db.add(DohFailoverOrigin(group_id=aws.id, target="192.0.2.3", target_type="ipv4", port=443, priority=0))
+    db.commit()
+
+    assert cloudflare.hostname == hostname
+    assert f"{alibaba.rr}.{alibaba.zone_name}" == hostname
+    assert aws.hostname == hostname
+    assert {cloudflare.origins[0].target, alibaba.origins[0].target, aws.origins[0].target} == {
+        "192.0.2.1",
+        "192.0.2.2",
+        "192.0.2.3",
+    }

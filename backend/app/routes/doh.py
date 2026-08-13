@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import get_current_user
 from ..doh import build_doh_snapshot, sync_doh_endpoint
-from ..models import DohEndpoint, FailoverGroup, User
+from ..models import DohEndpoint, DohFailoverGroup, FailoverGroup, User
 from ..schemas import DohEndpointCreate, DohEndpointOut, DohEndpointUpdate, DohSnapshotOut, Message
 from ..security import encrypt_secret
 
@@ -65,8 +65,12 @@ def update_endpoint(endpoint_id: int, payload: DohEndpointUpdate, _: User = Depe
             .filter(FailoverGroup.doh_endpoint_id == endpoint.id, FailoverGroup.doh_enabled.is_(True))
             .count()
         )
-        if bound:
-            raise HTTPException(status_code=409, detail=f"DoH endpoint is still enabled for {bound} failover group(s)")
+        independent_bound = db.query(DohFailoverGroup).filter(DohFailoverGroup.doh_endpoint_id == endpoint.id).count()
+        if bound or independent_bound:
+            raise HTTPException(
+                status_code=409,
+                detail=f"DoH endpoint is still enabled for {bound} Cloudflare group(s) and {independent_bound} independent group(s)",
+            )
     if "base_url" in updates:
         updates["base_url"] = _normalize_url(updates["base_url"])
     if "sync_path" in updates:
@@ -79,6 +83,8 @@ def update_endpoint(endpoint_id: int, payload: DohEndpointUpdate, _: User = Depe
     for key, value in updates.items():
         setattr(endpoint, key, value)
     endpoint.last_revision = None
+    endpoint.sync_failure_count = 0
+    endpoint.next_sync_retry_at = None
     db.commit()
     db.refresh(endpoint)
     return endpoint
@@ -90,8 +96,12 @@ def delete_endpoint(endpoint_id: int, _: User = Depends(get_current_user), db: S
     if endpoint is None:
         raise HTTPException(status_code=404, detail="DoH endpoint not found")
     count = db.query(FailoverGroup).filter(FailoverGroup.doh_endpoint_id == endpoint.id).count()
-    if count:
-        raise HTTPException(status_code=409, detail=f"DoH endpoint is still used by {count} failover group(s)")
+    independent_count = db.query(DohFailoverGroup).filter(DohFailoverGroup.doh_endpoint_id == endpoint.id).count()
+    if count or independent_count:
+        raise HTTPException(
+            status_code=409,
+            detail=f"DoH endpoint is still used by {count} Cloudflare group(s) and {independent_count} independent group(s)",
+        )
     db.delete(endpoint)
     db.commit()
     return Message(message="DoH endpoint deleted")
@@ -102,7 +112,7 @@ def sync_endpoint(endpoint_id: int, _: User = Depends(get_current_user), db: Ses
     endpoint = db.get(DohEndpoint, endpoint_id)
     if endpoint is None:
         raise HTTPException(status_code=404, detail="DoH endpoint not found")
-    succeeded = sync_doh_endpoint(db, endpoint, force=True)
+    succeeded = sync_doh_endpoint(db, endpoint, force=True, ignore_backoff=True)
     db.commit()
     if not succeeded and endpoint.last_error:
         raise HTTPException(status_code=502, detail=endpoint.last_error)

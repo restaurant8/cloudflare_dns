@@ -289,6 +289,9 @@ class AlibabaHttpDnsOriginOut(BaseModel):
     last_checked_at: datetime | None
     last_error: str | None
     last_rtt_ms: float | None
+    resolved_ips: list[str]
+    healthy_ips: list[str]
+    published_ips: list[str]
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -312,6 +315,7 @@ class AlibabaHttpDnsGroupOut(BaseModel):
     current_origin_id: int | None
     last_switch_at: datetime | None
     last_error: str | None
+    last_published_value: str | None
     origins: list[AlibabaHttpDnsOriginOut] = []
     created_at: datetime
     updated_at: datetime
@@ -1067,6 +1071,8 @@ class DohEndpointOut(BaseModel):
     last_synced_at: datetime | None
     last_error: str | None
     last_revision: str | None
+    sync_failure_count: int
+    next_sync_retry_at: datetime | None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -1077,7 +1083,8 @@ class DohSnapshotRecordOut(BaseModel):
     type: str
     value: str
     ttl: int
-    group_id: int
+    group_id: int | None = None
+    doh_failover_group_id: int | None = None
 
 
 class DohSnapshotOut(BaseModel):
@@ -1085,6 +1092,82 @@ class DohSnapshotOut(BaseModel):
     revision: str
     generated_at: int
     records: list[DohSnapshotRecordOut]
+
+
+class DohFailoverOriginCreate(BaseModel):
+    target: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=22, ge=1, le=65535)
+    priority: int = Field(default=10, ge=0, le=100000)
+    remark: str | None = Field(default=None, max_length=500)
+    enabled: bool = True
+    ignore_health_check: bool = False
+
+
+class DohFailoverOriginUpdate(BaseModel):
+    target: str | None = Field(default=None, min_length=1, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    priority: int | None = Field(default=None, ge=0, le=100000)
+    remark: str | None = Field(default=None, max_length=500)
+    enabled: bool | None = None
+    ignore_health_check: bool | None = None
+
+
+class DohFailoverOriginOut(BaseModel):
+    id: int
+    group_id: int
+    target: str
+    target_type: str
+    port: int
+    priority: int
+    remark: str | None
+    enabled: bool
+    ignore_health_check: bool
+    status: str
+    success_count: int
+    fail_count: int
+    last_checked_at: datetime | None
+    last_error: str | None
+    last_rtt_ms: float | None
+    resolved_ips: list[str]
+    healthy_ips: list[str]
+    published_ips: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DohFailoverGroupCreate(BaseModel):
+    doh_endpoint_id: int
+    hostname: str = Field(min_length=1, max_length=255)
+    ttl: int = Field(default=60, ge=0, le=86400)
+    min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
+    enabled: bool = True
+
+
+class DohFailoverGroupUpdate(BaseModel):
+    doh_endpoint_id: int | None = None
+    hostname: str | None = Field(default=None, min_length=1, max_length=255)
+    ttl: int | None = Field(default=None, ge=0, le=86400)
+    min_switch_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
+    enabled: bool | None = None
+
+
+class DohFailoverGroupOut(BaseModel):
+    id: int
+    doh_endpoint_id: int
+    hostname: str
+    ttl: int
+    enabled: bool
+    min_switch_interval_seconds: int
+    current_origin_id: int | None
+    last_switch_at: datetime | None
+    last_error: str | None
+    origins: list[DohFailoverOriginOut] = []
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AgentCreate(BaseModel):

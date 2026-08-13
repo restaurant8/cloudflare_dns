@@ -138,6 +138,30 @@ def _migrate_existing_schema() -> None:
             if "zone_id" not in existing:
                 connection.execute(text(_failover_hostname_zone_migration_statement(dialect)))
 
+        if "doh_endpoints" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("doh_endpoints")}
+            for column_name, statement in _doh_endpoint_migration_statements(dialect).items():
+                if column_name not in existing:
+                    connection.execute(text(statement))
+
+        if "doh_failover_origins" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("doh_failover_origins")}
+            for column_name, statement in _doh_failover_origin_migration_statements(dialect).items():
+                if column_name not in existing:
+                    connection.execute(text(statement))
+
+        if "alibaba_httpdns_groups" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("alibaba_httpdns_groups")}
+            for column_name, statement in _alibaba_httpdns_group_migration_statements(dialect).items():
+                if column_name not in existing:
+                    connection.execute(text(statement))
+
+        if "alibaba_httpdns_origins" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("alibaba_httpdns_origins")}
+            for column_name, statement in _alibaba_httpdns_origin_migration_statements(dialect).items():
+                if column_name not in existing:
+                    connection.execute(text(statement))
+
         if "telegram_notifications" in table_names:
             existing = {column["name"] for column in inspector.get_columns("telegram_notifications")}
             if "notify_level" not in existing:
@@ -373,6 +397,52 @@ def _failover_group_output_migration_statements(dialect: str) -> dict[str, str]:
         "doh_enabled": "ALTER TABLE failover_groups ADD COLUMN doh_enabled BOOLEAN NOT NULL DEFAULT FALSE",
         "doh_endpoint_id": "ALTER TABLE failover_groups ADD COLUMN doh_endpoint_id INTEGER",
         "doh_hostnames_json": "ALTER TABLE failover_groups ADD COLUMN doh_hostnames_json TEXT NOT NULL DEFAULT '[]'",
+    }
+
+
+def _doh_endpoint_migration_statements(dialect: str) -> dict[str, str]:
+    timestamp_type = "TIMESTAMP" if dialect == "postgresql" else "DATETIME"
+    return {
+        "sync_failure_count": "ALTER TABLE doh_endpoints ADD COLUMN sync_failure_count INTEGER NOT NULL DEFAULT 0",
+        "next_sync_retry_at": f"ALTER TABLE doh_endpoints ADD COLUMN next_sync_retry_at {timestamp_type} NULL",
+    }
+
+
+def _doh_failover_origin_migration_statements(dialect: str) -> dict[str, str]:
+    if dialect == "mysql":
+        return {
+            "resolved_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN resolved_ips_json TEXT NULL",
+            "healthy_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN healthy_ips_json TEXT NULL",
+            "published_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN published_ips_json TEXT NULL",
+            "ip_probe_states_json": "ALTER TABLE doh_failover_origins ADD COLUMN ip_probe_states_json TEXT NULL",
+        }
+    return {
+        "resolved_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN resolved_ips_json TEXT NOT NULL DEFAULT '[]'",
+        "healthy_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN healthy_ips_json TEXT NOT NULL DEFAULT '[]'",
+        "published_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN published_ips_json TEXT NOT NULL DEFAULT '[]'",
+        "ip_probe_states_json": "ALTER TABLE doh_failover_origins ADD COLUMN ip_probe_states_json TEXT NOT NULL DEFAULT '{}'",
+    }
+
+
+def _alibaba_httpdns_group_migration_statements(dialect: str) -> dict[str, str]:
+    return {
+        "last_published_value": "ALTER TABLE alibaba_httpdns_groups ADD COLUMN last_published_value VARCHAR(255) NULL",
+    }
+
+
+def _alibaba_httpdns_origin_migration_statements(dialect: str) -> dict[str, str]:
+    if dialect == "mysql":
+        return {
+            "resolved_ips_json": "ALTER TABLE alibaba_httpdns_origins ADD COLUMN resolved_ips_json TEXT NULL",
+            "healthy_ips_json": "ALTER TABLE alibaba_httpdns_origins ADD COLUMN healthy_ips_json TEXT NULL",
+            "published_ips_json": "ALTER TABLE alibaba_httpdns_origins ADD COLUMN published_ips_json TEXT NULL",
+            "ip_probe_states_json": "ALTER TABLE alibaba_httpdns_origins ADD COLUMN ip_probe_states_json TEXT NULL",
+        }
+    return {
+        "resolved_ips_json": "ALTER TABLE alibaba_httpdns_origins ADD COLUMN resolved_ips_json TEXT NOT NULL DEFAULT '[]'",
+        "healthy_ips_json": "ALTER TABLE alibaba_httpdns_origins ADD COLUMN healthy_ips_json TEXT NOT NULL DEFAULT '[]'",
+        "published_ips_json": "ALTER TABLE alibaba_httpdns_origins ADD COLUMN published_ips_json TEXT NOT NULL DEFAULT '[]'",
+        "ip_probe_states_json": "ALTER TABLE alibaba_httpdns_origins ADD COLUMN ip_probe_states_json TEXT NOT NULL DEFAULT '{}'",
     }
 
 

@@ -162,6 +162,29 @@ def test_hostname_origin_is_resolved_to_address_records_not_cname(monkeypatch):
     ]
 
 
+def test_failed_hostname_refresh_keeps_last_successful_remote_values(monkeypatch):
+    db = make_session()
+    endpoint, _, origin = setup_endpoint_group(db)
+    origin.target = "real-origin.example.net"
+    origin.target_type = "hostname"
+    db.commit()
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("app.doh.resolve_hostname_ips", lambda _hostname: ["203.0.113.20"])
+    monkeypatch.setattr("app.doh.httpx.post", lambda *args, **kwargs: Response())
+    assert sync_doh_endpoint(db, endpoint, force=True) is True
+    assert origin.published_ips == ["203.0.113.20"]
+
+    monkeypatch.setattr(
+        "app.doh.resolve_hostname_ips",
+        lambda _hostname: (_ for _ in ()).throw(ValueError("NXDOMAIN")),
+    )
+    assert build_doh_snapshot(db, endpoint)["records"][0]["value"] == "203.0.113.20"
+
+
 def test_hostname_conflict_is_rejected_before_endpoint_sync():
     db = make_session()
     endpoint, group, _ = setup_endpoint_group(db)
