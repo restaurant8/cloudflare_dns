@@ -6,8 +6,8 @@ from app.database import Base
 from app.dns_utils import TcpCheckResult
 from app.integrations import update_azpanel_settings
 from app.models import AlibabaHttpDnsGroup, AlibabaHttpDnsOrigin, Event, User
-from app.routes.alibaba_httpdns import adopt_zone
-from app.schemas import AlibabaHttpDnsZoneAdopt
+from app.routes.alibaba_httpdns import adopt_zone, delete_origin_action, release_zone_action, router
+from app.schemas import AlibabaHttpDnsZoneAdopt, AlibabaHttpDnsZoneRelease
 
 
 def make_session():
@@ -166,3 +166,42 @@ def test_adopt_zone_is_idempotent_and_only_adds_new_records(monkeypatch):
     assert second.detail == {"created": 0, "existing": 1, "errors": []}
     assert third.detail == {"created": 1, "existing": 1, "errors": []}
     assert db.query(AlibabaHttpDnsGroup).count() == 2
+
+
+def test_post_delete_origin_compatibility_endpoint_removes_backup_without_cloud_call(monkeypatch):
+    db = make_session()
+    user = User(username="admin", password_hash="hash")
+    db.add(user)
+    db.commit()
+    group, primary, backup = add_group(db)
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.evaluate_alibaba_httpdns_groups",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("backup deletion must not publish")),
+    )
+
+    response = delete_origin_action(backup.id, user, db)
+
+    assert response.message == "源站已删除"
+    assert db.get(AlibabaHttpDnsOrigin, backup.id) is None
+    assert db.get(AlibabaHttpDnsGroup, group.id).current_origin_id == primary.id
+
+
+def test_post_release_zone_compatibility_endpoint_removes_local_config_only():
+    db = make_session()
+    user = User(username="admin", password_hash="hash")
+    db.add(user)
+    db.commit()
+    group, _primary, _backup = add_group(db)
+
+    response = release_zone_action(AlibabaHttpDnsZoneRelease(remote_account_id=7, zone_id="zone-1"), user, db)
+
+    assert response.message == "已取消管理 1 条记录，阿里云云端解析保持不变"
+    assert db.get(AlibabaHttpDnsGroup, group.id) is None
+    assert db.query(AlibabaHttpDnsOrigin).count() == 0
+
+
+def test_post_compatibility_routes_are_registered():
+    post_paths = {route.path for route in router.routes if "POST" in getattr(route, "methods", set())}
+
+    assert "/alibaba-httpdns/zones/release" in post_paths
+    assert "/alibaba-httpdns/origins/{origin_id}/delete" in post_paths

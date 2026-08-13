@@ -18,6 +18,7 @@ from ..schemas import (
     AlibabaHttpDnsRemoteRecordOut,
     AlibabaHttpDnsRemoteZoneOut,
     AlibabaHttpDnsZoneAdopt,
+    AlibabaHttpDnsZoneRelease,
     Message,
 )
 
@@ -188,8 +189,7 @@ def adopt_zone(payload: AlibabaHttpDnsZoneAdopt, _: User = Depends(get_current_u
     return Message(message=f"权威域名已同步：新增 {created} 条，已有 {skipped} 条", detail={"created": created, "existing": skipped, "errors": errors})
 
 
-@router.delete("/zones/{remote_account_id}/{zone_id}", response_model=Message)
-def release_zone(remote_account_id: int, zone_id: str, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def _release_zone(db: Session, remote_account_id: int, zone_id: str) -> Message:
     groups = _group_query(db).filter(
         AlibabaHttpDnsGroup.remote_account_id == remote_account_id,
         AlibabaHttpDnsGroup.zone_id == zone_id,
@@ -200,6 +200,17 @@ def release_zone(remote_account_id: int, zone_id: str, _: User = Depends(get_cur
         db.delete(group)
     db.commit()
     return Message(message=f"已取消管理 {len(groups)} 条记录，阿里云云端解析保持不变")
+
+
+@router.post("/zones/release", response_model=Message)
+def release_zone_action(payload: AlibabaHttpDnsZoneRelease, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """POST compatibility endpoint for reverse proxies that do not forward DELETE reliably."""
+    return _release_zone(db, payload.remote_account_id, payload.zone_id)
+
+
+@router.delete("/zones/{remote_account_id}/{zone_id}", response_model=Message)
+def release_zone(remote_account_id: int, zone_id: str, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _release_zone(db, remote_account_id, zone_id)
 
 
 @router.post("/groups", response_model=AlibabaHttpDnsGroupOut)
@@ -327,23 +338,36 @@ def update_origin(origin_id: int, payload: AlibabaHttpDnsOriginUpdate, _: User =
     return origin
 
 
-@router.delete("/origins/{origin_id}", response_model=Message)
-def delete_origin(origin_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def _delete_origin(db: Session, origin_id: int) -> Message:
     origin = db.get(AlibabaHttpDnsOrigin, origin_id)
     if origin is None:
         raise HTTPException(status_code=404, detail="阿里云 HTTPDNS 源站不存在")
     group = origin.group
     if len(group.origins) <= 1:
         raise HTTPException(status_code=400, detail="至少需要保留一个源站")
-    if group.current_origin_id == origin.id:
+    was_current = group.current_origin_id == origin.id
+    if was_current:
         group.current_origin_id = None
         group.last_switch_at = None
     db.delete(origin)
-    db.flush()
-    db.expire(group, ["origins"])
-    evaluate_alibaba_httpdns_groups(db, [group.id])
+    # Persist the requested deletion before any optional cloud-side re-evaluation.
+    # Removing a backup target must never depend on azpanel/Alibaba availability.
     db.commit()
+    if was_current and group.enabled:
+        evaluate_alibaba_httpdns_groups(db, [group.id])
+        db.commit()
     return Message(message="源站已删除")
+
+
+@router.post("/origins/{origin_id}/delete", response_model=Message)
+def delete_origin_action(origin_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """POST compatibility endpoint for reverse proxies that do not forward DELETE reliably."""
+    return _delete_origin(db, origin_id)
+
+
+@router.delete("/origins/{origin_id}", response_model=Message)
+def delete_origin(origin_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _delete_origin(db, origin_id)
 
 
 @router.post("/run", response_model=Message)
