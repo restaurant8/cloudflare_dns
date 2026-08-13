@@ -20,7 +20,7 @@ A self-hosted Cloudflare DNS failover dashboard for DNS-only A, AAAA, and CNAME 
 
 Configure and enable the existing **azpanel** integration under **Auto IP Change**, using the same internal token configured as `CLOUDFLARE_DNS_INTERNAL_TOKEN` on azpanel. Alibaba Cloud AccessKeys stay in azpanel; this application only stores the selected account/Zone/record IDs and calls azpanel's authenticated internal gateway. The proxy assigned to each Alibaba Cloud account in azpanel is therefore also used for zone reads and record updates.
 
-The separate **Alibaba Cloud HTTPDNS** menu adopts an existing Mobile HTTPDNS built-in authoritative A, AAAA, or CNAME record as the primary origin. Add backup origins, set their probe port and priority, and optionally adjust the supported Alibaba TTL and recovery cooldown. The regular scheduler then applies the same global probe timeout and fail/recovery thresholds used by Cloudflare failover.
+The separate **Alibaba Cloud HTTPDNS** menu adopts a Mobile HTTPDNS built-in authoritative Zone. It automatically imports every enabled A, AAAA, and CNAME record in that Zone, treating each current record value as its primary origin. Add backup IPs or hostnames per record, set their probe port and priority, and optionally adjust the supported Alibaba TTL and recovery cooldown. **Sync records** safely imports records later added to the Zone without duplicating existing failover settings. The regular scheduler then applies the same global probe timeout and fail/recovery thresholds used by Cloudflare failover.
 
 ## Quick start
 

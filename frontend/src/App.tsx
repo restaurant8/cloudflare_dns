@@ -33,7 +33,7 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteAccount, AlibabaHttpDnsRemoteRecord, AlibabaHttpDnsRemoteZone, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SynexVmSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
+import type { Agent, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteAccount, AlibabaHttpDnsRemoteZone, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SynexVmSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
 import {
   Sidebar,
   SidebarContent,
@@ -158,6 +158,7 @@ const eventTypeLabels: Record<string, string> = {
   "dns.publish_failed": "DNS 发布失败",
   "dns.switched": "DNS 已切换",
   "alibaba_httpdns.group_created": "阿里云 HTTPDNS 切换组已创建",
+  "alibaba_httpdns.zone_adopted": "阿里云 HTTPDNS 权威域名已接管",
   "alibaba_httpdns.origin_status_changed": "阿里云 HTTPDNS 源站状态变化",
   "alibaba_httpdns.no_healthy_origin": "阿里云 HTTPDNS 无健康源站",
   "alibaba_httpdns.publish_failed": "阿里云 HTTPDNS 发布失败",
@@ -1578,20 +1579,22 @@ function RecordsPanel({
 function AlibabaHttpDnsPanel({ token, groups, busy, act }: { token: string; groups: AlibabaHttpDnsGroup[]; busy: boolean; act: ActionRunner }) {
   const [accounts, setAccounts] = useState<AlibabaHttpDnsRemoteAccount[]>([]);
   const [zones, setZones] = useState<AlibabaHttpDnsRemoteZone[]>([]);
-  const [records, setRecords] = useState<AlibabaHttpDnsRemoteRecord[]>([]);
   const [accountId, setAccountId] = useState<number | "">("");
   const [zoneId, setZoneId] = useState("");
-  const [recordId, setRecordId] = useState("");
   const [primaryPort, setPrimaryPort] = useState(22);
   const [cooldown, setCooldown] = useState(120);
-  const [addingGroupId, setAddingGroupId] = useState<number | null>(null);
-  const [originDraft, setOriginDraft] = useState({ target: "", port: 22, priority: 10, remark: "", ignore_health_check: false });
-  const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
-  const [groupEdit, setGroupEdit] = useState({ ttl: 60, min_switch_interval_seconds: 120 });
-  const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
-  const [originEdit, setOriginEdit] = useState({ target: "", port: 22, priority: 10, remark: "", enabled: true, ignore_health_check: false });
   const selectedAccount = accounts.find((item) => item.id === accountId);
   const selectedZone = zones.find((item) => item.ZoneId === zoneId);
+  const managedZones = useMemo(() => {
+    const items = new Map<string, { key: string; remoteAccountId: number; accountName: string; zoneId: string; zoneName: string; groups: AlibabaHttpDnsGroup[] }>();
+    groups.forEach((group) => {
+      const key = `${group.remote_account_id}:${group.zone_id}`;
+      const current = items.get(key) || { key, remoteAccountId: group.remote_account_id, accountName: group.account_name, zoneId: group.zone_id, zoneName: group.zone_name, groups: [] };
+      current.groups.push(group);
+      items.set(key, current);
+    });
+    return [...items.values()].sort((left, right) => left.zoneName.localeCompare(right.zoneName));
+  }, [groups]);
 
   async function loadAccounts() {
     const data = await apiFetch<AlibabaHttpDnsRemoteAccount[]>("/api/alibaba-httpdns/remote/accounts", token);
@@ -1602,16 +1605,7 @@ function AlibabaHttpDnsPanel({ token, groups, busy, act }: { token: string; grou
   async function loadZones(nextAccountId: number) {
     const data = await apiFetch<AlibabaHttpDnsRemoteZone[]>(`/api/alibaba-httpdns/remote/zones?account_id=${nextAccountId}`, token);
     setZones(data);
-    const next = data[0]?.ZoneId || "";
-    setZoneId(next);
-    setRecordId("");
-    setRecords([]);
-  }
-
-  async function loadRecords(nextAccountId: number, nextZoneId: string) {
-    const data = await apiFetch<AlibabaHttpDnsRemoteRecord[]>(`/api/alibaba-httpdns/remote/records?account_id=${nextAccountId}&zone_id=${encodeURIComponent(nextZoneId)}`, token);
-    setRecords(data);
-    setRecordId(data[0]?.RecordId || "");
+    setZoneId(data[0]?.ZoneId || "");
   }
 
   useEffect(() => {
@@ -1622,39 +1616,24 @@ function AlibabaHttpDnsPanel({ token, groups, busy, act }: { token: string; grou
     if (accountId) loadZones(Number(accountId)).catch(() => undefined);
   }, [accountId]);
 
-  useEffect(() => {
-    if (accountId && zoneId) loadRecords(Number(accountId), zoneId).catch(() => undefined);
-  }, [zoneId]);
-
-  async function createGroup() {
-    if (!selectedAccount || !selectedZone || !recordId) throw new Error("请选择账户、内置权威域名和解析记录");
-    await apiFetch("/api/alibaba-httpdns/groups", token, {
+  async function syncZone(account: AlibabaHttpDnsRemoteAccount | { id: number; name: string }, zone: AlibabaHttpDnsRemoteZone | { ZoneId: string; ZoneName: string }, port = primaryPort, nextCooldown = cooldown) {
+    await apiFetch("/api/alibaba-httpdns/zones", token, {
       method: "POST",
-      body: JSON.stringify({ remote_account_id: selectedAccount.id, account_name: selectedAccount.name, zone_id: selectedZone.ZoneId, zone_name: selectedZone.ZoneName, record_id: recordId, primary_port: primaryPort, min_switch_interval_seconds: cooldown, enabled: true })
+      body: JSON.stringify({ remote_account_id: account.id, account_name: account.name, zone_id: zone.ZoneId, zone_name: zone.ZoneName, primary_port: port, min_switch_interval_seconds: nextCooldown, enabled: true })
     });
   }
 
-  function beginAddOrigin(groupId: number) {
-    setAddingGroupId(groupId);
-    setOriginDraft({ target: "", port: 22, priority: 10, remark: "", ignore_health_check: false });
-  }
-
-  function beginEditGroup(group: AlibabaHttpDnsGroup) {
-    setEditingGroupId(group.id);
-    setGroupEdit({ ttl: group.ttl, min_switch_interval_seconds: group.min_switch_interval_seconds });
-  }
-
-  function beginEditOrigin(origin: AlibabaHttpDnsGroup["origins"][number]) {
-    setEditingOriginId(origin.id);
-    setOriginEdit({ target: origin.target, port: origin.port, priority: origin.priority, remark: origin.remark || "", enabled: origin.enabled, ignore_health_check: origin.ignore_health_check });
+  async function addSelectedZone() {
+    if (!selectedAccount || !selectedZone) throw new Error("请选择阿里云账户和内置权威域名");
+    await syncZone(selectedAccount, selectedZone);
   }
 
   return (
     <section className="stack alibabaHttpDnsWorkspace">
       <div className="panel alibabaHttpDnsIntro">
         <div className="panelTitle">
-          <h2>移动解析 HTTPDNS · 内置权威故障切换</h2>
-          <p>独立切换阿里云内置权威记录，不修改 Cloudflare 公网解析。账户密钥和代理继续由 azpanel 保管。</p>
+          <h2>移动解析 HTTPDNS · 内置权威域名故障切换</h2>
+          <p>添加一个权威域名后，自动读取其中全部 A、AAAA、CNAME 记录；逐条检测当前解析值，不可用时切换到备用并在恢复后自动回切。</p>
         </div>
         <div className="rowActions">
           <button className="secondary" disabled={busy} onClick={() => act(() => loadAccounts(), "阿里云账户已刷新")}><RefreshCw size={15} />刷新账户</button>
@@ -1663,89 +1642,88 @@ function AlibabaHttpDnsPanel({ token, groups, busy, act }: { token: string; grou
       </div>
 
       <div className="panel">
-        <div className="panelTitle"><h2>新增切换卡片</h2><p>从 azpanel 中选择一条现有内置权威记录作为主用，创建后再添加备用目标。</p></div>
+        <div className="panelTitle"><h2>添加内置权威域名</h2><p>不是逐条选择解析记录。系统会接管所选 Zone 下全部已启用、可切换的地址记录。</p></div>
         <div className="alibabaHttpDnsCreateGrid">
           <label>阿里云账户<select value={accountId} onChange={(event) => setAccountId(event.target.value ? Number(event.target.value) : "")}><option value="">请选择账户</option>{accounts.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.proxy}</option>)}</select></label>
           <label>内置权威域名<select value={zoneId} onChange={(event) => setZoneId(event.target.value)} disabled={!accountId}><option value="">请选择 Zone</option>{zones.map((item) => <option value={item.ZoneId} key={item.ZoneId}>{item.ZoneName} · {item.RecordCount || 0} 条</option>)}</select></label>
-          <label>解析记录<select value={recordId} onChange={(event) => setRecordId(event.target.value)} disabled={!zoneId}><option value="">请选择记录</option>{records.map((item) => <option value={item.RecordId} key={item.RecordId}>{item.Rr} · {item.Type} · {item.Value}</option>)}</select></label>
-          <label>探测端口<input type="number" min={1} max={65535} value={primaryPort} onChange={(event) => setPrimaryPort(Number(event.target.value))} /></label>
-          <label>恢复冷却（秒）<input type="number" min={0} max={86400} value={cooldown} onChange={(event) => setCooldown(Number(event.target.value))} /></label>
-          <button disabled={busy || !recordId} onClick={() => act(createGroup, "阿里云 HTTPDNS 切换卡片已创建")}><Plus size={15} />创建切换卡片</button>
+          <label>默认检查端口<input type="number" min={1} max={65535} value={primaryPort} onChange={(event) => setPrimaryPort(Number(event.target.value))} /></label>
+          <label>自动回切冷却（秒）<input type="number" min={0} max={86400} value={cooldown} onChange={(event) => setCooldown(Number(event.target.value))} /></label>
+          <button disabled={busy || !zoneId} onClick={() => act(addSelectedZone, "权威域名及其解析记录已添加")}><Plus size={15} />添加权威域名</button>
         </div>
-        {selectedAccount && <p className="alibabaHttpDnsRemoteHint">访问密钥 {selectedAccount.access_key_hint} · {selectedAccount.proxy} · Zone/记录通过 azpanel 实时读取</p>}
+        {selectedAccount && <p className="alibabaHttpDnsRemoteHint">访问密钥 {selectedAccount.access_key_hint} · {selectedAccount.proxy} · 通过 azpanel 实时读取 Zone 和记录</p>}
       </div>
 
       <div className="alibabaHttpDnsGrid">
-        {groups.map((group) => {
-          const current = group.origins.find((origin) => origin.id === group.current_origin_id);
-          const hostname = group.rr === "@" ? group.zone_name : `${group.rr}.${group.zone_name}`;
+        {managedZones.map((zone) => {
+          const firstGroup = zone.groups[0];
+          const primaryPort = firstGroup.origins.slice().sort((a, b) => a.priority - b.priority)[0]?.port || 22;
           return (
-            <article className="groupCard alibabaHttpDnsCard" key={group.id}>
-              <div className="alibabaHttpDnsCardHead">
-                <div><div className="originTitleLine"><strong>{hostname}</strong><span className="originBadge record">{group.record_type}</span><Status value={group.enabled ? "enabled" : "disabled"} /></div><span>{group.account_name} · Zone {group.zone_id} · 记录 {group.record_id}</span></div>
+            <section className="alibabaManagedZone" key={zone.key}>
+              <div className="alibabaManagedZoneHead">
+                <div><div className="originTitleLine"><Router size={19} /><h2>{zone.zoneName}</h2><span className="originBadge record">{zone.groups.length} 条解析记录</span></div><p>{zone.accountName} · Zone {zone.zoneId} · 每条记录独立检测和切换</p></div>
                 <div className="rowActions">
-                  <button className="secondary" disabled={busy || !group.enabled} onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}/run`, token, { method: "POST" }), "该切换卡片检查完成")}><Play size={14} />立即检查</button>
-                  <button className="icon secondaryIcon" title="编辑切换设置" onClick={() => beginEditGroup(group)}><SlidersHorizontal size={15} /></button>
-                  <button className="icon secondaryIcon" title={group.enabled ? "停用" : "启用"} onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "PATCH", body: JSON.stringify({ enabled: !group.enabled }) }), group.enabled ? "切换卡片已停用" : "切换卡片已启用")}>{group.enabled ? <PowerOff size={15} /> : <Power size={15} />}</button>
-                  <button className="icon dangerBtn" title="删除卡片" onClick={() => window.confirm(`确认删除 ${hostname} 的阿里云 HTTPDNS 切换卡片吗？\n阿里云云端记录不会删除。`) && act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "DELETE" }), "切换卡片已删除")}><Trash2 size={15} /></button>
+                  <button className="secondary" disabled={busy} onClick={() => act(() => syncZone({ id: zone.remoteAccountId, name: zone.accountName }, { ZoneId: zone.zoneId, ZoneName: zone.zoneName }, primaryPort, firstGroup.min_switch_interval_seconds), "Zone 解析记录已同步")}><RefreshCw size={14} />同步记录</button>
+                  <button className="dangerBtn" disabled={busy} onClick={() => window.confirm(`确认取消管理 ${zone.zoneName} 吗？\n只删除本系统的切换配置，阿里云解析不会删除。`) && act(() => apiFetch(`/api/alibaba-httpdns/zones/${zone.remoteAccountId}/${encodeURIComponent(zone.zoneId)}`, token, { method: "DELETE" }), "已取消管理该权威域名")}><Trash2 size={14} />取消管理</button>
                 </div>
               </div>
-              {editingGroupId === group.id && (
-                <div className="alibabaGroupSettings">
-                  <label>解析 TTL<select value={groupEdit.ttl} onChange={(event) => setGroupEdit({ ...groupEdit, ttl: Number(event.target.value) })}>{[5, 30, 60, 3600, 43200, 86400].map((ttl) => <option value={ttl} key={ttl}>{ttl} 秒</option>)}</select></label>
-                  <label>恢复切换冷却<input type="number" min={0} max={86400} value={groupEdit.min_switch_interval_seconds} onChange={(event) => setGroupEdit({ ...groupEdit, min_switch_interval_seconds: Number(event.target.value) })} /></label>
-                  <button onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "PATCH", body: JSON.stringify(groupEdit) }), "切换设置已保存", () => setEditingGroupId(null))}><Save size={14} />保存设置</button>
-                  <button className="secondary" onClick={() => setEditingGroupId(null)}>取消</button>
-                </div>
-              )}
-              <div className="alibabaHttpDnsSummary">
-                <div><span>当前解析</span><strong>{current?.target || "尚未发布"}</strong></div>
-                <div><span>TTL / 线路</span><strong>{group.ttl}s · {group.request_source}</strong></div>
-                <div><span>最后切换</span><strong>{fmtDate(group.last_switch_at)}</strong></div>
-                <div><span>状态</span><strong className={group.last_error ? "textDanger" : ""}>{group.last_error || "运行正常"}</strong></div>
+              <div className="alibabaManagedRecords">
+                {zone.groups.slice().sort((a, b) => a.rr.localeCompare(b.rr)).map((group) => <AlibabaHttpDnsRecordCard token={token} group={group} busy={busy} act={act} key={group.id} />)}
               </div>
-              <div className="originList">
-                {group.origins.slice().sort((a, b) => a.priority - b.priority || a.id - b.id).map((origin) => (
-                  editingOriginId === origin.id ? (
-                    <div className="origin originEditing" key={origin.id}>
-                      <div className="originEditGrid alibabaOriginEditGrid">
-                        <label>目标<input value={originEdit.target} onChange={(event) => setOriginEdit({ ...originEdit, target: event.target.value })} /></label>
-                        <label>端口<input type="number" value={originEdit.port} onChange={(event) => setOriginEdit({ ...originEdit, port: Number(event.target.value) })} /></label>
-                        <label>优先级<input type="number" value={originEdit.priority} onChange={(event) => setOriginEdit({ ...originEdit, priority: Number(event.target.value) })} /></label>
-                        <label>备注<input value={originEdit.remark} onChange={(event) => setOriginEdit({ ...originEdit, remark: event.target.value })} /></label>
-                        <label className="inlineCheck"><input type="checkbox" checked={originEdit.enabled} onChange={(event) => setOriginEdit({ ...originEdit, enabled: event.target.checked })} />启用</label>
-                        <label className="inlineCheck"><input type="checkbox" checked={originEdit.ignore_health_check} onChange={(event) => setOriginEdit({ ...originEdit, ignore_health_check: event.target.checked })} />跳过探测</label>
-                        <button onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/origins/${origin.id}`, token, { method: "PATCH", body: JSON.stringify(originEdit) }), "源站已更新", () => setEditingOriginId(null))}><Save size={14} />保存</button>
-                        <button className="secondary" onClick={() => setEditingOriginId(null)}>取消</button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className={`origin ${origin.id === group.current_origin_id ? "originCurrent" : ""}`} key={origin.id}>
-                      <span className={`status ${origin.enabled ? origin.status : "disabled"}`}>{statusText(origin.enabled ? origin.status : "disabled")}</span>
-                      <div><div className="originTitleLine"><strong>{origin.remark || origin.target}</strong><span className={`originBadge ${origin.priority === 0 ? "primary" : "backup"}`}>{origin.priority === 0 ? "主用" : `备用 #${origin.priority}`}</span>{origin.id === group.current_origin_id && <span className="originBadge current">当前</span>}</div><span>{origin.target}:{origin.port} · {targetTypeText(origin.target_type)} · 最后检测 {fmtDate(origin.last_checked_at)}{origin.last_rtt_ms != null ? ` · ${origin.last_rtt_ms}ms` : ""}</span>{origin.last_error && <span className="textDanger">{origin.last_error}</span>}</div>
-                      <button className="icon secondaryIcon" title="编辑" onClick={() => beginEditOrigin(origin)}><Pencil size={14} /></button>
-                      <button className="icon dangerBtn" title="删除" disabled={group.origins.length <= 1} onClick={() => window.confirm(`确认删除源站 ${origin.target} 吗？`) && act(() => apiFetch(`/api/alibaba-httpdns/origins/${origin.id}`, token, { method: "DELETE" }), "源站已删除")}><Trash2 size={14} /></button>
-                    </div>
-                  )
-                ))}
-                {addingGroupId === group.id ? (
-                  <div className="alibabaOriginAdd">
-                    <label>备用目标<input placeholder={group.record_type === "CNAME" ? "backup.example.com" : "203.0.113.10"} value={originDraft.target} onChange={(event) => setOriginDraft({ ...originDraft, target: event.target.value })} /></label>
-                    <label>端口<input type="number" min={1} max={65535} value={originDraft.port} onChange={(event) => setOriginDraft({ ...originDraft, port: Number(event.target.value) })} /></label>
-                    <label>优先级<input type="number" min={0} value={originDraft.priority} onChange={(event) => setOriginDraft({ ...originDraft, priority: Number(event.target.value) })} /></label>
-                    <label>备注<input value={originDraft.remark} onChange={(event) => setOriginDraft({ ...originDraft, remark: event.target.value })} /></label>
-                    <label className="inlineCheck"><input type="checkbox" checked={originDraft.ignore_health_check} onChange={(event) => setOriginDraft({ ...originDraft, ignore_health_check: event.target.checked })} />跳过探测</label>
-                    <button disabled={!originDraft.target.trim()} onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}/origins`, token, { method: "POST", body: JSON.stringify({ ...originDraft, enabled: true }) }), "备用源站已添加", () => setAddingGroupId(null))}><Plus size={14} />添加</button>
-                    <button className="secondary" onClick={() => setAddingGroupId(null)}>取消</button>
-                  </div>
-                ) : <button className="secondary alibabaAddOriginButton" onClick={() => beginAddOrigin(group.id)}><Plus size={14} />添加备用源站</button>}
-              </div>
-            </article>
+            </section>
           );
         })}
-        {groups.length === 0 && <div className="panel emptyGroupPanel"><Router size={28} /><h2>还没有阿里云 HTTPDNS 切换卡片</h2><p>先在上方选择内置权威解析记录，系统会把当前记录作为主用源站接管。</p></div>}
+        {managedZones.length === 0 && <div className="panel emptyGroupPanel"><Router size={28} /><h2>还没有管理内置权威域名</h2><p>在上方选择 Zone 并点击“添加权威域名”，系统会自动接管其地址记录。</p></div>}
       </div>
     </section>
+  );
+}
+
+function AlibabaHttpDnsRecordCard({ token, group, busy, act }: { token: string; group: AlibabaHttpDnsGroup; busy: boolean; act: ActionRunner }) {
+  const [adding, setAdding] = useState(false);
+  const [originDraft, setOriginDraft] = useState({ target: "", port: group.origins[0]?.port || 22, priority: 10, remark: "", ignore_health_check: false });
+  const [editingGroup, setEditingGroup] = useState(false);
+  const [groupEdit, setGroupEdit] = useState({ ttl: group.ttl, min_switch_interval_seconds: group.min_switch_interval_seconds });
+  const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
+  const [originEdit, setOriginEdit] = useState({ target: "", port: 22, priority: 10, remark: "", enabled: true, ignore_health_check: false });
+  const current = group.origins.find((origin) => origin.id === group.current_origin_id);
+  const hostname = group.rr === "@" ? group.zone_name : `${group.rr}.${group.zone_name}`;
+
+  function beginAdd() {
+    setAdding(true);
+    setOriginDraft({ target: "", port: current?.port || 22, priority: Math.max(10, ...group.origins.map((item) => item.priority + 10)), remark: "", ignore_health_check: false });
+  }
+
+  function beginEditOrigin(origin: AlibabaHttpDnsGroup["origins"][number]) {
+    setEditingOriginId(origin.id);
+    setOriginEdit({ target: origin.target, port: origin.port, priority: origin.priority, remark: origin.remark || "", enabled: origin.enabled, ignore_health_check: origin.ignore_health_check });
+  }
+
+  async function addOrigin() {
+    if (!originDraft.target.trim()) throw new Error("请先在“备用 IP / 域名”输入框中填写实际地址");
+    await apiFetch(`/api/alibaba-httpdns/groups/${group.id}/origins`, token, { method: "POST", body: JSON.stringify({ ...originDraft, target: originDraft.target.trim(), enabled: true }) });
+  }
+
+  return (
+    <article className="groupCard alibabaHttpDnsCard">
+      <div className="alibabaHttpDnsCardHead">
+        <div><div className="originTitleLine"><strong>{hostname}</strong><span className="originBadge record">{group.record_type}</span><Status value={group.enabled ? "enabled" : "disabled"} /></div><span>记录 {group.record_id} · 检测当前解析 IP/目标是否可用</span></div>
+        <div className="rowActions">
+          <button className="secondary" disabled={busy || !group.enabled} onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}/run`, token, { method: "POST" }), "该解析记录检查完成")}><Play size={14} />立即检查</button>
+          <button className="icon secondaryIcon" title="TTL 与自动回切设置" onClick={() => setEditingGroup(true)}><SlidersHorizontal size={15} /></button>
+          <button className="icon secondaryIcon" title={group.enabled ? "停用自动切换" : "启用自动切换"} onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "PATCH", body: JSON.stringify({ enabled: !group.enabled }) }), group.enabled ? "该记录已停用" : "该记录已启用")}>{group.enabled ? <PowerOff size={15} /> : <Power size={15} />}</button>
+        </div>
+      </div>
+      {editingGroup && <div className="alibabaGroupSettings"><label>解析 TTL<select value={groupEdit.ttl} onChange={(event) => setGroupEdit({ ...groupEdit, ttl: Number(event.target.value) })}>{[5, 30, 60, 3600, 43200, 86400].map((ttl) => <option value={ttl} key={ttl}>{ttl} 秒</option>)}</select></label><label>自动回切冷却<input type="number" min={0} max={86400} value={groupEdit.min_switch_interval_seconds} onChange={(event) => setGroupEdit({ ...groupEdit, min_switch_interval_seconds: Number(event.target.value) })} /></label><button onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "PATCH", body: JSON.stringify(groupEdit) }), "切换设置已保存", () => setEditingGroup(false))}><Save size={14} />保存设置</button><button className="secondary" onClick={() => setEditingGroup(false)}>取消</button></div>}
+      <div className="alibabaHttpDnsSummary"><div><span>阿里云当前解析</span><strong>{current?.target || "尚未发布"}</strong></div><div><span>TTL / 线路</span><strong>{group.ttl}s · {group.request_source}</strong></div><div><span>最后切换</span><strong>{fmtDate(group.last_switch_at)}</strong></div><div><span>自动切换状态</span><strong className={group.last_error ? "textDanger" : ""}>{group.last_error || "运行正常"}</strong></div></div>
+      <div className="originList">
+        {group.origins.slice().sort((a, b) => a.priority - b.priority || a.id - b.id).map((origin) => editingOriginId === origin.id ? (
+          <div className="origin originEditing" key={origin.id}><div className="originEditGrid alibabaOriginEditGrid"><label>IP / 域名<input value={originEdit.target} onChange={(event) => setOriginEdit({ ...originEdit, target: event.target.value })} /></label><label>检查端口<input type="number" min={1} max={65535} value={originEdit.port} onChange={(event) => setOriginEdit({ ...originEdit, port: Number(event.target.value) })} /></label><label>优先级<input type="number" min={0} value={originEdit.priority} onChange={(event) => setOriginEdit({ ...originEdit, priority: Number(event.target.value) })} /></label><label>备注<input value={originEdit.remark} onChange={(event) => setOriginEdit({ ...originEdit, remark: event.target.value })} /></label><label className="inlineCheck"><input type="checkbox" checked={originEdit.enabled} onChange={(event) => setOriginEdit({ ...originEdit, enabled: event.target.checked })} />启用</label><label className="inlineCheck"><input type="checkbox" checked={originEdit.ignore_health_check} onChange={(event) => setOriginEdit({ ...originEdit, ignore_health_check: event.target.checked })} />无视健康检查</label><button onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/origins/${origin.id}`, token, { method: "PATCH", body: JSON.stringify(originEdit) }), "目标已更新", () => setEditingOriginId(null))}><Save size={14} />保存</button><button className="secondary" onClick={() => setEditingOriginId(null)}>取消</button></div></div>
+        ) : (
+          <div className={`origin ${origin.id === group.current_origin_id ? "originCurrent" : ""}`} key={origin.id}><span className={`status ${origin.enabled ? origin.status : "disabled"}`}>{statusText(origin.enabled ? origin.status : "disabled")}</span><div><div className="originTitleLine"><strong>{origin.remark || origin.target}</strong><span className={`originBadge ${origin.priority === 0 ? "primary" : "backup"}`}>{origin.priority === 0 ? "主用" : `备用 #${origin.priority}`}</span>{origin.id === group.current_origin_id && <span className="originBadge current">当前解析</span>}</div><span>{origin.target}:{origin.port} · {targetTypeText(origin.target_type)} · 最后检测 {fmtDate(origin.last_checked_at)}{origin.last_rtt_ms != null ? ` · ${origin.last_rtt_ms}ms` : ""}</span>{origin.last_error && <span className="textDanger">{origin.last_error}</span>}</div><button className="icon secondaryIcon" title="编辑目标" onClick={() => beginEditOrigin(origin)}><Pencil size={14} /></button><button className="icon dangerBtn" title="删除目标" disabled={group.origins.length <= 1} onClick={() => window.confirm(`确认删除目标 ${origin.target} 吗？`) && act(() => apiFetch(`/api/alibaba-httpdns/origins/${origin.id}`, token, { method: "DELETE" }), "目标已删除")}><Trash2 size={14} /></button></div>
+        ))}
+        {adding ? <div className="alibabaOriginAdd"><label>备用 IP / 域名<input autoFocus placeholder={group.record_type === "CNAME" ? "请输入实际备用域名，例如 backup.example.com" : "请输入实际备用 IP，例如 203.0.113.10"} value={originDraft.target} onChange={(event) => setOriginDraft({ ...originDraft, target: event.target.value })} /></label><label>检查端口<input type="number" min={1} max={65535} value={originDraft.port} onChange={(event) => setOriginDraft({ ...originDraft, port: Number(event.target.value) })} /></label><label>优先级<input type="number" min={0} value={originDraft.priority} onChange={(event) => setOriginDraft({ ...originDraft, priority: Number(event.target.value) })} /></label><label>备注<input placeholder="例如 香港备用" value={originDraft.remark} onChange={(event) => setOriginDraft({ ...originDraft, remark: event.target.value })} /></label><label className="inlineCheck"><input type="checkbox" checked={originDraft.ignore_health_check} onChange={(event) => setOriginDraft({ ...originDraft, ignore_health_check: event.target.checked })} />无视健康检查</label><button disabled={busy} onClick={() => act(addOrigin, "备用目标已添加", () => setAdding(false))}><Plus size={14} />确认添加</button><button className="secondary" onClick={() => setAdding(false)}>取消</button><p className="alibabaOriginInputHint">灰色示例不是已填写内容，请在第一个输入框中输入真实备用地址。</p></div> : <button className="secondary alibabaAddOriginButton" onClick={beginAdd}><Plus size={14} />添加备用 IP / 域名</button>}
+      </div>
+    </article>
   );
 }
 

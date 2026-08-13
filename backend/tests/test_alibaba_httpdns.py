@@ -5,7 +5,9 @@ from app.alibaba_httpdns import _desired_origin, call_azpanel_httpdns, evaluate_
 from app.database import Base
 from app.dns_utils import TcpCheckResult
 from app.integrations import update_azpanel_settings
-from app.models import AlibabaHttpDnsGroup, AlibabaHttpDnsOrigin, Event
+from app.models import AlibabaHttpDnsGroup, AlibabaHttpDnsOrigin, Event, User
+from app.routes.alibaba_httpdns import adopt_zone
+from app.schemas import AlibabaHttpDnsZoneAdopt
 
 
 def make_session():
@@ -117,3 +119,50 @@ def test_repeated_gateway_error_only_emits_one_event(monkeypatch):
     db.commit()
 
     assert db.query(Event).filter(Event.type == "alibaba_httpdns.publish_failed").count() == 1
+
+
+def test_adopt_zone_imports_all_enabled_address_records(monkeypatch):
+    db = make_session()
+    user = User(username="admin", password_hash="hash")
+    db.add(user)
+    db.commit()
+    records = [
+        {"RecordId": "a-1", "Rr": "www", "Type": "A", "Value": "192.0.2.10", "Ttl": 30, "EnableStatus": "enable"},
+        {"RecordId": "aaaa-1", "Rr": "v6", "Type": "AAAA", "Value": "2001:db8::10", "Ttl": 60, "EnableStatus": "enable"},
+        {"RecordId": "cname-1", "Rr": "api", "Type": "CNAME", "Value": "origin.example.net", "Ttl": 60, "EnableStatus": "enable"},
+        {"RecordId": "txt-1", "Rr": "@", "Type": "TXT", "Value": "ignored", "Ttl": 60, "EnableStatus": "enable"},
+        {"RecordId": "disabled", "Rr": "old", "Type": "A", "Value": "192.0.2.99", "Ttl": 60, "EnableStatus": "disable"},
+    ]
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_remote_records", lambda *_args: records)
+
+    response = adopt_zone(
+        AlibabaHttpDnsZoneAdopt(remote_account_id=7, account_name="intl", zone_id="zone-1", zone_name="example.com", primary_port=443),
+        user,
+        db,
+    )
+
+    assert response.detail["created"] == 3
+    groups = db.query(AlibabaHttpDnsGroup).order_by(AlibabaHttpDnsGroup.record_id).all()
+    assert {item.record_id for item in groups} == {"a-1", "aaaa-1", "cname-1"}
+    assert {item.record_type for item in groups} == {"A", "AAAA", "CNAME"}
+    assert all(len(item.origins) == 1 and item.origins[0].port == 443 for item in groups)
+
+
+def test_adopt_zone_is_idempotent_and_only_adds_new_records(monkeypatch):
+    db = make_session()
+    user = User(username="admin", password_hash="hash")
+    db.add(user)
+    db.commit()
+    records = [{"RecordId": "a-1", "Rr": "www", "Type": "A", "Value": "192.0.2.10", "Ttl": 30, "EnableStatus": "enable"}]
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_remote_records", lambda *_args: records)
+    payload = AlibabaHttpDnsZoneAdopt(remote_account_id=7, account_name="intl", zone_id="zone-1", zone_name="example.com", primary_port=443)
+
+    first = adopt_zone(payload, user, db)
+    second = adopt_zone(payload, user, db)
+    records.append({"RecordId": "a-2", "Rr": "api", "Type": "A", "Value": "192.0.2.20", "Ttl": 30, "EnableStatus": "enable"})
+    third = adopt_zone(payload, user, db)
+
+    assert first.detail == {"created": 1, "existing": 0, "errors": []}
+    assert second.detail == {"created": 0, "existing": 1, "errors": []}
+    assert third.detail == {"created": 1, "existing": 1, "errors": []}
+    assert db.query(AlibabaHttpDnsGroup).count() == 2

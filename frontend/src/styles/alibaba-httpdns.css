@@ -10,11 +10,11 @@
   align-items: end;
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   margin-top: 14px;
 }
 
-.legacy-ui .alibabaHttpDnsCreateGrid > label:nth-child(-n + 3) {
+.legacy-ui .alibabaHttpDnsCreateGrid > label:nth-child(-n + 2) {
   grid-column: span 2;
 }
 
@@ -40,6 +40,39 @@
 .legacy-ui .alibabaHttpDnsGrid {
   display: grid;
   gap: 16px;
+}
+
+.legacy-ui .alibabaManagedZone {
+  background: color-mix(in srgb, var(--muted) 45%, var(--card));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.legacy-ui .alibabaManagedZoneHead {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 4px;
+}
+
+.legacy-ui .alibabaManagedZoneHead h2,
+.legacy-ui .alibabaManagedZoneHead p {
+  margin: 0;
+}
+
+.legacy-ui .alibabaManagedZoneHead p {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  margin-top: 5px;
+}
+
+.legacy-ui .alibabaManagedRecords {
+  display: grid;
+  gap: 12px;
 }
 
 .legacy-ui .alibabaHttpDnsCardHead {
@@ -105,6 +138,21 @@
   padding: 12px;
 }
 
+.legacy-ui .alibabaOriginAdd {
+  position: relative;
+  padding-bottom: 34px;
+}
+
+.legacy-ui .alibabaOriginInputHint {
+  bottom: 9px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  grid-column: 1 / -1;
+  left: 12px;
+  margin: 0;
+  position: absolute;
+}
+
 .legacy-ui .alibabaOriginEditGrid {
   width: 100%;
 }
@@ -127,13 +175,14 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .legacy-ui .alibabaHttpDnsCreateGrid > label:nth-child(-n + 3),
+  .legacy-ui .alibabaHttpDnsCreateGrid > label:nth-child(-n + 2),
   .legacy-ui .alibabaHttpDnsCreateGrid > button {
     grid-column: auto;
   }
 
   .legacy-ui .alibabaHttpDnsIntro,
-  .legacy-ui .alibabaHttpDnsCardHead {
+  .legacy-ui .alibabaHttpDnsCardHead,
+  .legacy-ui .alibabaManagedZoneHead {
     align-items: stretch;
     flex-direction: column;
   }

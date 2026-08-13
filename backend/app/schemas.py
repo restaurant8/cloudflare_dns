@@ -227,6 +227,16 @@ class AlibabaHttpDnsGroupCreate(BaseModel):
     min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
 
 
+class AlibabaHttpDnsZoneAdopt(BaseModel):
+    remote_account_id: int = Field(ge=1)
+    account_name: str = Field(min_length=1, max_length=160)
+    zone_id: str = Field(min_length=1, max_length=80)
+    zone_name: str = Field(min_length=1, max_length=255)
+    primary_port: int = Field(default=22, ge=1, le=65535)
+    enabled: bool = True
+    min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
+
+
 class AlibabaHttpDnsGroupUpdate(BaseModel):
     enabled: bool | None = None
     ttl: int | None = Field(default=None, ge=5, le=86400)

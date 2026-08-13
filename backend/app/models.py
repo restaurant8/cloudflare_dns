@@ -121,7 +121,7 @@ class AlibabaHttpDnsGroup(Base, TimestampMixin):
     no_healthy_notified_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     origins: Mapped[list["AlibabaHttpDnsOrigin"]] = relationship(
-        "AlibabaHttpDnsOrigin", back_populates="group", cascade="all, delete-orphan", passive_deletes=True
+        "AlibabaHttpDnsOrigin", back_populates="group", cascade="all, delete-orphan"
     )
 
 
