@@ -350,11 +350,6 @@ class DohEndpoint(Base, TimestampMixin):
     next_sync_retry_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     groups: Mapped[list["FailoverGroup"]] = relationship("FailoverGroup", back_populates="doh_endpoint")
-    failover_groups: Mapped[list["DohFailoverGroup"]] = relationship(
-        "DohFailoverGroup",
-        back_populates="endpoint",
-        cascade="all, delete-orphan",
-    )
     route53_outputs: Mapped[list["AwsRoute53Output"]] = relationship(
         "AwsRoute53Output",
         back_populates="doh_endpoint",
@@ -439,73 +434,6 @@ class AwsRoute53Output(Base, TimestampMixin):
         except (TypeError, ValueError):
             values = []
         return [str(value) for value in values if value]
-
-
-class DohFailoverGroup(Base, TimestampMixin):
-    """Independent private-DoH failover rule.
-
-    These rules intentionally do not belong to a Cloudflare zone.  They let an
-    arbitrary query name publish a separately selected healthy target through a
-    DoH endpoint without changing any public DNS record.
-    """
-
-    __tablename__ = "doh_failover_groups"
-    __table_args__ = (UniqueConstraint("doh_endpoint_id", "hostname", name="uq_doh_failover_endpoint_hostname"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    doh_endpoint_id: Mapped[int] = mapped_column(ForeignKey("doh_endpoints.id", ondelete="CASCADE"), nullable=False)
-    hostname: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
-    ttl: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    min_switch_interval_seconds: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
-    current_origin_id: Mapped[int | None] = mapped_column(Integer)
-    last_switch_at: Mapped[datetime | None] = mapped_column(DateTime)
-    last_error: Mapped[str | None] = mapped_column(Text)
-    no_healthy_notified_at: Mapped[datetime | None] = mapped_column(DateTime)
-
-    endpoint: Mapped["DohEndpoint"] = relationship("DohEndpoint", back_populates="failover_groups")
-    origins: Mapped[list["DohFailoverOrigin"]] = relationship(
-        "DohFailoverOrigin",
-        back_populates="group",
-        cascade="all, delete-orphan",
-    )
-class DohFailoverOrigin(Base, TimestampMixin):
-    __tablename__ = "doh_failover_origins"
-    __table_args__ = (UniqueConstraint("group_id", "target", "port", name="uq_doh_failover_origin_target_port"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    group_id: Mapped[int] = mapped_column(ForeignKey("doh_failover_groups.id", ondelete="CASCADE"), nullable=False)
-    target: Mapped[str] = mapped_column(String(255), nullable=False)
-    target_type: Mapped[str] = mapped_column(String(20), nullable=False)
-    port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
-    priority: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
-    remark: Mapped[str | None] = mapped_column(Text)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    ignore_health_check: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)
-    success_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    fail_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
-    last_error: Mapped[str | None] = mapped_column(Text)
-    last_rtt_ms: Mapped[float | None] = mapped_column(Float)
-    resolved_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
-    healthy_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
-    published_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
-    ip_probe_states_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
-
-    group: Mapped["DohFailoverGroup"] = relationship("DohFailoverGroup", back_populates="origins")
-
-    @property
-    def resolved_ips(self) -> list[str]:
-        return resolved_ips(self)
-
-    @property
-    def healthy_ips(self) -> list[str]:
-        return healthy_ips(self)
-
-    @property
-    def published_ips(self) -> list[str]:
-        return published_ips(self)
 
 
 class FailoverHostname(Base, TimestampMixin):

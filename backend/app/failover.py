@@ -625,8 +625,9 @@ def _evaluate_single_group(
     # existing groups self-heal instead of failing every publish tick with
     # "has no A value".
     alibaba_enabled = any(output.enabled for output in group.alibaba_httpdns_outputs)
+    route53_enabled = any(output.enabled for output in group.route53_outputs)
     normalized_alibaba_modes = 0
-    if alibaba_enabled:
+    if alibaba_enabled or (group.provider_type == "route53" and route53_enabled):
         try:
             normalized_alibaba_modes = normalize_alibaba_provider_origin_modes(group)
         except AlibabaOutputConfigurationError as exc:

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import get_current_user
 from ..doh import build_doh_snapshot, sync_doh_endpoint
-from ..models import AwsRoute53Output, DohEndpoint, DohFailoverGroup, FailoverGroup, User
+from ..models import AwsRoute53Output, DohEndpoint, FailoverGroup, User
 from ..schemas import DohEndpointCreate, DohEndpointOut, DohEndpointUpdate, DohSnapshotOut, Message
 from ..security import encrypt_secret
 
@@ -65,12 +65,11 @@ def update_endpoint(endpoint_id: int, payload: DohEndpointUpdate, _: User = Depe
             .filter(FailoverGroup.doh_endpoint_id == endpoint.id, FailoverGroup.doh_enabled.is_(True))
             .count()
         )
-        independent_bound = db.query(DohFailoverGroup).filter(DohFailoverGroup.doh_endpoint_id == endpoint.id).count()
         route53_bound = db.query(AwsRoute53Output).filter(AwsRoute53Output.doh_endpoint_id == endpoint.id).count()
-        if bound or independent_bound or route53_bound:
+        if bound or route53_bound:
             raise HTTPException(
                 status_code=409,
-                detail=f"DoH endpoint is still enabled for {bound} Cloudflare group(s), {independent_bound} independent group(s), and {route53_bound} Route 53 output(s)",
+                detail=f"DoH endpoint is still enabled for {bound} Cloudflare group(s) and {route53_bound} Route 53 output(s)",
             )
     if "base_url" in updates:
         updates["base_url"] = _normalize_url(updates["base_url"])
@@ -97,12 +96,11 @@ def delete_endpoint(endpoint_id: int, _: User = Depends(get_current_user), db: S
     if endpoint is None:
         raise HTTPException(status_code=404, detail="DoH endpoint not found")
     count = db.query(FailoverGroup).filter(FailoverGroup.doh_endpoint_id == endpoint.id).count()
-    independent_count = db.query(DohFailoverGroup).filter(DohFailoverGroup.doh_endpoint_id == endpoint.id).count()
     route53_count = db.query(AwsRoute53Output).filter(AwsRoute53Output.doh_endpoint_id == endpoint.id).count()
-    if count or independent_count or route53_count:
+    if count or route53_count:
         raise HTTPException(
             status_code=409,
-            detail=f"DoH endpoint is still used by {count} Cloudflare group(s), {independent_count} independent group(s), and {route53_count} Route 53 output(s)",
+            detail=f"DoH endpoint is still used by {count} Cloudflare group(s) and {route53_count} Route 53 output(s)",
         )
     db.delete(endpoint)
     db.commit()

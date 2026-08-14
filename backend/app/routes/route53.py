@@ -11,7 +11,11 @@ from ..models import AwsRoute53Credential, AwsRoute53Output, DohEndpoint, Failov
 from ..route53 import (
     Route53AdoptionRequired,
     Route53TrafficPolicyManaged,
+    create_private_hosted_zone,
+    delete_empty_private_hosted_zone,
+    get_private_hosted_zone,
     list_private_hosted_zones,
+    list_vpcs,
     normalize_hosted_zone_id,
     publish_route53_output,
     route53_client,
@@ -23,7 +27,10 @@ from ..schemas import (
     AwsRoute53CredentialCreate,
     AwsRoute53CredentialOut,
     AwsRoute53CredentialUpdate,
+    AwsRoute53PrivateHostedZoneCreate,
+    AwsRoute53PrivateHostedZoneDelete,
     AwsRoute53PrivateHostedZoneOut,
+    AwsRoute53VpcOut,
     AwsRoute53OutputCreate,
     AwsRoute53OutputOut,
     AwsRoute53OutputUpdate,
@@ -140,6 +147,101 @@ def private_hosted_zones(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@router.get("/credentials/{credential_id}/vpcs", response_model=list[AwsRoute53VpcOut])
+def vpcs(
+    credential_id: int,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, credential_id)
+    try:
+        values = list_vpcs(credential)
+        credential.last_error = None
+        db.commit()
+        return values
+    except Exception as exc:
+        credential.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"Could not list AWS VPCs: {exc}") from exc
+
+
+@router.post(
+    "/credentials/{credential_id}/private-hosted-zones",
+    response_model=AwsRoute53PrivateHostedZoneOut,
+)
+def create_hosted_zone(
+    credential_id: int,
+    payload: AwsRoute53PrivateHostedZoneCreate,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, credential_id)
+    try:
+        name = normalize_hostname(payload.name)
+        if payload.vpc_region != credential.region:
+            raise ValueError(
+                f"Selected VPC region {payload.vpc_region} does not match credential region {credential.region}"
+            )
+        available_vpcs = {item["id"] for item in list_vpcs(credential)}
+        if payload.vpc_id not in available_vpcs:
+            raise ValueError(f"VPC {payload.vpc_id} was not found in {payload.vpc_region}")
+        result = create_private_hosted_zone(
+            credential,
+            name=name,
+            vpc_id=payload.vpc_id,
+            vpc_region=payload.vpc_region,
+            comment=payload.comment,
+        )
+        credential.last_error = None
+        db.commit()
+        return result
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        credential.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"Could not create Route 53 private hosted zone: {exc}") from exc
+
+
+@router.delete("/credentials/{credential_id}/private-hosted-zones/{hosted_zone_id}", response_model=Message)
+def delete_hosted_zone(
+    credential_id: int,
+    hosted_zone_id: str,
+    payload: AwsRoute53PrivateHostedZoneDelete,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, credential_id)
+    zone_id = normalize_hosted_zone_id(hosted_zone_id)
+    try:
+        zone = get_private_hosted_zone(credential, zone_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not inspect Route 53 private hosted zone: {exc}") from exc
+    if payload.confirm_name.strip().rstrip(".").lower() != zone["name"].lower():
+        raise HTTPException(status_code=400, detail="Hosted zone confirmation name does not match")
+    bindings = db.query(AwsRoute53Output).filter(
+        AwsRoute53Output.credential_id == credential.id,
+        AwsRoute53Output.hosted_zone_id == zone_id,
+    ).count()
+    if bindings:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Private hosted zone is still used by {bindings} AWS DoH failover group(s); delete those groups first",
+        )
+    try:
+        change = delete_empty_private_hosted_zone(credential, zone_id)
+        credential.last_error = None
+        db.commit()
+        return Message(message="Route 53 private hosted zone deleted", detail={"change": change})
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        credential.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"Could not delete Route 53 private hosted zone: {exc}") from exc
+
+
 def _output_query(db: Session):
     return db.query(AwsRoute53Output).options(
         selectinload(AwsRoute53Output.credential),
@@ -164,6 +266,7 @@ def _validate_output_identity(
     exclude_id: int | None = None,
     doh_endpoint_id: int | None = None,
     current_output: AwsRoute53Output | None = None,
+    exclude_group_id: int | None = None,
     adopt_existing: bool = False,
 ) -> tuple[AwsRoute53Credential, str, str, str]:
     credential = _credential(db, credential_id)
@@ -189,6 +292,7 @@ def _validate_output_identity(
                 db,
                 endpoint_id=doh_endpoint_id,
                 hostnames=[normalized],
+                exclude_group_id=exclude_group_id,
                 exclude_route53_output_id=exclude_id,
             )
         except ValueError as exc:
@@ -238,46 +342,119 @@ def create_standalone_group(
     _: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    credential = _credential(db, payload.credential_id)
+    endpoint = _doh_endpoint(db, payload.doh_endpoint_id)
     try:
-        hostname = normalize_hostname(payload.hostname)
+        zone = get_private_hosted_zone(credential, payload.hosted_zone_id)
+        hostname = normalize_hostname(zone["name"])
         target = parse_target(payload.primary_target)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    duplicate = db.query(FailoverGroup).filter(
-        FailoverGroup.zone_id.is_(None),
-        FailoverGroup.provider_type == "route53",
-        FailoverGroup.hostname == hostname,
-    ).one_or_none()
-    if duplicate is not None:
-        raise HTTPException(status_code=409, detail="This standalone failover hostname already exists")
-    group = FailoverGroup(
-        provider_type="route53",
-        zone_id=None,
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not inspect Route 53 private hosted zone: {exc}") from exc
+    duplicate = (
+        db.query(FailoverGroup)
+        .options(selectinload(FailoverGroup.origins), selectinload(FailoverGroup.route53_outputs))
+        .filter(
+            FailoverGroup.zone_id.is_(None),
+            FailoverGroup.provider_type == "route53",
+            FailoverGroup.hostname == hostname,
+        )
+        .order_by(FailoverGroup.id)
+        .first()
+    )
+    if duplicate is not None and duplicate.route53_outputs:
+        raise HTTPException(status_code=409, detail="This standalone failover hostname already has a Route 53 output")
+    credential, zone_id, zone_name, hostname = _validate_output_identity(
+        db,
+        credential_id=credential.id,
+        hosted_zone_id=zone["id"],
+        hosted_zone_name=zone["name"],
+        hostname=hostname,
+        doh_endpoint_id=endpoint.id,
+        exclude_group_id=duplicate.id if duplicate is not None else None,
+        adopt_existing=payload.adopt_existing,
+    )
+    if duplicate is None:
+        group = FailoverGroup(
+            provider_type="route53",
+            zone_id=None,
+            hostname=hostname,
+            ttl=payload.ttl,
+            enabled=True,
+            min_switch_interval_seconds=payload.min_switch_interval_seconds,
+            cloudflare_publish_enabled=False,
+            doh_enabled=False,
+        )
+        db.add(group)
+        db.flush()
+    else:
+        group = duplicate
+        group.ttl = payload.ttl
+        group.enabled = True
+        group.min_switch_interval_seconds = payload.min_switch_interval_seconds
+        group.last_error = None
+    if not group.origins:
+        origin = Origin(
+            group_id=group.id,
+            target=target.value,
+            target_type=target.target_type,
+            publish_mode="expanded" if target.target_type == "hostname" else "direct",
+            port=payload.primary_port,
+            priority=0,
+            remark="AWS private DoH primary",
+            enabled=True,
+            status="unknown",
+        )
+        db.add(origin)
+        db.flush()
+        group.current_origin_id = None
+    output = AwsRoute53Output(
+        group_id=group.id,
+        credential_id=credential.id,
+        doh_endpoint_id=endpoint.id,
+        hosted_zone_id=zone_id,
+        hosted_zone_name=zone_name,
         hostname=hostname,
         ttl=payload.ttl,
         enabled=True,
-        min_switch_interval_seconds=payload.min_switch_interval_seconds,
-        cloudflare_publish_enabled=False,
-        doh_enabled=False,
     )
-    db.add(group)
+    db.add(output)
     db.flush()
-    origin = Origin(
-        group_id=group.id,
-        target=target.value,
-        target_type=target.target_type,
-        publish_mode="expanded" if target.target_type == "hostname" else "direct",
-        port=payload.primary_port,
-        priority=0,
-        remark="AWS private DoH primary",
-        enabled=True,
-        status="unknown",
-    )
-    db.add(origin)
-    db.flush()
-    group.current_origin_id = None
+    current_origin = next((item for item in group.origins if item.id == group.current_origin_id), None)
+    if duplicate is not None and current_origin is not None and current_origin.enabled:
+        # Preserve service continuity while upgrading a migrated static rule.
+        # The legacy DoH sync already persisted its last-known-good addresses;
+        # expanded mode lets Route 53 publish that address at the zone apex.
+        if current_origin.target_type == "hostname" and current_origin.publish_mode != "expanded":
+            current_origin.publish_mode = "expanded"
+        try:
+            publish_route53_output(
+                output,
+                current_origin,
+                require_adoption=True,
+                adopt_existing=payload.adopt_existing,
+            )
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=502,
+                detail=f"Route 53 first publish failed; the legacy static DoH rule was left unchanged: {exc}",
+            ) from exc
+    # A migrated legacy rule may still publish authoritative values directly to
+    # EC2. Once Route 53 owns the same name, keep a single snapshot owner and let
+    # the VPC Resolver become the source of truth.
+    group.doh_enabled = False
+    group.doh_endpoint_id = None
+    group.doh_hostnames_json = "[]"
+    _best_effort_allowlist_sync(db, endpoint)
     db.commit()
-    return group
+    return (
+        db.query(FailoverGroup)
+        .options(selectinload(FailoverGroup.origins), selectinload(FailoverGroup.route53_outputs))
+        .filter(FailoverGroup.id == group.id)
+        .one()
+    )
 
 
 def _best_effort_allowlist_sync(db: Session, endpoint: DohEndpoint) -> None:

@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.alibaba_httpdns import _desired_origin, call_azpanel_httpdns, evaluate_alibaba_httpdns_groups, list_credential_zones, sync_group_alibaba_outputs
+from app.alibaba_httpdns import _desired_origin, call_azpanel_httpdns, create_credential_zone, evaluate_alibaba_httpdns_groups, list_credential_zones, sync_group_alibaba_outputs, update_credential_zone_effective_scope
 from app.database import Base
 from app.dns_utils import TcpCheckResult
 from app.failover import evaluate_failover_groups
@@ -19,19 +19,19 @@ from app.models import (
     AlibabaHttpDnsCredential,
     AlibabaHttpDnsGroup,
     AlibabaHttpDnsOrigin,
+    AwsRoute53Credential,
+    AwsRoute53Output,
     CloudflareCredential,
     DohEndpoint,
-    DohFailoverGroup,
-    DohFailoverOrigin,
     Event,
     FailoverGroup,
     Origin,
     User,
     Zone,
 )
-from app.routes.alibaba_httpdns import adopt_zone, delete_origin_action, release_zone_action, router, update_group as update_alibaba_group, update_origin
+from app.routes.alibaba_httpdns import adopt_zone, create_managed_group, delete_origin_action, release_zone_action, router, update_group as update_alibaba_group, update_origin
 from app.routes.groups import create_origin as create_failover_origin, update_origin as update_failover_origin
-from app.schemas import AlibabaHttpDnsGroupUpdate, AlibabaHttpDnsOriginUpdate, AlibabaHttpDnsZoneAdopt, AlibabaHttpDnsZoneRelease, OriginCreate, OriginUpdate
+from app.schemas import AlibabaHttpDnsGroupUpdate, AlibabaHttpDnsOriginUpdate, AlibabaHttpDnsStandaloneGroupCreate, AlibabaHttpDnsZoneAdopt, AlibabaHttpDnsZoneRelease, OriginCreate, OriginUpdate
 from app.security import encrypt_secret
 
 
@@ -132,6 +132,92 @@ def test_direct_credential_calls_alibaba_rpc_without_azpanel(monkeypatch):
         hmac.new(b"test-secret&", string_to_sign.encode("utf-8"), hashlib.sha1).digest()
     ).decode("ascii")
     assert captured["params"]["Signature"] == expected
+
+
+def test_zone_creation_and_effective_scope_use_idempotent_rpc_parameters(monkeypatch):
+    credential = AlibabaHttpDnsCredential(id=9, name="direct", enabled=True)
+    calls = []
+
+    def call(_credential, action, **parameters):
+        calls.append((action, parameters))
+        return {"ZoneId": "zone-new"} if action == "AddRecursionZone" else {}
+
+    monkeypatch.setattr("app.alibaba_httpdns.call_alibaba_api", call)
+
+    first = create_credential_zone(credential, zone_name="private.example.com", proxy_pattern="zone")
+    second = create_credential_zone(credential, zone_name="private.example.com", proxy_pattern="zone")
+    update_credential_zone_effective_scope(credential, "zone-new", ["20003", "20004"])
+
+    assert first["ZoneId"] == second["ZoneId"] == "zone-new"
+    assert calls[0][1]["ClientToken"] == calls[1][1]["ClientToken"]
+    scope_params = calls[2][1]
+    assert scope_params["EffectiveScopes.1.EffectiveType"] == "account"
+    assert scope_params["EffectiveScopes.1.Scope.1"] == "20003"
+    assert scope_params["EffectiveScopes.1.Scope.2"] == "20004"
+
+
+def test_managed_group_creates_apex_record_then_scope_and_unified_group(monkeypatch):
+    db = make_session()
+    credential = AlibabaHttpDnsCredential(
+        name="direct-managed",
+        access_key_id_encrypted=encrypt_secret("ak"),
+        access_key_secret_encrypted=encrypt_secret("secret"),
+        endpoint="alidns.aliyuncs.com",
+        enabled=True,
+    )
+    db.add(credential)
+    db.commit()
+    calls = []
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns._credential_zone",
+        lambda *_args: {"ZoneId": "zone-1", "ZoneName": "private.example.com", "RecordCount": 0},
+    )
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_credential_records", lambda *_args: [])
+
+    def add_record(_credential, **kwargs):
+        calls.append(("record", kwargs))
+        return {
+            "RecordId": "record-1",
+            "Rr": "@",
+            "Type": kwargs["record_type"],
+            "Value": kwargs["value"],
+            "Ttl": kwargs["ttl"],
+            "RequestSource": "default",
+            "Weight": 1,
+            "Priority": 1,
+            "EnableStatus": "enable",
+        }
+
+    monkeypatch.setattr("app.routes.alibaba_httpdns.add_credential_record", add_record)
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.update_credential_zone_effective_scope",
+        lambda _credential, zone_id, scopes: calls.append(("scope", {"zone_id": zone_id, "scopes": scopes})),
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.resolve_hostname_ips_bounded",
+        lambda *_args: ["203.0.113.10"],
+    )
+
+    output = create_managed_group(
+        AlibabaHttpDnsStandaloneGroupCreate(
+            credential_id=credential.id,
+            zone_id="zone-1",
+            primary_target="origin.example.net",
+            primary_port=443,
+            ttl=60,
+            effective_scope_ids=["20003"],
+        ),
+        None,
+        db,
+    )
+
+    source = db.get(FailoverGroup, output.source_group_id)
+    assert [item[0] for item in calls] == ["record", "scope"]
+    assert calls[0][1]["record_type"] == "A"
+    assert calls[0][1]["value"] == "203.0.113.10"
+    assert source.provider_type == "alibaba_httpdns"
+    assert source.origins[0].target == "origin.example.net"
+    assert source.origins[0].publish_mode == "expanded"
 
 
 def test_unknown_origins_wait_for_recovery_threshold_without_false_alarm(monkeypatch):
@@ -952,10 +1038,36 @@ def test_same_hostname_can_have_independent_cloudflare_alibaba_and_aws_outputs()
     )
     db.add(endpoint)
     db.flush()
-    aws = DohFailoverGroup(doh_endpoint_id=endpoint.id, hostname=hostname, ttl=60, enabled=True)
+    aws_credential = AwsRoute53Credential(
+        name="aws",
+        access_key_id_encrypted="key",
+        secret_access_key_encrypted="secret",
+        region="ap-east-1",
+    )
+    aws = FailoverGroup(
+        provider_type="route53",
+        zone_id=None,
+        hostname=hostname,
+        ttl=60,
+        enabled=True,
+        cloudflare_publish_enabled=False,
+        doh_enabled=False,
+    )
+    db.add(aws_credential)
     db.add(aws)
     db.flush()
-    db.add(DohFailoverOrigin(group_id=aws.id, target="192.0.2.3", target_type="ipv4", port=443, priority=0))
+    db.add(Origin(group_id=aws.id, target="192.0.2.3", target_type="ipv4", port=443, priority=0))
+    db.add(
+        AwsRoute53Output(
+            group_id=aws.id,
+            credential_id=aws_credential.id,
+            doh_endpoint_id=endpoint.id,
+            hosted_zone_id="ZAWS",
+            hosted_zone_name="example.com",
+            hostname=hostname,
+            ttl=60,
+        )
+    )
     db.commit()
 
     assert cloudflare.hostname == hostname

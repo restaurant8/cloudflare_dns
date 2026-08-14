@@ -6,9 +6,10 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.doh import build_doh_snapshot
 from app.models import AwsRoute53Credential, AwsRoute53Output, DohEndpoint, FailoverGroup, Origin
-from app.route53 import desired_origin_records, publish_route53_output, route53_output_matches, sync_group_route53_outputs
-from app.routes.route53 import create_output
-from app.schemas import AwsRoute53OutputCreate
+from app.route53 import create_private_hosted_zone, delete_empty_private_hosted_zone, desired_origin_records, publish_route53_output, route53_output_matches, sync_group_route53_outputs
+from app.routes.groups import create_origin as create_failover_origin
+from app.routes.route53 import create_hosted_zone, create_output, create_standalone_group, delete_hosted_zone
+from app.schemas import AwsRoute53OutputCreate, AwsRoute53PrivateHostedZoneCreate, AwsRoute53PrivateHostedZoneDelete, AwsRoute53StandaloneGroupCreate, OriginCreate
 from app.security import encrypt_secret
 
 
@@ -31,6 +32,7 @@ def setup_output(db):
         region="ap-east-1",
     )
     group = FailoverGroup(
+        provider_type="route53",
         zone_id=None,
         hostname="snejsat.baidu.com",
         cloudflare_publish_enabled=False,
@@ -133,6 +135,36 @@ def test_direct_hostname_publishes_cname_for_vpc_resolver_to_follow():
     origin = Origin(target="real.example.net", target_type="hostname", publish_mode="direct", port=443)
 
     assert desired_origin_records(origin) == {"CNAME": ["real.example.net."]}
+
+
+def test_route53_group_forces_hostname_backup_to_expanded_mode():
+    db = make_session()
+    _, group, _, _ = setup_output(db)
+
+    backup = create_failover_origin(
+        group.id,
+        OriginCreate(target="backup.example.net", port=443, priority=10, publish_mode="direct"),
+        None,
+        db,
+    )
+
+    assert backup.publish_mode == "expanded"
+
+
+def test_route53_apex_never_sends_direct_cname_to_aws(monkeypatch):
+    db = make_session()
+    _, _, origin, output = setup_output(db)
+    output.hostname = "baidu.com"
+    origin.target = "backup.example.net"
+    origin.target_type = "hostname"
+    origin.publish_mode = "direct"
+    client = FakeRoute53()
+    monkeypatch.setattr("app.route53.route53_client", lambda _credential: client)
+
+    with pytest.raises(RuntimeError, match="cannot publish CNAME"):
+        publish_route53_output(output, origin)
+
+    assert client.changes == []
 
 
 def test_record_type_change_deletes_exact_live_rrset_not_stale_local_metadata(monkeypatch):
@@ -291,3 +323,239 @@ def test_confirmed_adoption_replaces_alias_and_traffic_policy_is_never_adopted(m
         create_output(payload, None, db)
     assert exc_info.value.status_code == 409
     assert "Traffic Policy" in str(exc_info.value.detail)
+
+
+def test_create_private_hosted_zone_uses_selected_vpc(monkeypatch):
+    db = make_session()
+    credential = AwsRoute53Credential(
+        name="aws-create-zone",
+        access_key_id_encrypted=encrypt_secret("AKIAEXAMPLE"),
+        secret_access_key_encrypted=encrypt_secret("secret"),
+        region="ap-east-1",
+    )
+    db.add(credential)
+    db.commit()
+    captured = {}
+    monkeypatch.setattr(
+        "app.routes.route53.list_vpcs",
+        lambda _credential: [{"id": "vpc-123", "region": "ap-east-1"}],
+    )
+
+    def create(_credential, **kwargs):
+        captured.update(kwargs)
+        return {
+            "id": "ZNEW",
+            "name": kwargs["name"],
+            "record_count": 2,
+            "vpcs": [{"id": kwargs["vpc_id"], "region": kwargs["vpc_region"]}],
+        }
+
+    monkeypatch.setattr("app.routes.route53.create_private_hosted_zone", create)
+    result = create_hosted_zone(
+        credential.id,
+        AwsRoute53PrivateHostedZoneCreate(
+            name="snejsat.baidu.com",
+            vpc_id="vpc-123",
+            vpc_region="ap-east-1",
+        ),
+        None,
+        db,
+    )
+
+    assert result["id"] == "ZNEW"
+    assert captured["name"] == "snejsat.baidu.com"
+    assert captured["vpc_id"] == "vpc-123"
+
+
+def test_private_hosted_zone_caller_reference_is_retry_stable(monkeypatch):
+    credential = AwsRoute53Credential(id=17, name="aws", region="ap-east-1", enabled=True)
+    references = []
+
+    class Client:
+        def create_hosted_zone(self, **kwargs):
+            references.append(kwargs["CallerReference"])
+            return {"HostedZone": {"Id": "/hostedzone/ZNEW", "Name": kwargs["Name"]}}
+
+    monkeypatch.setattr("app.route53.route53_client", lambda _credential: Client())
+
+    for _ in range(2):
+        create_private_hosted_zone(
+            credential,
+            name="private.example.com",
+            vpc_id="vpc-123",
+            vpc_region="ap-east-1",
+        )
+
+    assert references[0] == references[1]
+    assert references[0].startswith("cloudflare-dns-")
+
+
+def test_combined_group_creation_uses_hosted_zone_name_and_binds_output(monkeypatch):
+    db = make_session()
+    endpoint = DohEndpoint(
+        name="aws-combined",
+        base_url="https://example.cloudfront.net",
+        hmac_secret_encrypted=encrypt_secret("x" * 40),
+    )
+    credential = AwsRoute53Credential(
+        name="aws-combined",
+        access_key_id_encrypted=encrypt_secret("AKIAEXAMPLE"),
+        secret_access_key_encrypted=encrypt_secret("secret"),
+        region="ap-east-1",
+    )
+    db.add_all([endpoint, credential])
+    db.commit()
+    monkeypatch.setattr(
+        "app.routes.route53.get_private_hosted_zone",
+        lambda *_args: {
+            "id": "ZPRIVATE",
+            "name": "snejsat.baidu.com",
+            "record_count": 2,
+            "vpcs": [{"id": "vpc-123", "region": "ap-east-1"}],
+        },
+    )
+    monkeypatch.setattr("app.routes.route53.validate_route53_adoption", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.routes.route53._best_effort_allowlist_sync", lambda *_args: None)
+
+    group = create_standalone_group(
+        AwsRoute53StandaloneGroupCreate(
+            credential_id=credential.id,
+            doh_endpoint_id=endpoint.id,
+            hosted_zone_id="ZPRIVATE",
+            primary_target="203.0.113.10",
+            primary_port=443,
+            ttl=60,
+        ),
+        None,
+        db,
+    )
+
+    output = db.query(AwsRoute53Output).one()
+    assert group.hostname == "snejsat.baidu.com"
+    assert group.provider_type == "route53"
+    assert group.origins[0].target == "203.0.113.10"
+    assert output.group_id == group.id
+    assert output.hostname == "snejsat.baidu.com"
+    assert output.hosted_zone_id == "ZPRIVATE"
+
+
+def test_migrated_static_group_is_published_before_direct_doh_is_disabled(monkeypatch):
+    db = make_session()
+    endpoint = DohEndpoint(
+        name="aws-migrated",
+        base_url="https://example.cloudfront.net",
+        hmac_secret_encrypted=encrypt_secret("x" * 40),
+    )
+    credential = AwsRoute53Credential(
+        name="aws-migrated",
+        access_key_id_encrypted=encrypt_secret("AKIAEXAMPLE"),
+        secret_access_key_encrypted=encrypt_secret("secret"),
+        region="ap-east-1",
+    )
+    group = FailoverGroup(
+        provider_type="route53",
+        zone_id=None,
+        hostname="private.example.com",
+        cloudflare_publish_enabled=False,
+        doh_enabled=True,
+        doh_endpoint=endpoint,
+        doh_hostnames_json='["private.example.com"]',
+    )
+    db.add_all([endpoint, credential, group])
+    db.flush()
+    origin = Origin(group_id=group.id, target="203.0.113.10", target_type="ipv4", port=443, status="healthy")
+    db.add(origin)
+    db.flush()
+    group.current_origin_id = origin.id
+    db.commit()
+    monkeypatch.setattr(
+        "app.routes.route53.get_private_hosted_zone",
+        lambda *_args: {"id": "ZPRIVATE", "name": "private.example.com", "record_count": 2, "vpcs": []},
+    )
+    monkeypatch.setattr("app.routes.route53.validate_route53_adoption", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.routes.route53._best_effort_allowlist_sync", lambda *_args: None)
+    published = []
+    monkeypatch.setattr(
+        "app.routes.route53.publish_route53_output",
+        lambda output, selected, **_kwargs: published.append((output.hostname, selected.target)) or {},
+    )
+
+    result = create_standalone_group(
+        AwsRoute53StandaloneGroupCreate(
+            credential_id=credential.id,
+            doh_endpoint_id=endpoint.id,
+            hosted_zone_id="ZPRIVATE",
+            primary_target="203.0.113.10",
+            primary_port=443,
+        ),
+        None,
+        db,
+    )
+
+    assert result.id == group.id
+    assert published == [("private.example.com", "203.0.113.10")]
+    assert result.doh_enabled is False
+    assert len(result.origins) == 1
+
+
+def test_hosted_zone_delete_refuses_local_binding(monkeypatch):
+    db = make_session()
+    _, _, _, output = setup_output(db)
+    monkeypatch.setattr(
+        "app.routes.route53.get_private_hosted_zone",
+        lambda *_args: {"id": "ZPRIVATE", "name": "baidu.com", "record_count": 2, "vpcs": []},
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        delete_hosted_zone(
+            output.credential_id,
+            "ZPRIVATE",
+            AwsRoute53PrivateHostedZoneDelete(confirm_name="baidu.com"),
+            None,
+            db,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "still used" in str(exc_info.value.detail)
+
+
+def test_delete_empty_private_zone_never_removes_business_records(monkeypatch):
+    db = make_session()
+    credential = AwsRoute53Credential(
+        name="aws-safe-delete",
+        access_key_id_encrypted=encrypt_secret("AKIAEXAMPLE"),
+        secret_access_key_encrypted=encrypt_secret("secret"),
+        region="ap-east-1",
+    )
+    db.add(credential)
+    db.commit()
+
+    class Client:
+        deleted = False
+
+        def get_hosted_zone(self, **_kwargs):
+            return {
+                "HostedZone": {"Id": "/hostedzone/ZSAFE", "Name": "private.example.", "Config": {"PrivateZone": True}},
+                "VPCs": [],
+            }
+
+        def list_resource_record_sets(self, **_kwargs):
+            return {
+                "ResourceRecordSets": [
+                    {"Name": "private.example.", "Type": "SOA"},
+                    {"Name": "private.example.", "Type": "NS"},
+                    {"Name": "private.example.", "Type": "A", "TTL": 60, "ResourceRecords": [{"Value": "203.0.113.10"}]},
+                ],
+                "IsTruncated": False,
+            }
+
+        def delete_hosted_zone(self, **_kwargs):
+            self.deleted = True
+            return {"ChangeInfo": {"Id": "change-delete"}}
+
+    client = Client()
+    monkeypatch.setattr("app.route53.route53_client", lambda _credential: client)
+
+    with pytest.raises(RuntimeError, match="not empty"):
+        delete_empty_private_hosted_zone(credential, "ZSAFE")
+    assert client.deleted is False

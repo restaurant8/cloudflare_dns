@@ -11,7 +11,6 @@ from .alibaba_httpdns import evaluate_alibaba_httpdns_groups
 from .database import SessionLocal, init_db
 from .external_ips import sync_due_external_ip_sources
 from .doh import sync_due_doh_endpoints
-from .doh_failover import evaluate_doh_failover_groups
 from .failover import evaluate_failover_groups
 from .integrations import auto_sync_synexvm_statuses, reconcile_pending_synexvm_changes
 from .health import mark_stale_agents, run_local_checks
@@ -57,7 +56,6 @@ def _run_scheduler_tick() -> int:
             interval_seconds=get_settings().dns_consistency_check_interval_seconds,
         )
         evaluate_alibaba_httpdns_groups(db, commit_per_group=True, check_cache=check_cache)
-        evaluate_doh_failover_groups(db, commit_per_group=True, check_cache=check_cache)
         sync_due_doh_endpoints(db)
         now = datetime.utcnow()
         if _last_prune_at is None or (now - _last_prune_at).total_seconds() >= _PRUNE_INTERVAL_SECONDS:

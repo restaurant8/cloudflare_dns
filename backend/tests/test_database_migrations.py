@@ -2,7 +2,7 @@ from sqlalchemy import Column, Integer, MetaData, Table, create_engine, inspect,
 from sqlalchemy.orm import Session
 
 from app import database
-from app.models import FailoverGroup
+from app.models import DohEndpoint, FailoverGroup, Origin
 
 
 def test_provider_columns_are_additive_for_existing_installations():
@@ -121,3 +121,76 @@ def test_sqlite_failover_group_rebuild_preserves_rows_and_allows_provider_only_g
         )
         session.commit()
         assert session.query(FailoverGroup).filter(FailoverGroup.zone_id.is_(None)).count() == 1
+
+
+def test_legacy_static_doh_rules_are_migrated_without_removing_rollback_tables(monkeypatch):
+    migration_engine = create_engine("sqlite:///:memory:", future=True)
+    database.Base.metadata.create_all(migration_engine)
+    with Session(migration_engine) as session:
+        endpoint = DohEndpoint(
+            name="legacy-ec2",
+            base_url="https://example.cloudfront.net",
+            hmac_secret_encrypted="encrypted",
+        )
+        session.add(endpoint)
+        session.commit()
+        endpoint_id = endpoint.id
+    with migration_engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE doh_failover_groups ("
+                "id INTEGER PRIMARY KEY, doh_endpoint_id INTEGER NOT NULL, hostname VARCHAR(255) NOT NULL, "
+                "ttl INTEGER NOT NULL, enabled BOOLEAN NOT NULL, min_switch_interval_seconds INTEGER NOT NULL, "
+                "current_origin_id INTEGER NULL, last_switch_at DATETIME NULL, last_error TEXT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE doh_failover_origins ("
+                "id INTEGER PRIMARY KEY, group_id INTEGER NOT NULL, target VARCHAR(255) NOT NULL, "
+                "target_type VARCHAR(20) NOT NULL, port INTEGER NOT NULL, priority INTEGER NOT NULL, "
+                "remark TEXT NULL, enabled BOOLEAN NOT NULL, ignore_health_check BOOLEAN NOT NULL, "
+                "status VARCHAR(20) NOT NULL, last_checked_at DATETIME NULL, last_error TEXT NULL, "
+                "last_rtt_ms FLOAT NULL, resolved_ips_json TEXT NULL, healthy_ips_json TEXT NULL, "
+                "published_ips_json TEXT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO doh_failover_groups "
+                "(id, doh_endpoint_id, hostname, ttl, enabled, min_switch_interval_seconds, current_origin_id) "
+                "VALUES (1, :endpoint_id, 'private.example.com', 60, 1, 120, 11)"
+            ),
+            {"endpoint_id": endpoint_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO doh_failover_origins "
+                "(id, group_id, target, target_type, port, priority, enabled, ignore_health_check, status, "
+                "resolved_ips_json, healthy_ips_json, published_ips_json) "
+                "VALUES (11, 1, '203.0.113.10', 'ipv4', 443, 0, 1, 0, 'healthy', '[]', '[]', '[\"203.0.113.10\"]')"
+            )
+        )
+
+    monkeypatch.setattr(database, "engine", migration_engine)
+    database._migrate_existing_schema()
+    database._migrate_existing_schema()
+
+    with Session(migration_engine) as session:
+        group = session.query(FailoverGroup).filter_by(provider_type="route53", hostname="private.example.com").one()
+        origin = session.query(Origin).filter_by(group_id=group.id).one()
+        assert group.doh_enabled is True
+        assert group.doh_endpoint_id == endpoint_id
+        assert group.current_origin_id == origin.id
+        assert origin.target == "203.0.113.10"
+        assert "旧版静态 DoH" in group.last_error
+        group.doh_endpoint_id = None
+        group.doh_enabled = False
+        session.commit()
+    # Attaching Route 53 clears the old direct endpoint. The migration marker
+    # must prevent the rollback copy from resurrecting a second static group.
+    database._migrate_existing_schema()
+    with Session(migration_engine) as session:
+        assert session.query(FailoverGroup).filter_by(hostname="private.example.com").count() == 1
+    assert {"doh_failover_groups", "doh_failover_origins"}.issubset(inspect(migration_engine).get_table_names())
+    assert "doh_failover_groups" not in database.Base.metadata.tables

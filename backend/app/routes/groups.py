@@ -1204,6 +1204,7 @@ def delete_group(group_id: int, _: User = Depends(get_current_user), db: Session
     if group is None:
         raise HTTPException(status_code=404, detail="切换组不存在")
     doh_endpoint_id = group.doh_endpoint_id if group.doh_enabled else None
+    route53_endpoint_ids = {output.doh_endpoint_id for output in group.route53_outputs}
     azpanel_resource_ids = {origin.azpanel_resource_id for origin in group.origins if origin.azpanel_resource_id}
     for origin in group.origins:
         if origin.global_origin_id:
@@ -1228,8 +1229,13 @@ def delete_group(group_id: int, _: User = Depends(get_current_user), db: Session
         endpoint = db.get(DohEndpoint, doh_endpoint_id)
         if endpoint is not None:
             sync_doh_endpoint(db, endpoint, force=True, ignore_backoff=True)
+    for endpoint_id in route53_endpoint_ids:
+        endpoint = db.get(DohEndpoint, endpoint_id)
+        if endpoint is not None:
+            sync_doh_endpoint(db, endpoint, force=True, ignore_backoff=True)
     db.commit()
-    return Message(message="切换组已删除")
+    detail = {"route53_record_preserved": True} if group.provider_type == "route53" else None
+    return Message(message="切换组已删除", detail=detail)
 
 
 def _resource_from_remote_key(db: Session, remote_key: str, port: int) -> AzPanelResource:

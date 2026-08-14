@@ -52,7 +52,15 @@ export type AlibabaHttpDnsRemoteZone = {
   ZoneId: string;
   ZoneName: string;
   RecordCount: number;
+  ProxyPattern?: "zone" | "record" | string;
   Remark: string;
+};
+
+export type AlibabaHttpDnsEffectiveScope = {
+  id: string;
+  name: string;
+  state: string;
+  services: string;
 };
 
 export type AlibabaHttpDnsRemoteRecord = {
@@ -301,6 +309,14 @@ export type AwsRoute53PrivateZone = {
   vpcs: { id: string; region: string }[];
 };
 
+export type AwsVpc = {
+  id: string;
+  region: string;
+  name: string | null;
+  cidr_block: string | null;
+  is_default: boolean;
+};
+
 export type AwsRoute53Output = {
   id: number;
   group_id: number;
@@ -338,44 +354,6 @@ export type DohEndpoint = {
   sync_failure_count: number;
   next_sync_retry_at: string | null;
   created_at: string;
-};
-
-export type DohFailoverOrigin = {
-  id: number;
-  group_id: number;
-  target: string;
-  target_type: string;
-  port: number;
-  priority: number;
-  remark: string | null;
-  enabled: boolean;
-  ignore_health_check: boolean;
-  status: string;
-  success_count: number;
-  fail_count: number;
-  last_checked_at: string | null;
-  last_error: string | null;
-  last_rtt_ms: number | null;
-  resolved_ips: string[];
-  healthy_ips: string[];
-  published_ips: string[];
-  created_at: string;
-  updated_at: string;
-};
-
-export type DohFailoverGroup = {
-  id: number;
-  doh_endpoint_id: number;
-  hostname: string;
-  ttl: number;
-  enabled: boolean;
-  min_switch_interval_seconds: number;
-  current_origin_id: number | null;
-  last_switch_at: string | null;
-  last_error: string | null;
-  origins: DohFailoverOrigin[];
-  created_at: string;
-  updated_at: string;
 };
 
 export type Agent = {

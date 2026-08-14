@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from .dns_resolution import resolve_hostname_ips_bounded
 from .events import add_event
-from .models import AwsRoute53Output, DohEndpoint, DohFailoverGroup, FailoverGroup, Origin
+from .models import AwsRoute53Output, DohEndpoint, FailoverGroup, Origin
 from .notifier import send_webhooks
 from .origin_expansion import (
     is_expanded_origin,
@@ -108,40 +108,6 @@ def build_doh_snapshot(
                         "group_id": group.id,
                     }
                 )
-    independent_groups = (
-        db.query(DohFailoverGroup)
-        .options(selectinload(DohFailoverGroup.origins))
-        .filter(
-            DohFailoverGroup.enabled.is_(True),
-            DohFailoverGroup.doh_endpoint_id == endpoint.id,
-        )
-        .order_by(DohFailoverGroup.id)
-        .all()
-    )
-    # Imported lazily to keep the publishing/signing module independent from the
-    # scheduler implementation that calls back into sync_doh_endpoint.
-    from .doh_failover import origin_records as independent_origin_records
-
-    for group in independent_groups:
-        origin = next((item for item in group.origins if item.id == group.current_origin_id), None)
-        if origin is None or not origin.enabled:
-            continue
-        normalized_hostname = group.hostname.rstrip(".").lower()
-        previous_owner = owners.get(normalized_hostname)
-        owner = ("doh_failover_group", group.id)
-        if previous_owner is not None and previous_owner != owner:
-            raise ValueError(f"DoH hostname {normalized_hostname} is assigned by {previous_owner} and {owner}")
-        owners[normalized_hostname] = owner
-        for record_type, value in independent_origin_records(origin):
-            records.append(
-                {
-                    "name": normalized_hostname,
-                    "type": record_type,
-                    "value": value,
-                    "ttl": group.ttl,
-                    "doh_failover_group_id": group.id,
-                }
-            )
     route53_outputs = (
         db.query(AwsRoute53Output)
         .join(AwsRoute53Output.group)
@@ -178,7 +144,6 @@ def build_doh_snapshot(
             item["name"],
             item["type"],
             item.get("group_id", 0),
-            item.get("doh_failover_group_id", 0),
             item.get("route53_output_id", 0),
             item.get("source", ""),
         )
@@ -359,17 +324,6 @@ def validate_doh_hostname_conflicts(
         if overlap:
             hostname = sorted(overlap)[0]
             raise ValueError(f"DoH hostname {hostname} is already assigned to group {other.id}")
-    independent = (
-        db.query(DohFailoverGroup)
-        .filter(
-            DohFailoverGroup.enabled.is_(True),
-            DohFailoverGroup.doh_endpoint_id == endpoint_id,
-            DohFailoverGroup.hostname.in_(wanted),
-        )
-        .first()
-    )
-    if independent is not None:
-        raise ValueError(f"DoH hostname {independent.hostname} is already assigned to independent DoH group {independent.id}")
     route53_query = db.query(AwsRoute53Output).filter(
         AwsRoute53Output.enabled.is_(True),
         AwsRoute53Output.doh_endpoint_id == endpoint_id,

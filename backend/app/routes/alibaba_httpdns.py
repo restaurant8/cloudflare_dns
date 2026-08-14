@@ -1,19 +1,27 @@
+import ipaddress
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
 
 from ..alibaba_httpdns import (
     AlibabaOutputConfigurationError,
+    add_credential_record,
+    create_credential_zone,
+    delete_empty_credential_zone,
     evaluate_alibaba_httpdns_groups,
+    list_credential_effective_scopes,
     list_credential_records,
     list_credential_zones,
     list_remote_accounts,
     list_remote_records,
     list_remote_zones,
+    update_credential_zone_effective_scope,
     validate_alibaba_output_source,
 )
 from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import normalize_hostname, parse_target
+from ..dns_resolution import resolve_hostname_ips_bounded
 from ..events import add_event
 from ..models import AlibabaHttpDnsCredential, AlibabaHttpDnsGroup, AlibabaHttpDnsOrigin, FailoverGroup, Origin, User
 from ..schemas import (
@@ -23,12 +31,17 @@ from ..schemas import (
     AlibabaHttpDnsCredentialCreate,
     AlibabaHttpDnsCredentialOut,
     AlibabaHttpDnsCredentialUpdate,
+    AlibabaHttpDnsEffectiveScopeOut,
+    AlibabaHttpDnsEffectiveScopeUpdate,
     AlibabaHttpDnsOriginCreate,
     AlibabaHttpDnsOriginOut,
     AlibabaHttpDnsOriginUpdate,
     AlibabaHttpDnsRemoteAccountOut,
     AlibabaHttpDnsRemoteRecordOut,
     AlibabaHttpDnsRemoteZoneOut,
+    AlibabaHttpDnsStandaloneGroupCreate,
+    AlibabaHttpDnsZoneCreate,
+    AlibabaHttpDnsZoneDelete,
     AlibabaHttpDnsZoneAdopt,
     AlibabaHttpDnsZoneRelease,
     Message,
@@ -84,6 +97,7 @@ def _adopt_record(
     enabled: bool,
     min_switch_interval_seconds: int,
     credential_id: int | None = None,
+    primary_target_override: str | None = None,
 ) -> AlibabaHttpDnsGroup:
     record_id = str(record.get("RecordId") or "").strip()
     if not record_id:
@@ -98,9 +112,10 @@ def _adopt_record(
     record_type = str(record.get("Type") or "").upper()
     if record_type not in {"A", "AAAA", "CNAME"}:
         raise ValueError(f"故障切换不支持 {record_type or '未知'} 记录")
-    target = parse_target(str(record.get("Value") or ""))
-    if target.record_type != record_type:
+    remote_target = parse_target(str(record.get("Value") or ""))
+    if remote_target.record_type != record_type:
         raise ValueError(f"记录 {record_id} 的类型和值不匹配")
+    target = parse_target(primary_target_override) if primary_target_override else remote_target
     group = AlibabaHttpDnsGroup(
         credential_id=credential_id,
         remote_account_id=remote_account_id,
@@ -117,7 +132,7 @@ def _adopt_record(
         remark=str(record.get("Remark") or "").strip() or None,
         enabled=enabled,
         min_switch_interval_seconds=min_switch_interval_seconds,
-        last_published_value=target.value,
+        last_published_value=remote_target.value,
     )
     db.add(group)
     db.flush()
@@ -274,6 +289,136 @@ def credential_zones(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+def _credential_zone(credential: AlibabaHttpDnsCredential, zone_id: str) -> dict:
+    zone = next(
+        (item for item in list_credential_zones(credential) if str(item.get("ZoneId") or "") == zone_id),
+        None,
+    )
+    if zone is None:
+        raise HTTPException(status_code=404, detail="阿里云 HTTPDNS 内置权威域名不存在")
+    return zone
+
+
+@router.get(
+    "/credentials/{credential_id}/effective-scopes",
+    response_model=list[AlibabaHttpDnsEffectiveScopeOut],
+)
+def credential_effective_scopes(
+    credential_id: int,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, credential_id)
+    try:
+        return list_credential_effective_scopes(credential)
+    except Exception as exc:
+        credential.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"无法读取阿里云 HTTPDNS 生效配置：{exc}") from exc
+
+
+@router.post(
+    "/credentials/{credential_id}/zones",
+    response_model=AlibabaHttpDnsRemoteZoneOut,
+)
+def create_zone(
+    credential_id: int,
+    payload: AlibabaHttpDnsZoneCreate,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, credential_id)
+    try:
+        zone_name = normalize_hostname(payload.zone_name)
+        existing = next(
+            (
+                item
+                for item in list_credential_zones(credential)
+                if str(item.get("ZoneName") or "").rstrip(".").lower() == zone_name
+            ),
+            None,
+        )
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="这个内置权威域名已经存在，可直接选择创建故障组")
+        result = create_credential_zone(
+            credential,
+            zone_name=zone_name,
+            proxy_pattern=payload.proxy_pattern,
+        )
+        credential.last_error = None
+        db.commit()
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        credential.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"创建阿里云内置权威域名失败：{exc}") from exc
+
+
+@router.patch(
+    "/credentials/{credential_id}/zones/{zone_id}/effective-scope",
+    response_model=Message,
+)
+def update_zone_effective_scope(
+    credential_id: int,
+    zone_id: str,
+    payload: AlibabaHttpDnsEffectiveScopeUpdate,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, credential_id)
+    _credential_zone(credential, zone_id)
+    try:
+        update_credential_zone_effective_scope(credential, zone_id, payload.scope_ids)
+        credential.last_error = None
+        db.commit()
+        return Message(message="阿里云 HTTPDNS 生效范围已更新")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        credential.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"更新阿里云 HTTPDNS 生效范围失败：{exc}") from exc
+
+
+@router.delete(
+    "/credentials/{credential_id}/zones/{zone_id}",
+    response_model=Message,
+)
+def delete_zone(
+    credential_id: int,
+    zone_id: str,
+    payload: AlibabaHttpDnsZoneDelete,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, credential_id)
+    zone = _credential_zone(credential, zone_id)
+    zone_name = str(zone.get("ZoneName") or "").rstrip(".").lower()
+    if payload.confirm_name.strip().rstrip(".").lower() != zone_name:
+        raise HTTPException(status_code=400, detail="内置权威域名确认名称不匹配")
+    bindings = db.query(AlibabaHttpDnsGroup).filter(
+        AlibabaHttpDnsGroup.credential_id == credential.id,
+        AlibabaHttpDnsGroup.zone_id == zone_id,
+    ).count()
+    if bindings:
+        raise HTTPException(status_code=409, detail=f"这个域名仍绑定 {bindings} 个阿里云故障组，请先删除故障组")
+    try:
+        delete_empty_credential_zone(credential, zone_id)
+        credential.last_error = None
+        db.commit()
+        return Message(message="阿里云内置权威域名已删除")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        credential.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"删除阿里云内置权威域名失败：{exc}") from exc
+
+
 @router.get("/credentials/{credential_id}/zones/{zone_id}/records", response_model=list[AlibabaHttpDnsRemoteRecordOut])
 def credential_records(
     credential_id: int,
@@ -321,6 +466,120 @@ def remote_records(account_id: int = Query(..., ge=1), zone_id: str = Query(...)
 @router.get("/groups", response_model=list[AlibabaHttpDnsGroupOut])
 def list_groups(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return _group_query(db).order_by(AlibabaHttpDnsGroup.created_at.desc()).all()
+
+
+def _initial_record_for_target(target_value: str) -> tuple[object, str, str, set[str]]:
+    target = parse_target(target_value)
+    if target.target_type == "ipv4":
+        return target, "A", target.value, {"A"}
+    if target.target_type == "ipv6":
+        return target, "AAAA", target.value, {"AAAA"}
+    addresses = resolve_hostname_ips_bounded(target.value, 5)
+    if not addresses:
+        raise ValueError(f"主用域名 {target.value} 当前无法解析到地址")
+    parsed = sorted((ipaddress.ip_address(value) for value in addresses), key=lambda value: (value.version, str(value)))
+    selected = str(parsed[0])
+    available_types = {"A" if value.version == 4 else "AAAA" for value in parsed}
+    return target, "A" if parsed[0].version == 4 else "AAAA", selected, available_types
+
+
+@router.post("/managed-groups", response_model=AlibabaHttpDnsGroupOut)
+def create_managed_group(
+    payload: AlibabaHttpDnsStandaloneGroupCreate,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, payload.credential_id)
+    try:
+        zone = _credential_zone(credential, payload.zone_id)
+        zone_name = normalize_hostname(str(zone.get("ZoneName") or ""))
+        target, wanted_type, initial_value, available_types = _initial_record_for_target(payload.primary_target)
+        records = list_credential_records(credential, payload.zone_id)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"读取阿里云内置权威域名失败：{exc}") from exc
+
+    apex_records = [
+        item
+        for item in records
+        if str(item.get("Rr") or "@").strip() == "@"
+        and str(item.get("Type") or "").upper() in {"A", "AAAA", "CNAME"}
+        and _record_enabled(item)
+    ]
+    if len(apex_records) > 1:
+        raise HTTPException(status_code=409, detail="Zone 顶点存在多条 A/AAAA/CNAME 记录，请先在阿里云明确保留一条")
+    if apex_records:
+        record = apex_records[0]
+        record_type = str(record.get("Type") or "").upper()
+        exact_retry = (
+            record_type == wanted_type
+            and str(record.get("Value") or "").rstrip(".").lower() == initial_value.rstrip(".").lower()
+        )
+        if not payload.adopt_existing and not exact_retry:
+            raise HTTPException(status_code=409, detail="Zone 顶点已有解析记录；确认接管后才能创建故障组")
+        if target.target_type != "hostname" and record_type != wanted_type:
+            raise HTTPException(status_code=400, detail=f"现有顶点记录是 {record_type}，主用目标需要 {wanted_type}")
+        if target.target_type == "hostname" and record_type != "CNAME" and record_type not in available_types:
+            raise HTTPException(status_code=400, detail=f"主用域名当前没有可发布到现有 {record_type} 记录的地址")
+    else:
+        try:
+            record = add_credential_record(
+                credential,
+                zone_id=payload.zone_id,
+                rr="@",
+                record_type=wanted_type,
+                value=initial_value,
+                ttl=payload.ttl,
+            )
+        except Exception as exc:
+            credential.last_error = str(exc)
+            db.commit()
+            raise HTTPException(status_code=502, detail=f"创建阿里云顶点解析记录失败：{exc}") from exc
+
+    try:
+        update_credential_zone_effective_scope(
+            credential,
+            payload.zone_id,
+            payload.effective_scope_ids,
+        )
+        group = _adopt_record(
+            db,
+            remote_account_id=-credential.id,
+            account_name=credential.name,
+            zone_id=payload.zone_id,
+            zone_name=zone_name,
+            record=record,
+            primary_port=payload.primary_port,
+            enabled=True,
+            min_switch_interval_seconds=payload.min_switch_interval_seconds,
+            credential_id=credential.id,
+            primary_target_override=target.value,
+        )
+        group.ttl = payload.ttl
+        if group.source_group is not None:
+            group.source_group.ttl = payload.ttl
+        credential.last_error = None
+        add_event(
+            db,
+            "alibaba_httpdns.group_created",
+            "info",
+            f"阿里云 HTTPDNS {zone_name} 切换组已创建",
+            {"group_id": group.id, "record_id": group.record_id, "zone_id": payload.zone_id},
+        )
+        db.commit()
+        return _group_query(db).filter(AlibabaHttpDnsGroup.id == group.id).one()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=502,
+            detail=f"阿里云记录已存在，但生效范围或本地故障组创建失败：{exc}。刷新 Zone 后可接管现有记录重试。",
+        ) from exc
 
 
 @router.post("/zones", response_model=Message)

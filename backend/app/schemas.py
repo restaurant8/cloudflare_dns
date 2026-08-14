@@ -368,10 +368,49 @@ class AlibabaHttpDnsCredentialOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class AlibabaHttpDnsEffectiveScopeOut(BaseModel):
+    id: str
+    name: str
+    state: str = ""
+    services: str = ""
+
+
+class AlibabaHttpDnsZoneCreate(BaseModel):
+    zone_name: str = Field(min_length=1, max_length=255)
+    proxy_pattern: Literal["zone", "record"] = "zone"
+
+
+class AlibabaHttpDnsZoneDelete(BaseModel):
+    confirm_name: str = Field(min_length=1, max_length=255)
+
+
+class AlibabaHttpDnsEffectiveScopeUpdate(BaseModel):
+    scope_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class AlibabaHttpDnsStandaloneGroupCreate(BaseModel):
+    credential_id: int = Field(ge=1)
+    zone_id: str = Field(min_length=1, max_length=80)
+    primary_target: str = Field(min_length=1, max_length=255)
+    primary_port: int = Field(default=22, ge=1, le=65535)
+    ttl: int = 60
+    min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
+    effective_scope_ids: list[str] = Field(min_length=1, max_length=100)
+    adopt_existing: bool = False
+
+    @field_validator("ttl")
+    @classmethod
+    def validate_ttl(cls, value: int) -> int:
+        if value not in {5, 30, 60, 3600, 43200, 86400}:
+            raise ValueError("阿里云 HTTPDNS TTL 仅支持 5、30、60、3600、43200、86400 秒")
+        return value
+
+
 class AlibabaHttpDnsRemoteZoneOut(BaseModel):
     ZoneId: str
     ZoneName: str
     RecordCount: int = 0
+    ProxyPattern: str = "zone"
     Remark: str | None = ""
 
 
@@ -1128,7 +1167,6 @@ class DohSnapshotRecordOut(BaseModel):
     value: str
     ttl: int
     group_id: int | None = None
-    doh_failover_group_id: int | None = None
 
 
 class DohSnapshotOut(BaseModel):
@@ -1136,82 +1174,6 @@ class DohSnapshotOut(BaseModel):
     revision: str
     generated_at: int
     records: list[DohSnapshotRecordOut]
-
-
-class DohFailoverOriginCreate(BaseModel):
-    target: str = Field(min_length=1, max_length=255)
-    port: int = Field(default=22, ge=1, le=65535)
-    priority: int = Field(default=10, ge=0, le=100000)
-    remark: str | None = Field(default=None, max_length=500)
-    enabled: bool = True
-    ignore_health_check: bool = False
-
-
-class DohFailoverOriginUpdate(BaseModel):
-    target: str | None = Field(default=None, min_length=1, max_length=255)
-    port: int | None = Field(default=None, ge=1, le=65535)
-    priority: int | None = Field(default=None, ge=0, le=100000)
-    remark: str | None = Field(default=None, max_length=500)
-    enabled: bool | None = None
-    ignore_health_check: bool | None = None
-
-
-class DohFailoverOriginOut(BaseModel):
-    id: int
-    group_id: int
-    target: str
-    target_type: str
-    port: int
-    priority: int
-    remark: str | None
-    enabled: bool
-    ignore_health_check: bool
-    status: str
-    success_count: int
-    fail_count: int
-    last_checked_at: datetime | None
-    last_error: str | None
-    last_rtt_ms: float | None
-    resolved_ips: list[str]
-    healthy_ips: list[str]
-    published_ips: list[str]
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class DohFailoverGroupCreate(BaseModel):
-    doh_endpoint_id: int
-    hostname: str = Field(min_length=1, max_length=255)
-    ttl: int = Field(default=60, ge=0, le=86400)
-    min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
-    enabled: bool = True
-
-
-class DohFailoverGroupUpdate(BaseModel):
-    doh_endpoint_id: int | None = None
-    hostname: str | None = Field(default=None, min_length=1, max_length=255)
-    ttl: int | None = Field(default=None, ge=0, le=86400)
-    min_switch_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
-    enabled: bool | None = None
-
-
-class DohFailoverGroupOut(BaseModel):
-    id: int
-    doh_endpoint_id: int
-    hostname: str
-    ttl: int
-    enabled: bool
-    min_switch_interval_seconds: int
-    current_origin_id: int | None
-    last_switch_at: datetime | None
-    last_error: str | None
-    origins: list[DohFailoverOriginOut] = []
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 class AwsRoute53CredentialCreate(BaseModel):
@@ -1250,6 +1212,9 @@ class AwsRoute53CredentialOut(BaseModel):
 class AwsRoute53VpcOut(BaseModel):
     id: str
     region: str
+    name: str | None = None
+    cidr_block: str | None = None
+    is_default: bool = False
 
 
 class AwsRoute53PrivateHostedZoneOut(BaseModel):
@@ -1257,6 +1222,17 @@ class AwsRoute53PrivateHostedZoneOut(BaseModel):
     name: str
     record_count: int
     vpcs: list[AwsRoute53VpcOut] = []
+
+
+class AwsRoute53PrivateHostedZoneCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    vpc_id: str = Field(min_length=1, max_length=64)
+    vpc_region: str = Field(default="ap-east-1", min_length=1, max_length=32)
+    comment: str | None = Field(default=None, max_length=256)
+
+
+class AwsRoute53PrivateHostedZoneDelete(BaseModel):
+    confirm_name: str = Field(min_length=1, max_length=255)
 
 
 class AwsRoute53OutputCreate(BaseModel):
@@ -1272,11 +1248,14 @@ class AwsRoute53OutputCreate(BaseModel):
 
 
 class AwsRoute53StandaloneGroupCreate(BaseModel):
-    hostname: str = Field(min_length=1, max_length=255)
+    credential_id: int
+    doh_endpoint_id: int
+    hosted_zone_id: str = Field(min_length=1, max_length=64)
     primary_target: str = Field(min_length=1, max_length=255)
     primary_port: int = Field(default=22, ge=1, le=65535)
     ttl: int = Field(default=60, ge=0, le=86400)
     min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
+    adopt_existing: bool = False
 
 
 class AwsRoute53OutputUpdate(BaseModel):

@@ -1,7 +1,9 @@
+import json
 import logging
+from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import MetaData, create_engine, inspect, text
+from sqlalchemy import MetaData, Table, and_, create_engine, inspect, select, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import get_settings
@@ -166,12 +168,6 @@ def _migrate_existing_schema() -> None:
                 if column_name not in existing:
                     connection.execute(text(statement))
 
-        if "doh_failover_origins" in table_names:
-            existing = {column["name"] for column in inspector.get_columns("doh_failover_origins")}
-            for column_name, statement in _doh_failover_origin_migration_statements(dialect).items():
-                if column_name not in existing:
-                    connection.execute(text(statement))
-
         if "alibaba_httpdns_groups" in table_names:
             existing = {column["name"] for column in inspector.get_columns("alibaba_httpdns_groups")}
             split_shared_origin_ids = "source_current_origin_id" not in existing
@@ -220,6 +216,9 @@ def _migrate_existing_schema() -> None:
                 connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN status_sync_interval_seconds INTEGER NOT NULL DEFAULT 0"))
             if "last_status_sync_at" not in existing:
                 connection.execute(text(f"ALTER TABLE azpanel_resources ADD COLUMN last_status_sync_at {timestamp_type} NULL"))
+
+        if "doh_failover_groups" in table_names and "failover_groups" in table_names and "origins" in table_names:
+            _migrate_legacy_doh_failover_rules(connection, table_names)
 
     if sqlite_requires_failover_group_rebuild:
         _rebuild_sqlite_failover_groups_with_nullable_zone()
@@ -280,6 +279,171 @@ def _rebuild_sqlite_failover_groups_with_nullable_zone() -> None:
             connection.exec_driver_sql("PRAGMA legacy_alter_table=OFF")
             connection.exec_driver_sql("PRAGMA foreign_keys=ON")
             connection.commit()
+
+
+def _migrate_legacy_doh_failover_rules(connection, table_names: list[str]) -> None:
+    """Copy retired static-DoH rules into the unified failover model.
+
+    The migrated group keeps its direct DoH output active, so an upgrade cannot
+    silently remove the hostname from the EC2 allowlist. Legacy tables remain as
+    inert rollback data; their ORM models and runtime paths have been removed.
+    """
+    legacy_group_columns = {
+        column["name"] for column in inspect(connection).get_columns("doh_failover_groups")
+    }
+    if "migrated_group_id" not in legacy_group_columns:
+        connection.execute(
+            text("ALTER TABLE doh_failover_groups ADD COLUMN migrated_group_id INTEGER NULL")
+        )
+    metadata = MetaData()
+    legacy_groups = Table("doh_failover_groups", metadata, autoload_with=connection)
+    unified_groups = Table("failover_groups", metadata, autoload_with=connection)
+    unified_origins = Table("origins", metadata, autoload_with=connection)
+    legacy_origins = (
+        Table("doh_failover_origins", metadata, autoload_with=connection)
+        if "doh_failover_origins" in table_names
+        else None
+    )
+    now = datetime.utcnow()
+    migrated_groups = 0
+    migrated_origins = 0
+
+    for old_group in connection.execute(select(legacy_groups).order_by(legacy_groups.c.id)).mappings():
+        hostname = str(old_group.get("hostname") or "").strip().rstrip(".").lower()
+        if not hostname:
+            continue
+        endpoint_id = old_group.get("doh_endpoint_id")
+        migrated_group_id = old_group.get("migrated_group_id")
+        if migrated_group_id is not None:
+            existing = connection.execute(
+                select(unified_groups.c.id, unified_groups.c.current_origin_id).where(
+                    unified_groups.c.id == migrated_group_id
+                )
+            ).mappings().first()
+            # A user who explicitly deleted the migrated rule must not have it
+            # resurrected from rollback data on every process restart.
+            if existing is None:
+                continue
+        else:
+            existing = connection.execute(
+                select(unified_groups.c.id, unified_groups.c.current_origin_id).where(
+                    and_(
+                        unified_groups.c.provider_type == "route53",
+                        unified_groups.c.zone_id.is_(None),
+                        unified_groups.c.hostname == hostname,
+                        unified_groups.c.doh_endpoint_id == endpoint_id,
+                    )
+                ).order_by(unified_groups.c.id)
+            ).mappings().first()
+        if existing is None:
+            migration_note = (
+                "已从旧版静态 DoH 自动迁移；当前解析继续生效。"
+                "选择同名 Route 53 私有托管区后可升级为 VPC Resolver 模式"
+            )
+            previous_error = str(old_group.get("last_error") or "").strip()
+            values = {
+                "provider_type": "route53",
+                "zone_id": None,
+                "collection_id": None,
+                "hostname": hostname,
+                "ttl": int(old_group.get("ttl") or 60),
+                "enabled": bool(old_group.get("enabled", True)),
+                "min_switch_interval_seconds": int(old_group.get("min_switch_interval_seconds") or 120),
+                "current_origin_id": None,
+                "current_record_id": None,
+                "last_switch_at": old_group.get("last_switch_at"),
+                "last_error": f"{migration_note}；升级前错误：{previous_error}" if previous_error else migration_note,
+                "no_healthy_notified_at": old_group.get("no_healthy_notified_at"),
+                "cloudflare_publish_enabled": False,
+                "doh_enabled": True,
+                "doh_endpoint_id": endpoint_id,
+                "doh_hostnames_json": json.dumps([hostname], ensure_ascii=False),
+                "created_at": old_group.get("created_at") or now,
+                "updated_at": old_group.get("updated_at") or now,
+            }
+            values = {key: value for key, value in values.items() if key in unified_groups.c}
+            result = connection.execute(unified_groups.insert().values(**values))
+            group_id = int(result.inserted_primary_key[0])
+            current_origin_id = None
+            migrated_groups += 1
+        else:
+            group_id = int(existing["id"])
+            current_origin_id = existing.get("current_origin_id")
+
+        old_to_new: dict[int, int] = {}
+        if legacy_origins is not None:
+            old_origin_rows = connection.execute(
+                select(legacy_origins)
+                .where(legacy_origins.c.group_id == old_group["id"])
+                .order_by(legacy_origins.c.id)
+            ).mappings()
+            for old_origin in old_origin_rows:
+                duplicate = connection.execute(
+                    select(unified_origins.c.id).where(
+                        and_(
+                            unified_origins.c.group_id == group_id,
+                            unified_origins.c.target == old_origin["target"],
+                            unified_origins.c.port == old_origin["port"],
+                        )
+                    )
+                ).scalar_one_or_none()
+                if duplicate is not None:
+                    old_to_new[int(old_origin["id"])] = int(duplicate)
+                    continue
+                origin_values = {
+                    "group_id": group_id,
+                    "global_origin_id": None,
+                    "preferred_agent_id": None,
+                    "external_source_id": None,
+                    "external_machine_key": None,
+                    "azpanel_resource_id": None,
+                    "probe_mode": "default",
+                    "target": old_origin["target"],
+                    "target_type": old_origin["target_type"],
+                    "publish_mode": "direct",
+                    "port": int(old_origin.get("port") or 22),
+                    "priority": int(old_origin.get("priority") or 10),
+                    "weight": 1,
+                    "remark": old_origin.get("remark"),
+                    "enabled": bool(old_origin.get("enabled", True)),
+                    "ignore_health_check": bool(old_origin.get("ignore_health_check", False)),
+                    "status": str(old_origin.get("status") or "unknown"),
+                    "last_checked_at": old_origin.get("last_checked_at"),
+                    "last_error": old_origin.get("last_error"),
+                    "last_rtt_ms": old_origin.get("last_rtt_ms"),
+                    "resolved_ips_json": old_origin.get("resolved_ips_json") or "[]",
+                    "healthy_ips_json": old_origin.get("healthy_ips_json") or "[]",
+                    "published_ips_json": old_origin.get("published_ips_json") or "[]",
+                    "expanded_ip_priorities_json": "{}",
+                    "created_at": old_origin.get("created_at") or now,
+                    "updated_at": old_origin.get("updated_at") or now,
+                }
+                origin_values = {key: value for key, value in origin_values.items() if key in unified_origins.c}
+                result = connection.execute(unified_origins.insert().values(**origin_values))
+                new_origin_id = int(result.inserted_primary_key[0])
+                old_to_new[int(old_origin["id"])] = new_origin_id
+                migrated_origins += 1
+
+        old_current_id = old_group.get("current_origin_id")
+        mapped_current_id = old_to_new.get(int(old_current_id)) if old_current_id is not None else None
+        if current_origin_id is None and mapped_current_id is not None:
+            connection.execute(
+                unified_groups.update()
+                .where(unified_groups.c.id == group_id)
+                .values(current_origin_id=mapped_current_id)
+            )
+        connection.execute(
+            legacy_groups.update()
+            .where(legacy_groups.c.id == old_group["id"])
+            .values(migrated_group_id=group_id)
+        )
+
+    if migrated_groups or migrated_origins:
+        logger.warning(
+            "Migrated retired static DoH data into unified failover groups: groups=%s origins=%s",
+            migrated_groups,
+            migrated_origins,
+        )
 
 
 def _global_origin_constraint_names() -> set[str]:
@@ -501,22 +665,6 @@ def _doh_endpoint_migration_statements(dialect: str) -> dict[str, str]:
         "provider_type": "ALTER TABLE doh_endpoints ADD COLUMN provider_type VARCHAR(32) NOT NULL DEFAULT 'cloudflare'",
         "sync_failure_count": "ALTER TABLE doh_endpoints ADD COLUMN sync_failure_count INTEGER NOT NULL DEFAULT 0",
         "next_sync_retry_at": f"ALTER TABLE doh_endpoints ADD COLUMN next_sync_retry_at {timestamp_type} NULL",
-    }
-
-
-def _doh_failover_origin_migration_statements(dialect: str) -> dict[str, str]:
-    if dialect == "mysql":
-        return {
-            "resolved_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN resolved_ips_json TEXT NULL",
-            "healthy_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN healthy_ips_json TEXT NULL",
-            "published_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN published_ips_json TEXT NULL",
-            "ip_probe_states_json": "ALTER TABLE doh_failover_origins ADD COLUMN ip_probe_states_json TEXT NULL",
-        }
-    return {
-        "resolved_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN resolved_ips_json TEXT NOT NULL DEFAULT '[]'",
-        "healthy_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN healthy_ips_json TEXT NOT NULL DEFAULT '[]'",
-        "published_ips_json": "ALTER TABLE doh_failover_origins ADD COLUMN published_ips_json TEXT NOT NULL DEFAULT '[]'",
-        "ip_probe_states_json": "ALTER TABLE doh_failover_origins ADD COLUMN ip_probe_states_json TEXT NOT NULL DEFAULT '{}'",
     }
 
 

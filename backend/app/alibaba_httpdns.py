@@ -130,8 +130,10 @@ def required_alibaba_origin_publish_mode(
     target_type: str,
     requested_mode: str,
 ) -> str:
-    """Return the publish mode required by a direct Alibaba provider group.
+    """Return the publish mode required by a provider-owned failover group.
 
+    Route 53 provider groups publish at the private hosted-zone apex, where a
+    CNAME is invalid, so hostname targets must always be expanded to A/AAAA.
     Alibaba's built-in authoritative record has a fixed type.  A hostname target
     therefore cannot be published as a CNAME when the adopted record is A/AAAA;
     it must first be expanded and health-checked as IPs.  Conversely, an adopted
@@ -139,6 +141,9 @@ def required_alibaba_origin_publish_mode(
     left alone because changing their origin mode would also change their
     Cloudflare/Route53 output semantics.
     """
+    if group.provider_type == "route53" and any(output.enabled for output in group.route53_outputs):
+        return EXPANDED_PUBLISH_MODE if target_type == "hostname" else DIRECT_PUBLISH_MODE
+
     record_types = {
         str(output.record_type or "").upper()
         for output in group.alibaba_httpdns_outputs
@@ -196,7 +201,8 @@ def normalize_alibaba_provider_origin_modes(group: FailoverGroup) -> int:
         origin.status = "unknown"
         origin.last_checked_at = None
         origin.last_rtt_ms = None
-        origin.last_error = "阿里云记录类型已自动匹配，等待重新检测源站"
+        provider_label = "Route 53 顶点记录" if group.provider_type == "route53" else "阿里云记录类型"
+        origin.last_error = f"{provider_label}已自动匹配，等待重新检测源站"
         origin.probe_states.clear()
         set_resolved_ips(origin, [])
         set_healthy_ips(origin, [])
@@ -319,6 +325,124 @@ def list_credential_records(credential: AlibabaHttpDnsCredential, zone_id: str) 
             ("RecursionRecords",),
         ),
         ZoneId=zone_id,
+    )
+
+
+def _stable_client_token(prefix: str, credential: AlibabaHttpDnsCredential, *parts: object) -> str:
+    canonical = ":".join([str(credential.id or 0), *[str(part).strip().lower() for part in parts]])
+    return f"cfdns-{prefix}-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:48]
+
+
+def list_credential_effective_scopes(credential: AlibabaHttpDnsCredential) -> list[dict[str, str]]:
+    response = call_alibaba_api(credential, "DescribePdnsUserInfo", Lang="zh")
+    info = response.get("UserInfo") if isinstance(response.get("UserInfo"), dict) else {}
+    raw_pdns_id = info.get("PdnsId")
+    pdns_id = "" if raw_pdns_id is None else str(raw_pdns_id).strip()
+    if not pdns_id:
+        return []
+    return [
+        {
+            "id": pdns_id,
+            "name": f"当前 HTTPDNS 配置 #{pdns_id}",
+            "state": str(info.get("State") or ""),
+            "services": str(info.get("AvailableService") or ""),
+        }
+    ]
+
+
+def create_credential_zone(
+    credential: AlibabaHttpDnsCredential,
+    *,
+    zone_name: str,
+    proxy_pattern: str,
+) -> dict[str, Any]:
+    response = call_alibaba_api(
+        credential,
+        "AddRecursionZone",
+        ZoneName=zone_name,
+        ProxyPattern=proxy_pattern,
+        ClientToken=_stable_client_token("zone", credential, zone_name, proxy_pattern),
+    )
+    zone_id = str(response.get("ZoneId") or "").strip()
+    if not zone_id:
+        raise RuntimeError("Alibaba Cloud did not return ZoneId after AddRecursionZone")
+    return {
+        "ZoneId": zone_id,
+        "ZoneName": zone_name,
+        "RecordCount": 0,
+        "ProxyPattern": proxy_pattern,
+        "Remark": "",
+    }
+
+
+def update_credential_zone_effective_scope(
+    credential: AlibabaHttpDnsCredential,
+    zone_id: str,
+    scope_ids: list[str],
+) -> None:
+    normalized = sorted({str(value).strip() for value in scope_ids if str(value).strip()})
+    if not normalized:
+        raise ValueError("请至少选择一个阿里云 HTTPDNS 生效配置")
+    parameters: dict[str, Any] = {
+        "ZoneId": zone_id,
+        # Updating scope is itself idempotent. A fresh token permits A→B→A
+        # changes within Alibaba's idempotency retention window.
+        "ClientToken": uuid.uuid4().hex,
+        "EffectiveScopes.1.EffectiveType": "account",
+    }
+    for index, value in enumerate(normalized, start=1):
+        parameters[f"EffectiveScopes.1.Scope.{index}"] = value
+    call_alibaba_api(credential, "UpdateRecursionZoneEffectiveScope", **parameters)
+
+
+def add_credential_record(
+    credential: AlibabaHttpDnsCredential,
+    *,
+    zone_id: str,
+    rr: str,
+    record_type: str,
+    value: str,
+    ttl: int,
+) -> dict[str, Any]:
+    response = call_alibaba_api(
+        credential,
+        "AddRecursionRecord",
+        ZoneId=zone_id,
+        Rr=rr,
+        Type=record_type,
+        Value=value,
+        Ttl=ttl,
+        RequestSource="default",
+        Weight=1,
+        Priority=1,
+        ClientToken=_stable_client_token("record", credential, zone_id, rr, record_type, value, ttl),
+    )
+    record_id = str(response.get("RecordId") or "").strip()
+    if not record_id:
+        raise RuntimeError("Alibaba Cloud did not return RecordId after AddRecursionRecord")
+    return {
+        "RecordId": record_id,
+        "Rr": rr,
+        "Type": record_type,
+        "Value": value,
+        "Ttl": ttl,
+        "RequestSource": "default",
+        "Weight": 1,
+        "Priority": 1,
+        "Remark": "",
+        "EnableStatus": "enable",
+    }
+
+
+def delete_empty_credential_zone(credential: AlibabaHttpDnsCredential, zone_id: str) -> None:
+    records = list_credential_records(credential, zone_id)
+    if records:
+        raise RuntimeError(f"内置权威域名仍有 {len(records)} 条解析记录，请先明确删除记录或故障组")
+    call_alibaba_api(
+        credential,
+        "DeleteRecursionZone",
+        ZoneId=zone_id,
+        ClientToken=_stable_client_token("delete-zone", credential, zone_id),
     )
 
 

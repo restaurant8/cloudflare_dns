@@ -1,3 +1,4 @@
+import hashlib
 import ipaddress
 import json
 from collections.abc import Iterable
@@ -36,6 +37,20 @@ def route53_client(credential: AwsRoute53Credential):
     return boto3.client("route53", **kwargs)
 
 
+def ec2_client(credential: AwsRoute53Credential):
+    if not credential.enabled:
+        raise RuntimeError(f"AWS Route 53 credential {credential.name} is disabled")
+    kwargs: dict[str, Any] = {"region_name": credential.region or "ap-east-1"}
+    if not credential.use_instance_role:
+        if not credential.access_key_id_encrypted or not credential.secret_access_key_encrypted:
+            raise RuntimeError(f"AWS Route 53 credential {credential.name} has no access key")
+        kwargs["aws_access_key_id"] = decrypt_secret(credential.access_key_id_encrypted)
+        kwargs["aws_secret_access_key"] = decrypt_secret(credential.secret_access_key_encrypted)
+        if credential.session_token_encrypted:
+            kwargs["aws_session_token"] = decrypt_secret(credential.session_token_encrypted)
+    return boto3.client("ec2", **kwargs)
+
+
 def normalize_hosted_zone_id(value: str) -> str:
     return str(value or "").strip().removeprefix("/hostedzone/")
 
@@ -62,6 +77,104 @@ def list_private_hosted_zones(credential: AwsRoute53Credential) -> list[dict[str
                 }
             )
     return sorted(zones, key=lambda item: (item["name"], item["id"]))
+
+
+def list_vpcs(credential: AwsRoute53Credential) -> list[dict[str, Any]]:
+    response = ec2_client(credential).describe_vpcs()
+    vpcs: list[dict[str, Any]] = []
+    for item in response.get("Vpcs", []):
+        tags = {str(tag.get("Key") or ""): str(tag.get("Value") or "") for tag in item.get("Tags", [])}
+        vpcs.append(
+            {
+                "id": str(item.get("VpcId") or ""),
+                "region": credential.region or "ap-east-1",
+                "name": tags.get("Name") or None,
+                "cidr_block": str(item.get("CidrBlock") or "") or None,
+                "is_default": bool(item.get("IsDefault")),
+            }
+        )
+    return sorted(vpcs, key=lambda item: (not item["is_default"], item["name"] or "", item["id"]))
+
+
+def get_private_hosted_zone(credential: AwsRoute53Credential, hosted_zone_id: str) -> dict[str, Any]:
+    zone_id = normalize_hosted_zone_id(hosted_zone_id)
+    response = route53_client(credential).get_hosted_zone(Id=zone_id)
+    zone = dict(response.get("HostedZone") or {})
+    if not bool((zone.get("Config") or {}).get("PrivateZone")):
+        raise ValueError(f"Route 53 hosted zone {zone_id} is not private")
+    return {
+        "id": zone_id,
+        "name": str(zone.get("Name") or "").rstrip("."),
+        "record_count": int(zone.get("ResourceRecordSetCount") or 0),
+        "vpcs": [
+            {"id": str(item.get("VPCId") or ""), "region": str(item.get("VPCRegion") or "")}
+            for item in response.get("VPCs", [])
+        ],
+    }
+
+
+def create_private_hosted_zone(
+    credential: AwsRoute53Credential,
+    *,
+    name: str,
+    vpc_id: str,
+    vpc_region: str,
+    comment: str | None = None,
+) -> dict[str, Any]:
+    client = route53_client(credential)
+    canonical_request = ":".join(
+        (
+            str(credential.id or 0),
+            name.rstrip(".").lower(),
+            vpc_region.strip().lower(),
+            vpc_id.strip().lower(),
+        )
+    )
+    caller_reference = "cloudflare-dns-" + hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    response = client.create_hosted_zone(
+        Name=name.rstrip(".") + ".",
+        CallerReference=caller_reference,
+        VPC={"VPCRegion": vpc_region, "VPCId": vpc_id},
+        HostedZoneConfig={
+            "Comment": (comment or "Private DoH managed by cloudflare_dns")[:256],
+            "PrivateZone": True,
+        },
+    )
+    zone = dict(response.get("HostedZone") or {})
+    return {
+        "id": normalize_hosted_zone_id(str(zone.get("Id") or "")),
+        "name": str(zone.get("Name") or name).rstrip("."),
+        "record_count": int(zone.get("ResourceRecordSetCount") or 0),
+        "vpcs": [{"id": vpc_id, "region": vpc_region}],
+    }
+
+
+def delete_empty_private_hosted_zone(
+    credential: AwsRoute53Credential,
+    hosted_zone_id: str,
+) -> dict[str, Any]:
+    client = route53_client(credential)
+    zone = get_private_hosted_zone(credential, hosted_zone_id)
+    records: list[dict[str, Any]] = []
+    request: dict[str, Any] = {"HostedZoneId": zone["id"], "MaxItems": "300"}
+    while True:
+        response = client.list_resource_record_sets(**request)
+        records.extend(response.get("ResourceRecordSets", []))
+        if not response.get("IsTruncated"):
+            break
+        request["StartRecordName"] = response["NextRecordName"]
+        request["StartRecordType"] = response["NextRecordType"]
+        if response.get("NextRecordIdentifier"):
+            request["StartRecordIdentifier"] = response["NextRecordIdentifier"]
+    non_default = [item for item in records if str(item.get("Type") or "").upper() not in {"NS", "SOA"}]
+    if non_default:
+        summary = ", ".join(
+            f"{str(item.get('Name') or '').rstrip('.')} {item.get('Type') or '?'}" for item in non_default[:8]
+        )
+        if len(non_default) > 8:
+            summary += f", and {len(non_default) - 8} more"
+        raise RuntimeError(f"Private hosted zone is not empty: {summary}")
+    return dict(client.delete_hosted_zone(Id=zone["id"]).get("ChangeInfo") or {})
 
 
 def validate_hostname_in_zone(hostname: str, zone_name: str) -> None:
@@ -225,6 +338,14 @@ def publish_route53_output(
 ) -> dict[str, Any]:
     validate_hostname_in_zone(output.hostname, output.hosted_zone_name)
     desired = desired_origin_records(origin)
+    if (
+        output.hostname.rstrip(".").lower() == output.hosted_zone_name.rstrip(".").lower()
+        and "CNAME" in desired
+    ):
+        raise RuntimeError(
+            f"Route 53 private hosted-zone apex {output.hostname} cannot publish CNAME; "
+            "set the hostname origin to expanded mode"
+        )
     if not desired:
         raise RuntimeError(f"Origin {origin.target} has no healthy publishable address")
     client = route53_client(output.credential)
@@ -286,6 +407,11 @@ def publish_route53_output(
 
 def route53_output_matches(output: AwsRoute53Output, origin: Origin) -> bool:
     expected = desired_origin_records(origin)
+    if (
+        output.hostname.rstrip(".").lower() == output.hosted_zone_name.rstrip(".").lower()
+        and "CNAME" in expected
+    ):
+        return False
     if not expected:
         return False
     client = route53_client(output.credential)
