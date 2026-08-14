@@ -53,7 +53,11 @@ def call_alibaba_api(
     if not credential.enabled:
         raise RuntimeError(f"Alibaba HTTPDNS credential {credential.name} is disabled")
     access_key_id = decrypt_secret(credential.access_key_id_encrypted).strip()
-    access_key_secret = decrypt_secret(credential.access_key_secret_encrypted)
+    # Copying an AccessKey from the console can include a trailing newline or
+    # surrounding whitespace. Those invisible characters change the HMAC key
+    # and produce SignatureDoesNotMatch even though the displayed value looks
+    # correct. Alibaba AccessKey secrets themselves do not contain whitespace.
+    access_key_secret = decrypt_secret(credential.access_key_secret_encrypted).strip()
     if not access_key_id or not access_key_secret:
         raise RuntimeError("Alibaba Cloud AccessKey is not configured")
     query: dict[str, Any] = {
@@ -85,6 +89,11 @@ def call_alibaba_api(
     if response.is_error or data.get("Code"):
         code = str(data.get("Code") or response.status_code)
         message = str(data.get("Message") or response.text or "Alibaba Cloud API request failed")
+        if code == "SignatureDoesNotMatch":
+            message = (
+                "AccessKey ID and AccessKey Secret did not produce Alibaba Cloud's expected signature. "
+                "Re-enter the matching key pair; if the Secret is no longer visible, create a new AccessKey."
+            )
         raise RuntimeError(f"Alibaba Cloud {code}: {message}")
     return data if isinstance(data, dict) else {}
 

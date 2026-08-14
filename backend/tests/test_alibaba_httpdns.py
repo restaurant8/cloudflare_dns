@@ -1,4 +1,8 @@
+import base64
+import hashlib
+import hmac
 from datetime import datetime, timedelta
+from urllib.parse import quote
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -88,7 +92,7 @@ def test_direct_credential_calls_alibaba_rpc_without_azpanel(monkeypatch):
     credential = AlibabaHttpDnsCredential(
         name="direct",
         access_key_id_encrypted=encrypt_secret("test-ak"),
-        access_key_secret_encrypted=encrypt_secret("test-secret"),
+        access_key_secret_encrypted=encrypt_secret("  test-secret\r\n"),
         endpoint="alidns.aliyuncs.com",
         enabled=True,
     )
@@ -117,6 +121,14 @@ def test_direct_credential_calls_alibaba_rpc_without_azpanel(monkeypatch):
     assert captured["params"]["AccessKeyId"] == "test-ak"
     assert captured["params"]["Version"] == "2015-01-09"
     assert isinstance(captured["params"]["Signature"], str) and captured["params"]["Signature"]
+    unsigned = {key: value for key, value in captured["params"].items() if key != "Signature"}
+    encode = lambda value: quote(str(value), safe="~-._")
+    canonical = "&".join(f"{encode(key)}={encode(unsigned[key])}" for key in sorted(unsigned))
+    string_to_sign = f"POST&%2F&{encode(canonical)}"
+    expected = base64.b64encode(
+        hmac.new(b"test-secret&", string_to_sign.encode("utf-8"), hashlib.sha1).digest()
+    ).decode("ascii")
+    assert captured["params"]["Signature"] == expected
 
 
 def test_unknown_origins_wait_for_recovery_threshold_without_false_alarm(monkeypatch):

@@ -1985,7 +1985,7 @@ function AlibabaHttpDnsPanel({ token, credentials, groups, failoverGroups, busy,
       enabled: credentialEdit.enabled
     };
     if (credentialEdit.access_key_id.trim()) payload.access_key_id = credentialEdit.access_key_id.trim();
-    if (credentialEdit.access_key_secret) payload.access_key_secret = credentialEdit.access_key_secret;
+    if (credentialEdit.access_key_secret.trim()) payload.access_key_secret = credentialEdit.access_key_secret.trim();
     await act(
       () => apiFetch(`/api/alibaba-httpdns/credentials/${item.id}`, token, { method: "PATCH", body: JSON.stringify(payload) }),
       "阿里云 HTTPDNS 凭证已更新",

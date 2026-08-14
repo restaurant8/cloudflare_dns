@@ -188,7 +188,7 @@ def create_credential(
     credential = AlibabaHttpDnsCredential(
         name=payload.name.strip(),
         access_key_id_encrypted=encrypt_secret(payload.access_key_id.strip()),
-        access_key_secret_encrypted=encrypt_secret(payload.access_key_secret),
+        access_key_secret_encrypted=encrypt_secret(payload.access_key_secret.strip()),
         region=payload.region.strip(),
         endpoint=payload.endpoint.strip(),
         enabled=True,
@@ -223,7 +223,7 @@ def update_credential(
     if "access_key_secret" in updates:
         value = updates.pop("access_key_secret")
         if value:
-            credential.access_key_secret_encrypted = encrypt_secret(value)
+            credential.access_key_secret_encrypted = encrypt_secret(value.strip())
     for key, value in updates.items():
         setattr(credential, key, value.strip() if isinstance(value, str) else value)
     try:
