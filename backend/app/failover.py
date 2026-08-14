@@ -11,7 +11,7 @@ from .doh import sync_group_doh_endpoint
 from .events import add_event
 from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, PROBE_MODE_CHINA_ONLY, origin_probe_mode, run_local_checks
 from .integrations import AutoIpChangeGuard, trigger_ip_change_for_origin
-from .alibaba_httpdns import sync_group_alibaba_outputs
+from .alibaba_httpdns import AlibabaOutputConfigurationError, normalize_alibaba_provider_origin_modes, sync_group_alibaba_outputs
 from .models import AlibabaHttpDnsGroup, AwsRoute53Output, DnsRecord, FailoverGroup, FailoverHostname, Origin, Zone
 from .notifier import send_webhooks
 from .origin_expansion import (
@@ -40,6 +40,7 @@ RECOVERABLE_GROUP_ERRORS = {
     WAITING_FOR_PROBES_MESSAGE,
     NO_OUTPUT_CHANNEL_MESSAGE,
 }
+ALIBABA_CONFIGURATION_ERROR_PREFIX = "阿里云输出配置冲突："
 
 
 class DnsPublishError(ValueError):
@@ -619,7 +620,29 @@ def _evaluate_single_group(
     trigger_ip_changes: bool = True,
     auto_ip_change_guard: AutoIpChangeGuard | None = None,
 ) -> bool:
-    if _should_probe_group_before_switch(group):
+    # Older UI versions allowed a hostname source in direct/CNAME mode even when
+    # the direct Alibaba output was an A/AAAA record.  Normalize before probing so
+    # existing groups self-heal instead of failing every publish tick with
+    # "has no A value".
+    alibaba_enabled = any(output.enabled for output in group.alibaba_httpdns_outputs)
+    normalized_alibaba_modes = 0
+    if alibaba_enabled:
+        try:
+            normalized_alibaba_modes = normalize_alibaba_provider_origin_modes(group)
+        except AlibabaOutputConfigurationError as exc:
+            message = f"{ALIBABA_CONFIGURATION_ERROR_PREFIX}{exc}"
+            if group.last_error != message:
+                payload = {"provider": "alibaba_httpdns", "group_id": group.id, "hostname": group.hostname, "error": str(exc)}
+                add_event(db, "alibaba_httpdns.configuration_error", "error", message, payload)
+                send_webhooks(db, "alibaba_httpdns.configuration_error", payload)
+            group.last_error = message
+            for output in group.alibaba_httpdns_outputs:
+                if output.enabled:
+                    output.last_error = str(exc)
+            return False
+    if normalized_alibaba_modes:
+        run_local_checks(db, group_id=group.id, include_all=True)
+    elif _should_probe_group_before_switch(group):
         run_local_checks(db, group_id=group.id, include_all=False)
 
     # Trigger an automatic IP change for every blocked origin in the group, not
@@ -662,7 +685,6 @@ def _evaluate_single_group(
             send_webhooks(db, "failover.no_healthy_origin", payload)
         return False
     route53_enabled = any(output.enabled for output in group.route53_outputs)
-    alibaba_enabled = any(output.enabled for output in group.alibaba_httpdns_outputs)
     if not group.cloudflare_publish_enabled and not group.doh_enabled and not route53_enabled and not alibaba_enabled:
         # Zero-output groups are valid staging configurations, but they must not
         # look like a successfully publishing healthy group. Keep the selection
@@ -670,7 +692,7 @@ def _evaluate_single_group(
         group.last_error = NO_OUTPUT_CHANNEL_MESSAGE
         return False
     group.no_healthy_notified_at = None
-    if group.last_error in RECOVERABLE_GROUP_ERRORS:
+    if group.last_error in RECOVERABLE_GROUP_ERRORS or str(group.last_error or "").startswith(ALIBABA_CONFIGURATION_ERROR_PREFIX):
         group.last_error = None
     if not group.cloudflare_publish_enabled:
         # Cloudflare errors are no longer actionable once the group relinquishes
@@ -686,7 +708,7 @@ def _evaluate_single_group(
         if alibaba_enabled:
             # Auto-IP bindings can change the value of the already-selected
             # origin, so provider outputs must compare their metadata every tick.
-            sync_group_alibaba_outputs(db, group, desired)
+            sync_group_alibaba_outputs(db, group, desired, origin_modes_normalized=True)
         if not group.cloudflare_publish_enabled:
             # DoH reconciliation has its own revision-aware scheduler. When this
             # group does not own the public record, do not even read Cloudflare.
@@ -780,7 +802,7 @@ def _evaluate_single_group(
             )
         alibaba_succeeded = False
         if alibaba_enabled:
-            sync_group_alibaba_outputs(db, group, desired)
+            sync_group_alibaba_outputs(db, group, desired, origin_modes_normalized=True)
             alibaba_succeeded = any(
                 output.source_current_origin_id == desired.id and not output.last_error
                 for output in group.alibaba_httpdns_outputs
@@ -844,7 +866,7 @@ def _evaluate_single_group(
         )
     alibaba_succeeded = False
     if alibaba_enabled:
-        sync_group_alibaba_outputs(db, group, desired)
+        sync_group_alibaba_outputs(db, group, desired, origin_modes_normalized=True)
         alibaba_succeeded = any(
             output.source_current_origin_id == desired.id and not output.last_error
             for output in group.alibaba_httpdns_outputs

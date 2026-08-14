@@ -1327,6 +1327,27 @@ function AwsRoute53Panel({
   );
 }
 
+function providerRequiredHostnamePublishMode(group: FailoverGroup | undefined): "direct" | "expanded" | null {
+  if (!group || group.provider_type !== "alibaba_httpdns" || group.provider_record_type_conflict) return null;
+  const recordType = (group.provider_record_type || "").toUpperCase();
+  if (recordType === "CNAME") return "direct";
+  if (recordType === "A" || recordType === "AAAA") return "expanded";
+  return null;
+}
+
+function failoverGroupSupportsAlibabaRecord(group: FailoverGroup, recordType: string): boolean {
+  if (group.provider_record_type_conflict) return false;
+  const enabledOrigins = group.origins.filter((origin) => origin.enabled);
+  if (enabledOrigins.length === 0) return false;
+  const wanted = recordType.toUpperCase();
+  return enabledOrigins.every((origin) => {
+    if (wanted === "CNAME") return origin.target_type === "hostname" && origin.publish_mode !== "expanded";
+    if (wanted === "A") return origin.target_type === "ipv4" || (origin.target_type === "hostname" && origin.publish_mode === "expanded");
+    if (wanted === "AAAA") return origin.target_type === "ipv6" || (origin.target_type === "hostname" && origin.publish_mode === "expanded");
+    return false;
+  });
+}
+
 function AuthScreen({
   setupRequired,
   onAuth
@@ -2088,6 +2109,9 @@ function AlibabaHttpDnsRecordCard({ token, group, failoverGroups, busy, act }: {
   const legacyPoolActive = group.source_group_id == null;
   const current = legacyPoolActive ? group.origins.find((origin) => origin.id === group.current_origin_id) : undefined;
   const hostname = group.rr === "@" ? group.zone_name : `${group.rr}.${group.zone_name}`;
+  const compatibleFailoverGroups = failoverGroups.filter((item) => failoverGroupSupportsAlibabaRecord(item, group.record_type));
+  const selectedSourceGroup = group.source_group_id ? failoverGroups.find((item) => item.id === group.source_group_id) : undefined;
+  const selectedSourceIncompatible = Boolean(selectedSourceGroup && !failoverGroupSupportsAlibabaRecord(selectedSourceGroup, group.record_type));
 
   async function bindSourceGroup(sourceGroupId: string) {
     await act(
@@ -2132,7 +2156,7 @@ function AlibabaHttpDnsRecordCard({ token, group, failoverGroups, busy, act }: {
       </div>
       {editingGroup && <div className="alibabaGroupSettings"><label>解析 TTL<select value={groupEdit.ttl} onChange={(event) => setGroupEdit({ ...groupEdit, ttl: Number(event.target.value) })}>{[5, 30, 60, 3600, 43200, 86400].map((ttl) => <option value={ttl} key={ttl}>{ttl} 秒</option>)}</select></label><label>自动回切冷却<input type="number" min={0} max={86400} value={groupEdit.min_switch_interval_seconds} onChange={(event) => setGroupEdit({ ...groupEdit, min_switch_interval_seconds: Number(event.target.value) })} /></label><button onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "PATCH", body: JSON.stringify(groupEdit) }), "切换设置已保存", () => setEditingGroup(false))}><Save size={14} />保存设置</button><button className="secondary" onClick={() => setEditingGroup(false)}>取消</button></div>}
       <div className="alibabaHttpDnsSummary"><div><span>阿里云实际已发布</span><strong>{group.last_published_value || current?.target || "尚未发布"}</strong></div><div><span>TTL / 线路</span><strong>{group.ttl}s · {group.request_source}</strong></div><div><span>最后切换</span><strong>{fmtDate(group.last_switch_at)}</strong></div><div><span>自动切换状态</span><strong className={group.last_error ? "textDanger" : ""}>{group.last_error || "运行正常"}</strong></div></div>
-      <div className="alibabaGroupSettings"><label>故障切换来源<select value={group.source_group_id || ""} onChange={(event) => bindSourceGroup(event.target.value)}><option value="">旧版：使用本记录自己的候选池</option>{failoverGroups.map((item) => <option value={item.id} key={item.id}>统一组：{item.hostname}</option>)}</select></label>{group.source_group_id && <small>已复用统一健康检测、优先级、自动换 IP 和分时规则；旧候选池仅保留作迁移备份，不参与当前解析状态。</small>}</div>
+      <div className="alibabaGroupSettings"><label>故障切换来源<select value={group.source_group_id || ""} onChange={(event) => bindSourceGroup(event.target.value)}><option value="">旧版：使用本记录自己的候选池</option>{selectedSourceIncompatible && selectedSourceGroup && <option value={selectedSourceGroup.id} disabled>当前绑定不兼容：{selectedSourceGroup.hostname}</option>}{compatibleFailoverGroups.filter((item) => item.id !== selectedSourceGroup?.id).map((item) => <option value={item.id} key={item.id}>统一组：{item.hostname}</option>)}</select></label>{selectedSourceIncompatible ? <small className="textDanger">当前来源不能为这条 {group.record_type} 记录生成兼容值，请改选兼容来源或恢复旧版候选池。</small> : group.source_group_id && <small>已复用统一健康检测、优先级、自动换 IP 和分时规则；旧候选池仅保留作迁移备份，不参与当前解析状态。</small>}</div>
       <div className="originList">
         {group.origins.slice().sort((a, b) => a.priority - b.priority || a.id - b.id).map((origin) => editingOriginId === origin.id ? (
           <div className="origin originEditing" key={origin.id}><div className="originEditGrid alibabaOriginEditGrid"><label>IP / 域名<input value={originEdit.target} onChange={(event) => setOriginEdit({ ...originEdit, target: event.target.value })} /></label><label>检查端口<input type="number" min={1} max={65535} value={originEdit.port} onChange={(event) => setOriginEdit({ ...originEdit, port: Number(event.target.value) })} /></label><label>优先级<input type="number" min={0} value={originEdit.priority} onChange={(event) => setOriginEdit({ ...originEdit, priority: Number(event.target.value) })} /></label><label>备注<input value={originEdit.remark} onChange={(event) => setOriginEdit({ ...originEdit, remark: event.target.value })} /></label><label className="inlineCheck"><input type="checkbox" checked={originEdit.enabled} onChange={(event) => setOriginEdit({ ...originEdit, enabled: event.target.checked })} />启用</label><label className="inlineCheck"><input type="checkbox" checked={originEdit.ignore_health_check} onChange={(event) => setOriginEdit({ ...originEdit, ignore_health_check: event.target.checked })} />无视健康检查</label><button onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/origins/${origin.id}`, token, { method: "PATCH", body: JSON.stringify(originEdit) }), "目标已更新", () => setEditingOriginId(null))}><Save size={14} />保存</button><button className="secondary" onClick={() => setEditingOriginId(null)}>取消</button></div></div>
@@ -2925,6 +2949,7 @@ function GroupsPanel({
   const providerLabel = providerType === "cloudflare" ? "Cloudflare DNS" : providerType === "route53" ? "AWS Route 53" : "阿里云 HTTPDNS";
   const addingGlobalCollection = addingGlobalCollectionId ? collections.find((collection) => collection.id === addingGlobalCollectionId) : undefined;
   const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
+  const addingGroupRequiredPublishMode = providerRequiredHostnamePublishMode(addingGroup);
   const addingHostnameGroup = addingHostnameGroupId ? groups.find((group) => group.id === addingHostnameGroupId) : undefined;
   const enabledPoolItems = targetPool.filter((item) => item.enabled);
   const healthyExternalItems = externalIpItems.filter((item) => item.status === "healthy");
@@ -3129,7 +3154,7 @@ function GroupsPanel({
       target: "",
       port: 22,
       priority: maxPriority + 10,
-      publish_mode: "direct",
+      publish_mode: providerRequiredHostnamePublishMode(group) || "direct",
       expanded_ip_priorities: {},
       preferred_agent_id: "",
       probe_mode: "default",
@@ -3249,7 +3274,7 @@ function GroupsPanel({
             target: originAdd.target.trim(),
             port: originAdd.port,
             priority: originAdd.priority,
-            publish_mode: addTargetType === "hostname" ? originAdd.publish_mode : "direct",
+            publish_mode: addTargetType === "hostname" ? (addingGroupRequiredPublishMode || originAdd.publish_mode) : "direct",
             expanded_ip_priorities: addTargetType === "hostname" ? originAdd.expanded_ip_priorities : {},
             preferred_agent_id: originAdd.preferred_agent_id === "" ? null : originAdd.preferred_agent_id,
             probe_mode: originAdd.probe_mode,
@@ -3471,10 +3496,12 @@ function GroupsPanel({
     const draft = originEdits[originId];
     if (!draft) return;
     const targetType = inferDraftTargetType(draft.target);
+    const originGroup = groups.find((group) => group.origins.some((origin) => origin.id === originId));
+    const requiredPublishMode = providerRequiredHostnamePublishMode(originGroup);
     const { unbind_external, ...rest } = draft;
     const payload = {
       ...rest,
-      publish_mode: targetType === "hostname" ? draft.publish_mode : "direct",
+      publish_mode: targetType === "hostname" ? (requiredPublishMode || draft.publish_mode) : "direct",
       preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id,
       probe_mode: draft.probe_mode,
       azpanel_resource_id: draft.azpanel_resource_id === "" ? null : draft.azpanel_resource_id,
@@ -3982,7 +4009,7 @@ function GroupsPanel({
                   </div>
                 </div>
                 <div className="rowActions">
-                  <Status value={group.last_error ? "error" : group.enabled ? "enabled" : "disabled"} />
+                  <Status value={group.last_error || group.provider_record_type_conflict ? "error" : group.enabled ? "enabled" : "disabled"} />
                   <button className="icon secondaryIcon" title={isCollapsed ? "展开切换组" : "折叠切换组"} onClick={() => toggleGroupCollapsed(group.id)}>
                     {isCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
                   </button>
@@ -4199,6 +4226,7 @@ function GroupsPanel({
                       </div>
                     )}
                   </div>
+                  {group.provider_record_type_conflict && <div className="error">阿里云输出记录类型冲突：同一故障切换组不能同时绑定不同类型的启用记录，请先解除错误绑定。</div>}
                   {group.last_error && <div className="error">{group.last_error}</div>}
                   {inheritedOrigins.length > 0 && (
                     <div className={`inheritedOrigins ${inheritedExpanded ? "isExpanded" : ""}`}>
@@ -4275,6 +4303,8 @@ function GroupsPanel({
                         unbind_external: false
                       };
                       const editType = inferDraftTargetType(originEdit.target);
+                      const requiredPublishMode = providerRequiredHostnamePublishMode(group);
+                      const effectivePublishMode = requiredPublishMode || originEdit.publish_mode;
                       const isCurrentOrigin = group.current_origin_id === origin.id;
                       const isPrimaryOrigin = origin.priority === primaryPriority;
                       const preferredAgent = origin.preferred_agent_id ? agents.find((agent) => agent.id === origin.preferred_agent_id) : null;
@@ -4387,8 +4417,8 @@ function GroupsPanel({
                                 <label className="inlineCheck">
                                   <input
                                     type="checkbox"
-                                    disabled={editType !== "hostname"}
-                                    checked={editType === "hostname" && originEdit.publish_mode === "expanded"}
+                                    disabled={editType !== "hostname" || requiredPublishMode !== null}
+                                    checked={editType === "hostname" && effectivePublishMode === "expanded"}
                                     onChange={(event) =>
                                       setOriginEdits((current) => {
                                         const draft = current[origin.id] || originEdit;
@@ -4396,7 +4426,7 @@ function GroupsPanel({
                                       })
                                     }
                                   />
-                                  展开 IP 池
+                                  {requiredPublishMode === "expanded" ? "阿里云 A/AAAA 自动展开 IP 池" : requiredPublishMode === "direct" ? "阿里云 CNAME 保持直连域名" : "展开 IP 池"}
                                 </label>
                                 <label className="inlineCheck">
                                   <input type="checkbox" checked={originEdit.enabled} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, enabled: event.target.checked } }))} />
@@ -4412,9 +4442,9 @@ function GroupsPanel({
                                     解除外部 IP 绑定（不再跟随该机器的新 IP）
                                   </label>
                                 )}
-                                <span className="originEditHint">当前会识别为 {targetTypeText(editType)}，发布为 {recordTypeForTargetType(editType, originEdit.publish_mode)}。</span>
+                                <span className="originEditHint">当前会识别为 {targetTypeText(editType)}，发布为 {recordTypeForTargetType(editType, effectivePublishMode)}。</span>
                               </div>
-                              {editType === "hostname" && originEdit.publish_mode === "expanded" && (
+                              {editType === "hostname" && effectivePublishMode === "expanded" && (
                                 <ExpandedIpPriorityEditor
                                   origin={origin}
                                   draft={originEdit}
@@ -4805,15 +4835,20 @@ function GroupsPanel({
               <label className="inlineCheck">
                 <input
                   type="checkbox"
-                  checked={originAdd.publish_mode === "expanded"}
+                  checked={(addingGroupRequiredPublishMode || originAdd.publish_mode) === "expanded"}
+                  disabled={addingGroupRequiredPublishMode !== null}
                   onChange={(event) => setOriginAdd((current) => ({ ...current, publish_mode: event.target.checked ? "expanded" : "direct" }))}
                 />
-                展开解析为 IP 池，只发布健康 A/AAAA
+                {addingGroupRequiredPublishMode === "expanded"
+                  ? "阿里云 A/AAAA 记录会自动展开，只发布健康 IP"
+                  : addingGroupRequiredPublishMode === "direct"
+                    ? "阿里云 CNAME 记录保持直连域名"
+                    : "展开解析为 IP 池，只发布健康 A/AAAA"}
               </label>
             )}
             {originAdd.target.trim() && (
               <div className="originHint">
-                当前输入识别为 {targetTypeText(addTargetType)}，故障切换时会发布为 {recordTypeForTargetType(addTargetType, originAdd.publish_mode)}。
+                当前输入识别为 {targetTypeText(addTargetType)}，故障切换时会发布为 {recordTypeForTargetType(addTargetType, addingGroupRequiredPublishMode || originAdd.publish_mode)}。
               </div>
             )}
             <div className="modalActions">

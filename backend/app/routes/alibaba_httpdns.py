@@ -2,12 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
 
 from ..alibaba_httpdns import (
+    AlibabaOutputConfigurationError,
     evaluate_alibaba_httpdns_groups,
     list_credential_records,
     list_credential_zones,
     list_remote_accounts,
     list_remote_records,
     list_remote_zones,
+    validate_alibaba_output_source,
 )
 from ..database import get_db
 from ..deps import get_current_user
@@ -454,10 +456,20 @@ def update_group(group_id: int, payload: AlibabaHttpDnsGroupUpdate, _: User = De
     if group is None:
         raise HTTPException(status_code=404, detail="阿里云 HTTPDNS 切换组不存在")
     updates = payload.model_dump(exclude_unset=True)
-    if "source_group_id" in updates and updates["source_group_id"] is not None:
-        source = db.get(FailoverGroup, updates["source_group_id"])
+    next_source_group_id = updates.get("source_group_id", group.source_group_id)
+    if next_source_group_id is not None:
+        source = db.get(FailoverGroup, next_source_group_id)
         if source is None:
             raise HTTPException(status_code=404, detail="Linked failover group not found")
+        try:
+            validate_alibaba_output_source(
+                source,
+                record_type=group.record_type,
+                output_id=group.id,
+                enabled=bool(updates.get("enabled", group.enabled)),
+            )
+        except AlibabaOutputConfigurationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if "source_group_id" in updates and updates["source_group_id"] != group.source_group_id:
         group.source_current_origin_id = None
         group.last_switch_at = None

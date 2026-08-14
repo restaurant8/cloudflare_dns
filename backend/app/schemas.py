@@ -1054,6 +1054,8 @@ class ExternalIpSourceOut(BaseModel):
 class FailoverGroupOut(BaseModel):
     id: int
     provider_type: str
+    provider_record_type: str | None = None
+    provider_record_type_conflict: bool = False
     zone_id: int | None
     collection_id: int | None
     hostname: str

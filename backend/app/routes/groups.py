@@ -6,7 +6,12 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
 from ..cloudflare import CloudflareClient, CloudflareError
-from ..alibaba_httpdns import sync_group_alibaba_outputs
+from ..alibaba_httpdns import (
+    AlibabaOutputConfigurationError,
+    required_alibaba_origin_publish_mode,
+    sync_group_alibaba_outputs,
+    validate_alibaba_origin_for_outputs,
+)
 from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import normalize_hostname, parse_target
@@ -175,6 +180,7 @@ def _group_query(db: Session):
     return db.query(FailoverGroup).options(
         selectinload(FailoverGroup.hostnames),
         selectinload(FailoverGroup.origins).selectinload(Origin.probe_states).selectinload(ProbeState.agent),
+        selectinload(FailoverGroup.alibaba_httpdns_outputs),
         selectinload(FailoverGroup.time_rule),
     )
 
@@ -248,11 +254,25 @@ def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreat
     external_machine_key = None
     if payload.external_ip_item_id is not None:
         external_source_id, external_machine_key = _external_binding_from_item_id(db, payload.external_ip_item_id)
+    try:
+        publish_mode = required_alibaba_origin_publish_mode(
+            group,
+            target_info.target_type,
+            payload.publish_mode,
+        )
+        validate_alibaba_origin_for_outputs(
+            group,
+            target_type=target_info.target_type,
+            publish_mode=publish_mode,
+            enabled=payload.enabled,
+        )
+    except AlibabaOutputConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     origin = Origin(
         group_id=group.id,
         target=target_info.value,
         target_type=target_info.target_type,
-        publish_mode=payload.publish_mode if target_info.target_type == "hostname" else DIRECT_PUBLISH_MODE,
+        publish_mode=publish_mode,
         port=payload.port,
         priority=payload.priority,
         preferred_agent_id=_validate_preferred_agent_id(db, payload.preferred_agent_id),
@@ -1368,6 +1388,20 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
         new_publish_mode = updates.pop("publish_mode")
     if new_target_type != "hostname" and new_publish_mode == EXPANDED_PUBLISH_MODE:
         raise HTTPException(status_code=400, detail="只有域名目标可以启用展开 IP 池")
+    try:
+        new_publish_mode = required_alibaba_origin_publish_mode(
+            group,
+            new_target_type,
+            new_publish_mode,
+        )
+        validate_alibaba_origin_for_outputs(
+            group,
+            target_type=new_target_type,
+            publish_mode=new_publish_mode,
+            enabled=bool(updates.get("enabled", origin.enabled)),
+        )
+    except AlibabaOutputConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     preferred_agent_update_provided = "preferred_agent_id" in updates
     if preferred_agent_update_provided:

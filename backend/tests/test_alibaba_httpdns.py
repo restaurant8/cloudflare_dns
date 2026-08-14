@@ -4,10 +4,12 @@ import hmac
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.alibaba_httpdns import _desired_origin, call_azpanel_httpdns, evaluate_alibaba_httpdns_groups, list_credential_zones
+from app.alibaba_httpdns import _desired_origin, call_azpanel_httpdns, evaluate_alibaba_httpdns_groups, list_credential_zones, sync_group_alibaba_outputs
 from app.database import Base
 from app.dns_utils import TcpCheckResult
 from app.failover import evaluate_failover_groups
@@ -27,8 +29,9 @@ from app.models import (
     User,
     Zone,
 )
-from app.routes.alibaba_httpdns import adopt_zone, delete_origin_action, release_zone_action, router, update_origin
-from app.schemas import AlibabaHttpDnsOriginUpdate, AlibabaHttpDnsZoneAdopt, AlibabaHttpDnsZoneRelease
+from app.routes.alibaba_httpdns import adopt_zone, delete_origin_action, release_zone_action, router, update_group as update_alibaba_group, update_origin
+from app.routes.groups import create_origin as create_failover_origin, update_origin as update_failover_origin
+from app.schemas import AlibabaHttpDnsGroupUpdate, AlibabaHttpDnsOriginUpdate, AlibabaHttpDnsZoneAdopt, AlibabaHttpDnsZoneRelease, OriginCreate, OriginUpdate
 from app.security import encrypt_secret
 
 
@@ -316,6 +319,338 @@ def test_unified_alibaba_only_group_switches_and_publishes_directly(monkeypatch)
     assert output.source_current_origin_id == backup.id
     assert output.last_published_value == backup.target
     assert writes == [backup.target]
+
+
+def test_alibaba_a_group_auto_repairs_direct_hostname_to_expanded_ip(monkeypatch):
+    db = make_session()
+    source = FailoverGroup(
+        provider_type="alibaba_httpdns",
+        hostname="www.example.com",
+        cloudflare_publish_enabled=False,
+        doh_enabled=False,
+        enabled=True,
+    )
+    db.add(source)
+    db.flush()
+    origin = Origin(
+        group_id=source.id,
+        target="origin.example.net",
+        target_type="hostname",
+        publish_mode="direct",
+        port=443,
+        priority=0,
+        status="healthy",
+    )
+    db.add(origin)
+    db.flush()
+    source.current_origin_id = origin.id
+    output = AlibabaHttpDnsGroup(
+        source_group_id=source.id,
+        remote_account_id=7,
+        account_name="Alibaba",
+        zone_id="zone-1",
+        zone_name="example.com",
+        record_id="record-1",
+        rr="www",
+        record_type="A",
+        enabled=True,
+        source_current_origin_id=origin.id,
+        last_published_value="192.0.2.9",
+    )
+    db.add(output)
+    db.commit()
+    writes = []
+
+    def probe_expanded(_db, *, group_id=None, **_kwargs):
+        assert group_id == source.id
+        assert origin.publish_mode == "expanded"
+        origin.resolved_ips_json = '["192.0.2.10"]'
+        origin.healthy_ips_json = '["192.0.2.10"]'
+        origin.status = "healthy"
+        origin.last_error = None
+        return 1
+
+    monkeypatch.setattr("app.failover.run_local_checks", probe_expanded)
+    monkeypatch.setattr("app.alibaba_httpdns.publish_value", lambda _db, _output, value: writes.append(value) or {})
+    monkeypatch.setattr("app.alibaba_httpdns.send_webhooks", lambda *_args, **_kwargs: None)
+
+    assert evaluate_failover_groups(db, group_ids=[source.id], check_dns_consistency=False) == 0
+
+    assert origin.publish_mode == "expanded"
+    assert output.last_published_value == "192.0.2.10"
+    assert output.last_error is None
+    assert writes == ["192.0.2.10"]
+
+
+def test_alibaba_output_reconcile_also_repairs_direct_hostname(monkeypatch):
+    db = make_session()
+    source = FailoverGroup(
+        provider_type="alibaba_httpdns",
+        hostname="www.example.com",
+        cloudflare_publish_enabled=False,
+        enabled=True,
+    )
+    db.add(source)
+    db.flush()
+    origin = Origin(
+        group_id=source.id,
+        target="origin.example.net",
+        target_type="hostname",
+        publish_mode="direct",
+        port=443,
+        priority=0,
+        status="healthy",
+    )
+    db.add(origin)
+    db.flush()
+    source.current_origin_id = origin.id
+    output = AlibabaHttpDnsGroup(
+        source_group_id=source.id,
+        remote_account_id=7,
+        account_name="Alibaba",
+        zone_id="zone-1",
+        zone_name="example.com",
+        record_id="record-1",
+        rr="www",
+        record_type="A",
+        enabled=True,
+        source_current_origin_id=origin.id,
+        last_published_value="192.0.2.9",
+    )
+    db.add(output)
+    db.commit()
+    writes = []
+
+    def probe_expanded(_db, *, group_id=None, **_kwargs):
+        assert group_id == source.id
+        assert origin.publish_mode == "expanded"
+        origin.resolved_ips_json = '["192.0.2.11"]'
+        origin.healthy_ips_json = '["192.0.2.11"]'
+        origin.status = "healthy"
+        return 1
+
+    monkeypatch.setattr("app.health.run_local_checks", probe_expanded)
+    monkeypatch.setattr("app.alibaba_httpdns.publish_value", lambda _db, _output, value: writes.append(value) or {})
+    monkeypatch.setattr("app.alibaba_httpdns.send_webhooks", lambda *_args, **_kwargs: None)
+
+    assert evaluate_alibaba_httpdns_groups(db, [output.id]) == 0
+    assert origin.publish_mode == "expanded"
+    assert output.last_published_value == "192.0.2.11"
+    assert output.last_error is None
+    assert writes == ["192.0.2.11"]
+
+
+def test_alibaba_cname_group_keeps_direct_hostname_mode(monkeypatch):
+    db = make_session()
+    source = FailoverGroup(
+        provider_type="alibaba_httpdns",
+        hostname="alias.example.com",
+        cloudflare_publish_enabled=False,
+        enabled=True,
+    )
+    db.add(source)
+    db.flush()
+    origin = Origin(
+        group_id=source.id,
+        target="origin.example.net",
+        target_type="hostname",
+        publish_mode="direct",
+        port=443,
+        priority=0,
+        status="healthy",
+    )
+    db.add(origin)
+    db.flush()
+    source.current_origin_id = origin.id
+    output = AlibabaHttpDnsGroup(
+        source_group_id=source.id,
+        remote_account_id=7,
+        account_name="Alibaba",
+        zone_id="zone-1",
+        zone_name="example.com",
+        record_id="record-cname",
+        rr="alias",
+        record_type="CNAME",
+        enabled=True,
+        source_current_origin_id=origin.id,
+        last_published_value=origin.target,
+    )
+    db.add(output)
+    db.commit()
+    probes = []
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *_args, **_kwargs: probes.append(1))
+
+    assert evaluate_failover_groups(db, group_ids=[source.id], check_dns_consistency=False) == 0
+    assert origin.publish_mode == "direct"
+    assert probes == []
+
+
+def test_mixed_alibaba_output_types_are_visible_and_do_not_abort_scheduler(monkeypatch):
+    db = make_session()
+    source = FailoverGroup(
+        provider_type="alibaba_httpdns",
+        hostname="mixed.example.com",
+        cloudflare_publish_enabled=False,
+        enabled=True,
+    )
+    db.add(source)
+    db.flush()
+    origin = Origin(
+        group_id=source.id,
+        target="origin.example.net",
+        target_type="hostname",
+        publish_mode="direct",
+        port=443,
+        priority=0,
+        status="healthy",
+    )
+    db.add(origin)
+    db.flush()
+    source.current_origin_id = origin.id
+    for record_id, record_type in (("record-a", "A"), ("record-cname", "CNAME")):
+        db.add(
+            AlibabaHttpDnsGroup(
+                source_group_id=source.id,
+                remote_account_id=7,
+                account_name="Alibaba",
+                zone_id="zone-1",
+                zone_name="example.com",
+                record_id=record_id,
+                rr="mixed",
+                record_type=record_type,
+                enabled=True,
+            )
+        )
+    db.commit()
+    webhooks = []
+    monkeypatch.setattr("app.failover.send_webhooks", lambda _db, event_type, payload: webhooks.append((event_type, payload)))
+
+    assert evaluate_failover_groups(db, group_ids=[source.id], check_dns_consistency=False) == 0
+    assert source.last_error == "阿里云输出配置冲突：同一故障切换组不能同时绑定不同类型的阿里云输出（当前：A/CNAME）"
+    assert source.provider_record_type is None
+    assert source.provider_record_type_conflict is True
+    assert db.query(Event).filter(Event.type == "alibaba_httpdns.configuration_error").count() == 1
+    assert [item[0] for item in webhooks] == ["alibaba_httpdns.configuration_error"]
+
+    # A steady scheduler tick keeps the visible error but does not spam events.
+    assert evaluate_failover_groups(db, group_ids=[source.id], check_dns_consistency=False) == 0
+    assert db.query(Event).filter(Event.type == "alibaba_httpdns.configuration_error").count() == 1
+
+
+def test_mixed_alibaba_output_types_return_400_when_adding_or_editing_origin():
+    db = make_session()
+    user = User(username="admin", password_hash="hash")
+    source = FailoverGroup(
+        provider_type="alibaba_httpdns",
+        hostname="mixed.example.com",
+        cloudflare_publish_enabled=False,
+        enabled=True,
+    )
+    db.add_all([user, source])
+    db.flush()
+    origin = Origin(
+        group_id=source.id,
+        target="origin.example.net",
+        target_type="hostname",
+        publish_mode="direct",
+        port=443,
+        priority=0,
+        status="healthy",
+    )
+    db.add(origin)
+    db.flush()
+    for record_id, record_type in (("record-a", "A"), ("record-cname", "CNAME")):
+        db.add(
+            AlibabaHttpDnsGroup(
+                source_group_id=source.id,
+                remote_account_id=7,
+                account_name="Alibaba",
+                zone_id="zone-1",
+                zone_name="example.com",
+                record_id=record_id,
+                rr="mixed",
+                record_type=record_type,
+                enabled=True,
+            )
+        )
+    db.commit()
+
+    with pytest.raises(HTTPException) as create_error:
+        create_failover_origin(source.id, OriginCreate(target="backup.example.net", port=443), user, db)
+    assert create_error.value.status_code == 400
+    assert "不能同时绑定不同类型" in str(create_error.value.detail)
+
+    with pytest.raises(HTTPException) as update_error:
+        update_failover_origin(origin.id, OriginUpdate(remark="still invalid"), user, db)
+    assert update_error.value.status_code == 400
+    assert "不能同时绑定不同类型" in str(update_error.value.detail)
+
+
+def test_legacy_cname_cannot_bind_to_direct_alibaba_a_group():
+    db = make_session()
+    user = User(username="admin", password_hash="hash")
+    source = FailoverGroup(
+        provider_type="alibaba_httpdns",
+        hostname="a.example.com",
+        cloudflare_publish_enabled=False,
+        enabled=True,
+    )
+    db.add_all([user, source])
+    db.flush()
+    origin = Origin(group_id=source.id, target="192.0.2.10", target_type="ipv4", port=443, status="healthy")
+    db.add(origin)
+    db.flush()
+    source.current_origin_id = origin.id
+    direct_a = AlibabaHttpDnsGroup(
+        source_group_id=source.id,
+        remote_account_id=7,
+        account_name="Alibaba",
+        zone_id="zone-1",
+        zone_name="example.com",
+        record_id="record-a",
+        rr="a",
+        record_type="A",
+        enabled=True,
+    )
+    legacy_cname = AlibabaHttpDnsGroup(
+        remote_account_id=8,
+        account_name="Legacy",
+        zone_id="zone-2",
+        zone_name="example.net",
+        record_id="record-cname",
+        rr="alias",
+        record_type="CNAME",
+        enabled=True,
+    )
+    db.add_all([direct_a, legacy_cname])
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_alibaba_group(
+            legacy_cname.id,
+            AlibabaHttpDnsGroupUpdate(source_group_id=source.id),
+            user,
+            db,
+        )
+    assert exc_info.value.status_code == 400
+    assert "不能同时绑定不同类型" in str(exc_info.value.detail)
+    assert legacy_cname.source_group_id is None
+
+
+def test_sync_group_can_skip_already_completed_mode_guard(monkeypatch):
+    db = make_session()
+    source = FailoverGroup(provider_type="alibaba_httpdns", hostname="www.example.com", enabled=True)
+    db.add(source)
+    db.flush()
+    origin = Origin(group_id=source.id, target="192.0.2.10", target_type="ipv4", port=443, status="healthy")
+    db.add(origin)
+    db.commit()
+    monkeypatch.setattr(
+        "app.alibaba_httpdns.normalize_alibaba_provider_origin_modes",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("mode guard ran twice")),
+    )
+
+    assert sync_group_alibaba_outputs(db, source, origin, origin_modes_normalized=True) is False
 
 
 def test_shared_output_without_selected_source_is_a_quiet_noop(monkeypatch):

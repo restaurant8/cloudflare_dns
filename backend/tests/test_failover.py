@@ -1143,7 +1143,7 @@ def test_provider_success_advances_selection_when_cloudflare_and_doh_fail(monkey
         route53_output.last_error = None
         return True
 
-    def publish_alibaba(_db, _group, origin):
+    def publish_alibaba(_db, _group, origin, **_kwargs):
         alibaba_output.source_current_origin_id = origin.id
         alibaba_output.last_error = None
         return True

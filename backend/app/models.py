@@ -292,6 +292,28 @@ class FailoverGroup(Base, TimestampMixin):
     )
 
     @property
+    def provider_record_type(self) -> str | None:
+        """Expose the fixed record type owned by a direct provider group."""
+        if self.provider_type != "alibaba_httpdns":
+            return None
+        enabled = [output for output in self.alibaba_httpdns_outputs if output.enabled]
+        considered = enabled or self.alibaba_httpdns_outputs
+        record_types = {str(output.record_type).upper() for output in considered if output.record_type}
+        return next(iter(record_types)) if len(record_types) == 1 else None
+
+    @property
+    def provider_record_type_conflict(self) -> bool:
+        if self.provider_type != "alibaba_httpdns":
+            return False
+        return len(
+            {
+                str(output.record_type).upper()
+                for output in self.alibaba_httpdns_outputs
+                if output.enabled and output.record_type
+            }
+        ) > 1
+
+    @property
     def doh_hostnames(self) -> list[str]:
         import json
 

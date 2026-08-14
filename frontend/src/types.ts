@@ -262,6 +262,8 @@ export type ExternalIpItem = {
 export type FailoverGroup = {
   id: number;
   provider_type: "cloudflare" | "route53" | "alibaba_httpdns";
+  provider_record_type?: string | null;
+  provider_record_type_conflict?: boolean;
   zone_id: number | null;
   collection_id: number | null;
   hostname: string;

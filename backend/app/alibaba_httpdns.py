@@ -5,6 +5,7 @@ import hmac
 import uuid
 import base64
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 
@@ -25,6 +26,10 @@ from .models import (
 )
 from .notifier import send_webhooks
 from .origin_expansion import (
+    DEFAULT_EXPANDED_IP_PRIORITY,
+    DIRECT_PUBLISH_MODE,
+    EXPANDED_PUBLISH_MODE,
+    expanded_ip_priorities,
     healthy_ips,
     published_ips,
     resolved_ips,
@@ -38,6 +43,166 @@ from .security import decrypt_secret
 
 
 ALIBABA_HTTPDNS_API_VERSION = "2015-01-09"
+
+
+class AlibabaOutputConfigurationError(ValueError):
+    """A user-configurable Alibaba output/source incompatibility."""
+
+
+def _origin_supports_alibaba_record_type(record_type: str, origin: Origin) -> bool:
+    record_type = str(record_type or "").upper()
+    if record_type == "CNAME":
+        return origin.target_type == "hostname" and origin.publish_mode != EXPANDED_PUBLISH_MODE
+    if record_type == "A":
+        return origin.target_type == "ipv4" or (
+            origin.target_type == "hostname" and origin.publish_mode == EXPANDED_PUBLISH_MODE
+        )
+    if record_type == "AAAA":
+        return origin.target_type == "ipv6" or (
+            origin.target_type == "hostname" and origin.publish_mode == EXPANDED_PUBLISH_MODE
+        )
+    return False
+
+
+def validate_alibaba_origin_for_outputs(
+    group: FailoverGroup,
+    *,
+    target_type: str,
+    publish_mode: str,
+    enabled: bool,
+) -> None:
+    """Reject a source that could become unpublishable for an attached output."""
+    if not enabled:
+        return
+    candidate = SimpleNamespace(target_type=target_type, publish_mode=publish_mode)
+    incompatible = next(
+        (
+            output
+            for output in group.alibaba_httpdns_outputs
+            if output.enabled and not _origin_supports_alibaba_record_type(output.record_type, candidate)
+        ),
+        None,
+    )
+    if incompatible is not None:
+        raise AlibabaOutputConfigurationError(
+            f"源站类型与阿里云 {str(incompatible.record_type).upper()} 输出不兼容"
+        )
+
+
+def validate_alibaba_output_source(
+    source: FailoverGroup,
+    *,
+    record_type: str,
+    output_id: int | None = None,
+    enabled: bool = True,
+) -> None:
+    """Validate an Alibaba record before linking/enabling it on a source group."""
+    if not enabled:
+        return
+    desired_type = str(record_type or "").upper()
+    enabled_types = {
+        str(output.record_type or "").upper()
+        for output in source.alibaba_httpdns_outputs
+        if output.enabled and output.id != output_id
+    }
+    enabled_types.discard("")
+    if enabled_types and enabled_types != {desired_type}:
+        joined = "/".join(sorted(enabled_types | {desired_type}))
+        raise AlibabaOutputConfigurationError(
+            f"同一故障切换组不能同时绑定不同类型的阿里云输出（当前：{joined}）"
+        )
+    incompatible = next(
+        (
+            origin
+            for origin in source.origins
+            if origin.enabled and not _origin_supports_alibaba_record_type(desired_type, origin)
+        ),
+        None,
+    )
+    if incompatible is not None:
+        raise AlibabaOutputConfigurationError(
+            f"源站 {incompatible.target} 无法发布为阿里云 {desired_type} 记录"
+        )
+
+
+def required_alibaba_origin_publish_mode(
+    group: FailoverGroup,
+    target_type: str,
+    requested_mode: str,
+) -> str:
+    """Return the publish mode required by a direct Alibaba provider group.
+
+    Alibaba's built-in authoritative record has a fixed type.  A hostname target
+    therefore cannot be published as a CNAME when the adopted record is A/AAAA;
+    it must first be expanded and health-checked as IPs.  Conversely, an adopted
+    CNAME must retain the direct hostname.  Legacy shared outputs are deliberately
+    left alone because changing their origin mode would also change their
+    Cloudflare/Route53 output semantics.
+    """
+    record_types = {
+        str(output.record_type or "").upper()
+        for output in group.alibaba_httpdns_outputs
+        if output.enabled
+    }
+    record_types.discard("")
+    if not record_types and group.provider_type == "alibaba_httpdns":
+        inactive_types = {
+            str(output.record_type or "").upper()
+            for output in group.alibaba_httpdns_outputs
+            if output.record_type
+        }
+        if len(inactive_types) == 1:
+            record_types = inactive_types
+    if not record_types:
+        return requested_mode
+    if len(record_types) > 1:
+        joined = "/".join(sorted(record_types))
+        raise AlibabaOutputConfigurationError(
+            f"同一故障切换组不能同时绑定不同类型的阿里云输出（当前：{joined}）"
+        )
+    if group.provider_type != "alibaba_httpdns":
+        return DIRECT_PUBLISH_MODE if target_type != "hostname" else requested_mode
+    if target_type != "hostname":
+        return DIRECT_PUBLISH_MODE
+    if record_types == {"CNAME"}:
+        return DIRECT_PUBLISH_MODE
+    if record_types.intersection({"A", "AAAA"}):
+        return EXPANDED_PUBLISH_MODE
+    return requested_mode
+
+
+def normalize_alibaba_provider_origin_modes(group: FailoverGroup) -> int:
+    """Repair incompatible hostname modes created by older UI/API versions.
+
+    Returning a count lets the failover evaluator force a fresh expanded-IP probe
+    before selecting or publishing the origin in the same evaluation pass.
+    """
+    changed = 0
+    for origin in group.origins:
+        required_mode = required_alibaba_origin_publish_mode(
+            group,
+            origin.target_type,
+            origin.publish_mode or DIRECT_PUBLISH_MODE,
+        )
+        validate_alibaba_origin_for_outputs(
+            group,
+            target_type=origin.target_type,
+            publish_mode=required_mode,
+            enabled=origin.enabled,
+        )
+        if origin.publish_mode == required_mode:
+            continue
+        origin.publish_mode = required_mode
+        origin.status = "unknown"
+        origin.last_checked_at = None
+        origin.last_rtt_ms = None
+        origin.last_error = "阿里云记录类型已自动匹配，等待重新检测源站"
+        origin.probe_states.clear()
+        set_resolved_ips(origin, [])
+        set_healthy_ips(origin, [])
+        set_published_ips(origin, [])
+        changed += 1
+    return changed
 
 
 def _rpc_quote(value: object) -> str:
@@ -564,6 +729,21 @@ def _shared_group_value(group: AlibabaHttpDnsGroup, origin: Origin) -> str:
         if origin.target_type != "hostname" or origin.publish_mode == "expanded":
             raise RuntimeError("Alibaba HTTPDNS CNAME output requires a direct hostname origin")
         return origin.target
+    if origin.target_type == "hostname" and origin.publish_mode == EXPANDED_PUBLISH_MODE:
+        family = 4 if group.record_type.upper() == "A" else 6
+        candidates = resolved_ips(origin) if origin.ignore_health_check else healthy_ips(origin)
+        candidates = [value for value in candidates if ipaddress.ip_address(value).version == family]
+        if group.last_published_value in candidates:
+            return str(group.last_published_value)
+        priorities = expanded_ip_priorities(origin)
+        if candidates:
+            return sorted(
+                candidates,
+                key=lambda value: (
+                    priorities.get(value, DEFAULT_EXPANDED_IP_PRIORITY),
+                    ipaddress.ip_address(value),
+                ),
+            )[0]
     records = desired_origin_records(origin)
     values = records.get(group.record_type.upper()) or []
     if not values:
@@ -580,7 +760,16 @@ def _sync_alibaba_output(
     origin: Origin,
     *,
     force_consistency: bool = False,
+    origin_modes_normalized: bool = False,
 ) -> bool:
+    # This function is also called by the Alibaba-output reconciliation endpoint,
+    # outside the generic failover evaluator.  Normalize here as a second entry-
+    # point guard so enabling or manually reconciling an old A/AAAA rule cannot
+    # bypass the automatic direct-hostname migration.
+    if not origin_modes_normalized and normalize_alibaba_provider_origin_modes(source):
+        from .health import run_local_checks
+
+        run_local_checks(db, group_id=source.id, include_all=True)
     now = datetime.utcnow()
     value = _shared_group_value(output, origin)
     origin_changed = output.source_current_origin_id != origin.id
@@ -625,8 +814,13 @@ def sync_group_alibaba_outputs(
     origin: Origin,
     *,
     force_consistency: bool = False,
+    origin_modes_normalized: bool = False,
 ) -> bool:
     """Publish every enabled Alibaba binding independently."""
+    if not origin_modes_normalized and normalize_alibaba_provider_origin_modes(source):
+        from .health import run_local_checks
+
+        run_local_checks(db, group_id=source.id, include_all=True)
     changed = False
     for output in source.alibaba_httpdns_outputs:
         if not output.enabled:
@@ -638,6 +832,7 @@ def sync_group_alibaba_outputs(
                 output,
                 origin,
                 force_consistency=force_consistency,
+                origin_modes_normalized=True,
             ) or changed
         except Exception as exc:
             output.last_error = str(exc)
@@ -807,6 +1002,24 @@ def evaluate_alibaba_httpdns_groups(
                 switched += int(origin_changed)
             elif group.last_error == "没有可用的健康源站":
                 group.last_error = None
+            if commit_per_group:
+                db.commit()
+        except AlibabaOutputConfigurationError as exc:
+            message = f"阿里云输出配置冲突：{exc}"
+            source = group.source_group
+            should_notify = source.last_error != message if source is not None else previous_error != str(exc)
+            if source is not None:
+                source.last_error = message
+            group.last_error = str(exc)
+            if should_notify:
+                payload = {
+                    "provider": "alibaba_httpdns",
+                    "group_id": source.id if source is not None else group.id,
+                    "output_id": group.id,
+                    "error": str(exc),
+                }
+                add_event(db, "alibaba_httpdns.configuration_error", "error", message, payload)
+                send_webhooks(db, "alibaba_httpdns.configuration_error", payload)
             if commit_per_group:
                 db.commit()
         except Exception as exc:
