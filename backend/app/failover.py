@@ -11,7 +11,8 @@ from .doh import sync_group_doh_endpoint
 from .events import add_event
 from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, PROBE_MODE_CHINA_ONLY, origin_probe_mode, run_local_checks
 from .integrations import AutoIpChangeGuard, trigger_ip_change_for_origin
-from .models import DnsRecord, FailoverGroup, FailoverHostname, Origin, Zone
+from .alibaba_httpdns import sync_group_alibaba_outputs
+from .models import AlibabaHttpDnsGroup, AwsRoute53Output, DnsRecord, FailoverGroup, FailoverHostname, Origin, Zone
 from .notifier import send_webhooks
 from .origin_expansion import (
     DIRECT_PUBLISH_MODE,
@@ -22,6 +23,7 @@ from .origin_expansion import (
     set_published_ips,
 )
 from .runtime_settings import get_runtime_settings
+from .route53 import sync_group_route53_outputs
 from .security import decrypt_secret
 from .sync import MANAGED_RECORD_TYPES, sync_zone_records
 from .time_routing import is_time_rule_active
@@ -32,7 +34,12 @@ logger = logging.getLogger(__name__)
 MANAGED_RECORD_COMMENT_PREFIX = "managed by cloudflare-dns-failover"
 NO_HEALTHY_ORIGIN_MESSAGE = "没有可用的健康源站"
 WAITING_FOR_PROBES_MESSAGE = "等待源站探测结果"
-RECOVERABLE_GROUP_ERRORS = {NO_HEALTHY_ORIGIN_MESSAGE, WAITING_FOR_PROBES_MESSAGE}
+NO_OUTPUT_CHANNEL_MESSAGE = "未启用任何输出通道"
+RECOVERABLE_GROUP_ERRORS = {
+    NO_HEALTHY_ORIGIN_MESSAGE,
+    WAITING_FOR_PROBES_MESSAGE,
+    NO_OUTPUT_CHANNEL_MESSAGE,
+}
 
 
 class DnsPublishError(ValueError):
@@ -559,6 +566,8 @@ def evaluate_failover_groups(
             selectinload(FailoverGroup.hostnames).selectinload(FailoverHostname.zone),
             selectinload(FailoverGroup.zone),
             selectinload(FailoverGroup.time_rule),
+            selectinload(FailoverGroup.route53_outputs).selectinload(AwsRoute53Output.credential),
+            selectinload(FailoverGroup.alibaba_httpdns_outputs).selectinload(AlibabaHttpDnsGroup.credential),
         )
         .filter(FailoverGroup.enabled.is_(True))
     )
@@ -652,6 +661,14 @@ def _evaluate_single_group(
             add_event(db, "failover.no_healthy_origin", "error", f"{group.hostname} 没有可用的健康源站", payload)
             send_webhooks(db, "failover.no_healthy_origin", payload)
         return False
+    route53_enabled = any(output.enabled for output in group.route53_outputs)
+    alibaba_enabled = any(output.enabled for output in group.alibaba_httpdns_outputs)
+    if not group.cloudflare_publish_enabled and not group.doh_enabled and not route53_enabled and not alibaba_enabled:
+        # Zero-output groups are valid staging configurations, but they must not
+        # look like a successfully publishing healthy group. Keep the selection
+        # unchanged and surface the reason until an output is attached.
+        group.last_error = NO_OUTPUT_CHANNEL_MESSAGE
+        return False
     group.no_healthy_notified_at = None
     if group.last_error in RECOVERABLE_GROUP_ERRORS:
         group.last_error = None
@@ -660,6 +677,16 @@ def _evaluate_single_group(
         # ownership. DoH errors live on the endpoint itself.
         group.last_error = None
     if desired.id == group.current_origin_id and not group.last_error:
+        if any(output.enabled for output in group.route53_outputs):
+            # This is intentionally metadata-only in steady state: no Route 53
+            # read/write occurs when the selected origin and values still match.
+            # It does, however, publish immediately when azpanel changed the IP
+            # of the already-selected Origin.
+            sync_group_route53_outputs(db, group, desired)
+        if alibaba_enabled:
+            # Auto-IP bindings can change the value of the already-selected
+            # origin, so provider outputs must compare their metadata every tick.
+            sync_group_alibaba_outputs(db, group, desired)
         if not group.cloudflare_publish_enabled:
             # DoH reconciliation has its own revision-aware scheduler. When this
             # group does not own the public record, do not even read Cloudflare.
@@ -743,6 +770,22 @@ def _evaluate_single_group(
             payload = {"group_id": group.id, "hostname": failed_hostname, "error": message}
             add_event(db, "dns.publish_failed", "error", f"{group.hostname} 发布 DNS 失败: {message}", payload)
             send_webhooks(db, "dns.publish_failed", payload)
+        route53_succeeded = False
+        if route53_enabled:
+            sync_group_route53_outputs(db, group, desired)
+            route53_succeeded = any(
+                output.current_origin_id == desired.id and not output.last_error
+                for output in group.route53_outputs
+                if output.enabled
+            )
+        alibaba_succeeded = False
+        if alibaba_enabled:
+            sync_group_alibaba_outputs(db, group, desired)
+            alibaba_succeeded = any(
+                output.source_current_origin_id == desired.id and not output.last_error
+                for output in group.alibaba_httpdns_outputs
+                if output.enabled
+            )
         if group.doh_enabled:
             # Output channels are independent. A temporary Cloudflare failure
             # must not keep private DoH clients on a failed real origin.
@@ -774,12 +817,39 @@ def _evaluate_single_group(
                 add_event(db, "doh.switched", "info", f"{group.hostname} DoH switched to {desired.target}", switch_payload)
                 send_webhooks(db, "doh.switched", switch_payload)
                 return desired.id != previous_origin_id
+            if route53_succeeded or alibaba_succeeded:
+                # At least one independent provider accepted the new origin. The
+                # group's selected state must reflect what clients already receive,
+                # even when both Cloudflare and the optional DoH snapshot failed.
+                group.current_origin_id = desired.id
+                group.last_switch_at = now
+                return desired.id != previous_origin_id
             group.current_origin_id = previous_origin_id
+        elif route53_succeeded or alibaba_succeeded:
+            group.current_origin_id = desired.id
+            group.last_switch_at = now
+            return desired.id != old_origin_id
         return False
 
     retrying_cloudflare = old_origin_id == desired.id and bool(group.last_error)
     group.current_origin_id = desired.id
     db.flush()
+    route53_succeeded = False
+    if route53_enabled:
+        sync_group_route53_outputs(db, group, desired)
+        route53_succeeded = any(
+            output.current_origin_id == desired.id and not output.last_error
+            for output in group.route53_outputs
+            if output.enabled
+        )
+    alibaba_succeeded = False
+    if alibaba_enabled:
+        sync_group_alibaba_outputs(db, group, desired)
+        alibaba_succeeded = any(
+            output.source_current_origin_id == desired.id and not output.last_error
+            for output in group.alibaba_httpdns_outputs
+            if output.enabled
+        )
     doh_succeeded = (
         True
         if retrying_cloudflare and group.doh_enabled
@@ -787,7 +857,14 @@ def _evaluate_single_group(
         if group.doh_enabled
         else False
     )
-    if not group.cloudflare_publish_enabled and not doh_succeeded:
+    if not group.cloudflare_publish_enabled and not doh_succeeded and not route53_succeeded and not alibaba_succeeded:
+        output_errors = [
+            output.last_error
+            for output in [*group.route53_outputs, *group.alibaba_httpdns_outputs]
+            if output.enabled and output.last_error
+        ]
+        if output_errors:
+            group.last_error = f"Provider publish failed: {output_errors[0]}"
         group.current_origin_id = old_origin_id
         return False
     group.last_switch_at = now
@@ -796,7 +873,13 @@ def _evaluate_single_group(
         _consistency_checked_at[group.id] = now
     # Cloudflare and DoH are independent outputs. They share the health decision,
     # while a Cloudflare-disabled group leaves its existing public decoy untouched.
-    published_hostnames = (record or {}).get("hostnames") or group.doh_hostnames or [group.hostname]
+    published_hostnames = (
+        (record or {}).get("hostnames")
+        or group.doh_hostnames
+        or [output.hostname for output in group.route53_outputs if output.enabled]
+        or [f"{output.rr}.{output.zone_name}".replace("@.", "") for output in group.alibaba_httpdns_outputs if output.enabled]
+        or [group.hostname]
+    )
     hostname_label = ", ".join(str(item) for item in published_hostnames)
     switch_reason = selection.switch_reason
     old_origin = next((origin for origin in group.origins if origin.id == old_origin_id), None)
@@ -817,8 +900,15 @@ def _evaluate_single_group(
         "time_rule_id": selection.time_rule_id,
     }
     if record is None:
-        add_event(db, "doh.switched", "info", f"{group.hostname} DoH switched to {desired.target}", payload)
-        send_webhooks(db, "doh.switched", payload)
+        event_type = (
+            "doh.switched"
+            if group.doh_enabled
+            else "route53.switched"
+            if route53_enabled
+            else "alibaba_httpdns.switched"
+        )
+        add_event(db, event_type, "info", f"{group.hostname} private DNS switched to {desired.target}", payload)
+        send_webhooks(db, event_type, payload)
         return old_origin_id != desired.id
     event_type = "dns.consistency_repaired" if retrying_cloudflare else "dns.switched"
     message = (

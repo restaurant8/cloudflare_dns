@@ -100,6 +100,14 @@ class AlibabaHttpDnsGroup(Base, TimestampMixin):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    credential_id: Mapped[int | None] = mapped_column(
+        ForeignKey("alibaba_httpdns_credentials.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    source_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("failover_groups.id", ondelete="SET NULL"),
+        index=True,
+    )
     remote_account_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
     account_name: Mapped[str] = mapped_column(String(160), nullable=False)
     zone_id: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
@@ -114,7 +122,11 @@ class AlibabaHttpDnsGroup(Base, TimestampMixin):
     remark: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     min_switch_interval_seconds: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
+    # Legacy standalone Alibaba candidates and unified failover Origins use
+    # independent id spaces. Never store a FailoverGroup Origin id in this
+    # legacy field; source_current_origin_id tracks shared-output state.
     current_origin_id: Mapped[int | None] = mapped_column(Integer)
+    source_current_origin_id: Mapped[int | None] = mapped_column(Integer)
     last_switch_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_consistency_check_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -123,6 +135,14 @@ class AlibabaHttpDnsGroup(Base, TimestampMixin):
 
     origins: Mapped[list["AlibabaHttpDnsOrigin"]] = relationship(
         "AlibabaHttpDnsOrigin", back_populates="group", cascade="all, delete-orphan"
+    )
+    credential: Mapped["AlibabaHttpDnsCredential | None"] = relationship(
+        "AlibabaHttpDnsCredential",
+        back_populates="outputs",
+    )
+    source_group: Mapped["FailoverGroup | None"] = relationship(
+        "FailoverGroup",
+        back_populates="alibaba_httpdns_outputs",
     )
 
 
@@ -175,10 +195,39 @@ class AlibabaHttpDnsAccountState(Base, TimestampMixin):
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class AlibabaHttpDnsCredential(Base, TimestampMixin):
+    """Alibaba Cloud credential owned by cloudflare_dns itself.
+
+    AzPanel remains an optional machine-IP rotation provider; it is deliberately
+    not part of this credential or the HTTPDNS publication path.
+    """
+
+    __tablename__ = "alibaba_httpdns_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False)
+    access_key_id_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    access_key_secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    region: Mapped[str] = mapped_column(String(32), default="cn-hangzhou", nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(255), default="alidns.aliyuncs.com", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    outputs: Mapped[list["AlibabaHttpDnsGroup"]] = relationship(
+        "AlibabaHttpDnsGroup",
+        back_populates="credential",
+    )
+
+    @property
+    def secret_configured(self) -> bool:
+        return bool(self.access_key_id_encrypted and self.access_key_secret_encrypted)
+
+
 class FailoverCollection(Base, TimestampMixin):
     __tablename__ = "failover_collections"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider_type: Mapped[str] = mapped_column(String(32), default="cloudflare", index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False)
 
     groups: Mapped[list["FailoverGroup"]] = relationship("FailoverGroup", back_populates="collection")
@@ -194,7 +243,13 @@ class FailoverGroup(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint("zone_id", "hostname", name="uq_failover_group_zone_hostname"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    zone_id: Mapped[int] = mapped_column(ForeignKey("zones.id", ondelete="CASCADE"), nullable=False)
+    provider_type: Mapped[str] = mapped_column(
+        String(32),
+        default="cloudflare",
+        index=True,
+        nullable=False,
+    )
+    zone_id: Mapped[int | None] = mapped_column(ForeignKey("zones.id", ondelete="CASCADE"), nullable=True)
     collection_id: Mapped[int | None] = mapped_column(ForeignKey("failover_collections.id", ondelete="SET NULL"))
     hostname: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
     ttl: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
@@ -213,7 +268,7 @@ class FailoverGroup(Base, TimestampMixin):
     doh_endpoint_id: Mapped[int | None] = mapped_column(ForeignKey("doh_endpoints.id", ondelete="SET NULL"))
     doh_hostnames_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
 
-    zone: Mapped["Zone"] = relationship("Zone", back_populates="groups")
+    zone: Mapped["Zone | None"] = relationship("Zone", back_populates="groups")
     collection: Mapped["FailoverCollection | None"] = relationship("FailoverCollection", back_populates="groups")
     origins: Mapped[list["Origin"]] = relationship("Origin", back_populates="group", cascade="all, delete-orphan")
     hostnames: Mapped[list["FailoverHostname"]] = relationship("FailoverHostname", back_populates="group", cascade="all, delete-orphan")
@@ -224,6 +279,17 @@ class FailoverGroup(Base, TimestampMixin):
         uselist=False,
     )
     doh_endpoint: Mapped["DohEndpoint | None"] = relationship("DohEndpoint", back_populates="groups")
+    route53_outputs: Mapped[list["AwsRoute53Output"]] = relationship(
+        "AwsRoute53Output",
+        back_populates="group",
+        cascade="all, delete-orphan",
+    )
+    alibaba_httpdns_outputs: Mapped[list["AlibabaHttpDnsGroup"]] = relationship(
+        "AlibabaHttpDnsGroup",
+        back_populates="source_group",
+        foreign_keys="AlibabaHttpDnsGroup.source_group_id",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def doh_hostnames(self) -> list[str]:
@@ -240,6 +306,12 @@ class DohEndpoint(Base, TimestampMixin):
     __tablename__ = "doh_endpoints"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider_type: Mapped[str] = mapped_column(
+        String(32),
+        default="cloudflare",
+        index=True,
+        nullable=False,
+    )
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     base_url: Mapped[str] = mapped_column(String(500), nullable=False)
     sync_path: Mapped[str] = mapped_column(String(255), default="/_admin/doh-sync", nullable=False)
@@ -261,10 +333,90 @@ class DohEndpoint(Base, TimestampMixin):
         back_populates="endpoint",
         cascade="all, delete-orphan",
     )
+    route53_outputs: Mapped[list["AwsRoute53Output"]] = relationship(
+        "AwsRoute53Output",
+        back_populates="doh_endpoint",
+    )
 
     @property
     def hmac_secret_configured(self) -> bool:
         return bool(self.hmac_secret_encrypted)
+
+
+class AwsRoute53Credential(Base, TimestampMixin):
+    __tablename__ = "aws_route53_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False)
+    access_key_id_encrypted: Mapped[str | None] = mapped_column(Text)
+    secret_access_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    session_token_encrypted: Mapped[str | None] = mapped_column(Text)
+    region: Mapped[str] = mapped_column(String(32), default="ap-east-1", nullable=False)
+    use_instance_role: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    outputs: Mapped[list["AwsRoute53Output"]] = relationship(
+        "AwsRoute53Output",
+        back_populates="credential",
+    )
+
+    @property
+    def secret_configured(self) -> bool:
+        return bool(
+            self.use_instance_role
+            or (self.access_key_id_encrypted and self.secret_access_key_encrypted)
+        )
+
+
+class AwsRoute53Output(Base, TimestampMixin):
+    """Route 53 private-zone publisher attached to the existing failover core."""
+
+    __tablename__ = "aws_route53_outputs"
+    __table_args__ = (
+        UniqueConstraint(
+            "credential_id",
+            "hosted_zone_id",
+            "hostname",
+            name="uq_aws_route53_output_record",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("failover_groups.id", ondelete="CASCADE"), nullable=False)
+    credential_id: Mapped[int] = mapped_column(
+        ForeignKey("aws_route53_credentials.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    doh_endpoint_id: Mapped[int] = mapped_column(
+        ForeignKey("doh_endpoints.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    hosted_zone_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    hosted_zone_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    hostname: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    ttl: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    current_origin_id: Mapped[int | None] = mapped_column(Integer)
+    last_record_type: Mapped[str | None] = mapped_column(String(16))
+    last_ttl: Mapped[int | None] = mapped_column(Integer)
+    last_values_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    last_published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_consistency_check_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    group: Mapped["FailoverGroup"] = relationship("FailoverGroup", back_populates="route53_outputs")
+    credential: Mapped["AwsRoute53Credential"] = relationship("AwsRoute53Credential", back_populates="outputs")
+    doh_endpoint: Mapped["DohEndpoint"] = relationship("DohEndpoint", back_populates="route53_outputs")
+
+    @property
+    def last_values(self) -> list[str]:
+        import json
+
+        try:
+            values = json.loads(self.last_values_json or "[]")
+        except (TypeError, ValueError):
+            values = []
+        return [str(value) for value in values if value]
 
 
 class DohFailoverGroup(Base, TimestampMixin):
@@ -295,8 +447,6 @@ class DohFailoverGroup(Base, TimestampMixin):
         back_populates="group",
         cascade="all, delete-orphan",
     )
-
-
 class DohFailoverOrigin(Base, TimestampMixin):
     __tablename__ = "doh_failover_origins"
     __table_args__ = (UniqueConstraint("group_id", "target", "port", name="uq_doh_failover_origin_target_port"),)

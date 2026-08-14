@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Small authoritative DoH allowlist service for a CloudFront VPC origin.
+"""Private DoH allowlist service for a CloudFront VPC origin.
 
-It intentionally performs no recursive DNS lookups. Records are atomically
-replaced by cloudflare_dns through a timestamped, nonce-protected HMAC request.
+Static records are answered authoritatively. Route 53-backed allowlist entries
+are forwarded to the VPC Resolver, so private hosted zones remain the source of
+truth. Configuration is atomically replaced by cloudflare_dns through a
+timestamped, nonce-protected HMAC request.
 """
 
 import base64
@@ -11,6 +13,7 @@ import hmac
 import ipaddress
 import json
 import os
+import socket
 import struct
 import tempfile
 import threading
@@ -29,9 +32,12 @@ MAX_ADMIN_SKEW_SECONDS = int(os.environ.get("DOH_MAX_ADMIN_SKEW_SECONDS", "300")
 MAX_BODY_BYTES = 1024 * 1024
 TYPE_TO_CODE = {"A": 1, "AAAA": 28}
 CODE_TO_TYPE = {value: key for key, value in TYPE_TO_CODE.items()}
+VPC_RESOLVER = os.environ.get("DOH_VPC_RESOLVER", "169.254.169.253")
+VPC_RESOLVER_TIMEOUT_SECONDS = float(os.environ.get("DOH_VPC_RESOLVER_TIMEOUT_SECONDS", "5"))
 
 _lock = threading.RLock()
 _snapshot = {"version": 1, "revision": "empty", "records": []}
+_record_index: dict[str, dict] = {}
 _seen_nonces: dict[str, int] = {}
 
 
@@ -40,18 +46,17 @@ def normalize_name(value: str) -> str:
 
 
 def load_snapshot() -> None:
-    global _snapshot
     if not CONFIG_PATH.exists():
         return
     data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     validate_snapshot(data)
-    with _lock:
-        _snapshot = data
+    activate_snapshot(data)
 
 
 def validate_snapshot(data: object) -> None:
-    if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("records"), list):
+    if not isinstance(data, dict) or data.get("version") not in {1, 2} or not isinstance(data.get("records"), list):
         raise ValueError("invalid snapshot envelope")
+    version = int(data["version"])
     seen: set[tuple[str, str, str]] = set()
     for record in data["records"]:
         if not isinstance(record, dict):
@@ -59,8 +64,16 @@ def validate_snapshot(data: object) -> None:
         name = normalize_name(str(record.get("name") or ""))
         record_type = str(record.get("type") or "").upper()
         value = str(record.get("value") or "").strip()
+        source = str(record.get("source") or "").strip().lower()
         if not name or record_type not in TYPE_TO_CODE:
             raise ValueError("unsupported record name or type")
+        if source and source != "vpc_resolver":
+            raise ValueError("unsupported record source")
+        if source == "vpc_resolver":
+            if version != 2:
+                raise ValueError("VPC Resolver records require snapshot version 2")
+            if record_type != "A" or value != "0.0.0.0":
+                raise ValueError("invalid VPC Resolver allowlist marker")
         expected = 4 if record_type == "A" else 6
         if ipaddress.ip_address(value).version != expected:
             raise ValueError(f"invalid {record_type} value")
@@ -71,6 +84,29 @@ def validate_snapshot(data: object) -> None:
         ttl = int(record.get("ttl", 60))
         if ttl < 0 or ttl > 86400:
             raise ValueError("invalid TTL")
+
+
+def build_record_index(data: dict) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    for raw in data.get("records", []):
+        record = dict(raw)
+        name = normalize_name(str(record["name"]))
+        record["name"] = name
+        record["type"] = str(record["type"]).upper()
+        entry = index.setdefault(name, {"resolver_backed": False, "by_type": {}})
+        entry["resolver_backed"] = entry["resolver_backed"] or (
+            str(record.get("source") or "").lower() == "vpc_resolver"
+        )
+        entry["by_type"].setdefault(record["type"], []).append(record)
+    return index
+
+
+def activate_snapshot(data: dict) -> None:
+    global _snapshot, _record_index
+    index = build_record_index(data)
+    with _lock:
+        _snapshot = data
+        _record_index = index
 
 
 def persist_snapshot(data: dict) -> None:
@@ -84,18 +120,13 @@ def persist_snapshot(data: dict) -> None:
     os.chmod(CONFIG_PATH, 0o600)
 
 
-def current_records(name: str, query_type: str) -> tuple[bool, list[dict]]:
+def current_records(name: str, query_type: str) -> tuple[bool, list[dict], bool]:
     normalized = normalize_name(name)
     with _lock:
-        records = list(_snapshot.get("records", []))
-    allowed = any(normalize_name(str(item["name"])) == normalized for item in records)
-    answers = [
-        item
-        for item in records
-        if normalize_name(str(item["name"])) == normalized
-        and str(item["type"]).upper() == query_type
-    ]
-    return allowed, answers
+        entry = _record_index.get(normalized)
+        if entry is None:
+            return False, [], False
+        return True, list(entry["by_type"].get(query_type, [])), bool(entry["resolver_backed"])
 
 
 def encode_name(name: str) -> bytes:
@@ -163,10 +194,48 @@ def answer_rdata(record_type: str, value: str) -> bytes:
     return encode_name(value)
 
 
+def recv_exact(sock: socket.socket, length: int) -> bytes:
+    data = b""
+    while len(data) < length:
+        block = sock.recv(length - len(data))
+        if not block:
+            raise OSError("unexpected EOF from VPC Resolver")
+        data += block
+    return data
+
+
+def validate_vpc_dns_response(query: bytes, response: bytes) -> bytes:
+    if len(query) < 12 or len(response) < 12:
+        raise ValueError("truncated DNS message from VPC Resolver")
+    if response[:2] != query[:2]:
+        raise ValueError("VPC Resolver transaction ID mismatch")
+    if not struct.unpack("!H", response[2:4])[0] & 0x8000:
+        raise ValueError("VPC Resolver returned a non-response message")
+    return response
+
+
+def resolve_vpc_dns(message: bytes) -> bytes:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(VPC_RESOLVER_TIMEOUT_SECONDS)
+        # A connected UDP socket lets the kernel discard datagrams that did not
+        # originate from the configured VPC Resolver address and port.
+        sock.connect((VPC_RESOLVER, 53))
+        sock.send(message)
+        response = validate_vpc_dns_response(message, sock.recv(65535))
+    if struct.unpack("!H", response[2:4])[0] & 0x0200:
+        with socket.create_connection((VPC_RESOLVER, 53), timeout=VPC_RESOLVER_TIMEOUT_SECONDS) as sock:
+            sock.sendall(struct.pack("!H", len(message)) + message)
+            response_length = struct.unpack("!H", recv_exact(sock, 2))[0]
+            response = validate_vpc_dns_response(message, recv_exact(sock, response_length))
+    return response
+
+
 def dns_wire_response(message: bytes) -> bytes:
     message_id, query_flags, question, name, query_code = parse_dns_question(message)
     query_type = CODE_TO_TYPE.get(query_code, str(query_code))
-    allowed, records = current_records(name, query_type)
+    allowed, records, resolver_backed = current_records(name, query_type)
+    if allowed and resolver_backed:
+        return resolve_vpc_dns(message)
     rcode = 0 if allowed else 5
     answers = bytearray()
     if allowed:
@@ -183,7 +252,14 @@ def dns_wire_response(message: bytes) -> bytes:
 
 def json_response(name: str, query_type: str) -> dict:
     query_type = query_type.upper()
-    allowed, records = current_records(name, query_type)
+    allowed, records, resolver_backed = current_records(name, query_type)
+    if allowed and resolver_backed:
+        query_code = TYPE_TO_CODE.get(query_type)
+        if query_code is None:
+            raise ValueError("only A and AAAA JSON questions are supported")
+        query = struct.pack("!HHHHHH", int.from_bytes(os.urandom(2), "big"), 0x0100, 1, 0, 0, 0)
+        query += encode_name(name) + struct.pack("!HH", query_code, 1)
+        return dns_message_to_json(resolve_vpc_dns(query))
     result = {
         "Status": 0 if allowed else 5,
         "TC": False,
@@ -204,6 +280,58 @@ def json_response(name: str, query_type: str) -> dict:
             }
             for record in records
         ]
+    return result
+
+
+def dns_message_to_json(message: bytes) -> dict:
+    if len(message) < 12:
+        raise ValueError("truncated response from VPC Resolver")
+    _, flags, question_count, answer_count, _, _ = struct.unpack("!HHHHHH", message[:12])
+    offset = 12
+    questions = []
+    for _ in range(question_count):
+        name, offset = read_name(message, offset)
+        if offset + 4 > len(message):
+            raise ValueError("truncated VPC Resolver question")
+        query_type, _ = struct.unpack("!HH", message[offset : offset + 4])
+        offset += 4
+        questions.append({"name": name + ".", "type": query_type})
+    answers = []
+    for _ in range(answer_count):
+        name, offset = read_name(message, offset)
+        if offset + 10 > len(message):
+            raise ValueError("truncated VPC Resolver answer")
+        record_type, record_class, ttl, length = struct.unpack("!HHIH", message[offset : offset + 10])
+        offset += 10
+        if offset + length > len(message):
+            raise ValueError("truncated VPC Resolver RDATA")
+        rdata_offset = offset
+        rdata = message[offset : offset + length]
+        offset += length
+        if record_class != 1:
+            continue
+        if record_type == 1 and length == 4:
+            value = str(ipaddress.ip_address(rdata))
+        elif record_type == 28 and length == 16:
+            value = str(ipaddress.ip_address(rdata))
+        elif record_type == 5:
+            value, _ = read_name(message, rdata_offset)
+            value += "."
+        else:
+            continue
+        answers.append({"name": name + ".", "type": record_type, "TTL": ttl, "data": value})
+    result = {
+        "Status": flags & 0xF,
+        "TC": bool(flags & 0x0200),
+        "RD": bool(flags & 0x0100),
+        "RA": bool(flags & 0x0080),
+        "AA": bool(flags & 0x0400),
+        "AD": bool(flags & 0x0020),
+        "CD": bool(flags & 0x0010),
+        "Question": questions,
+    }
+    if answers:
+        result["Answer"] = answers
     return result
 
 
@@ -237,7 +365,7 @@ def verify_admin(headers, body: bytes) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PrivateDoH/1.0"
+    server_version = "PrivateDoH/2.0"
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"{self.client_address[0]} - {fmt % args}", flush=True)
@@ -293,9 +421,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = json.loads(body.decode("utf-8"))
                 validate_snapshot(data)
                 persist_snapshot(data)
-                global _snapshot
-                with _lock:
-                    _snapshot = data
+                activate_snapshot(data)
                 self.send_json(200, {"ok": True, "revision": data.get("revision"), "record_count": len(data["records"])})
             except PermissionError as exc:
                 self.send_json(401, {"error": str(exc)})

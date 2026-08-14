@@ -54,6 +54,7 @@ def test_snapshot_uses_real_current_origin_not_cloudflare_decoy():
 
     snapshot = build_doh_snapshot(db, endpoint)
 
+    assert snapshot["version"] == 1
     assert snapshot["records"] == [
         {"name": "snejsat.baidu.com", "type": "A", "value": "203.0.113.10", "ttl": 60, "group_id": 1}
     ]
@@ -152,8 +153,17 @@ def test_hostname_origin_is_resolved_to_address_records_not_cname(monkeypatch):
     origin.target = "real-origin.example.net"
     origin.target_type = "hostname"
     db.commit()
-    monkeypatch.setattr("app.doh.resolve_hostname_ips", lambda _hostname: ["203.0.113.20", "2001:db8::20"])
+    monkeypatch.setattr(
+        "app.doh.resolve_hostname_ips_bounded",
+        lambda *_args: ["203.0.113.20", "2001:db8::20"],
+    )
 
+    class Response:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("app.doh.httpx.post", lambda *args, **kwargs: Response())
+    assert sync_doh_endpoint(db, endpoint, force=True) is True
     records = build_doh_snapshot(db, endpoint)["records"]
 
     assert [(item["type"], item["value"]) for item in records] == [
@@ -173,16 +183,33 @@ def test_failed_hostname_refresh_keeps_last_successful_remote_values(monkeypatch
         def raise_for_status(self):
             return None
 
-    monkeypatch.setattr("app.doh.resolve_hostname_ips", lambda _hostname: ["203.0.113.20"])
+    monkeypatch.setattr("app.doh.resolve_hostname_ips_bounded", lambda *_args: ["203.0.113.20"])
     monkeypatch.setattr("app.doh.httpx.post", lambda *args, **kwargs: Response())
     assert sync_doh_endpoint(db, endpoint, force=True) is True
     assert origin.published_ips == ["203.0.113.20"]
 
     monkeypatch.setattr(
-        "app.doh.resolve_hostname_ips",
-        lambda _hostname: (_ for _ in ()).throw(ValueError("NXDOMAIN")),
+        "app.doh.resolve_hostname_ips_bounded",
+        lambda *_args: (_ for _ in ()).throw(ValueError("NXDOMAIN")),
     )
     assert build_doh_snapshot(db, endpoint)["records"][0]["value"] == "203.0.113.20"
+
+
+def test_snapshot_is_pure_and_never_resolves_or_dirties_session(monkeypatch):
+    db = make_session()
+    endpoint, _, origin = setup_endpoint_group(db)
+    origin.target = "real-origin.example.net"
+    origin.target_type = "hostname"
+    origin.resolved_ips_json = '["203.0.113.20"]'
+    origin.published_ips_json = '["203.0.113.10"]'
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.doh.resolve_hostname_ips_bounded",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("snapshot must not resolve")),
+    )
+    assert build_doh_snapshot(db, endpoint)["records"][0]["value"] == "203.0.113.10"
+    assert not db.dirty
 
 
 def test_hostname_conflict_is_rejected_before_endpoint_sync():

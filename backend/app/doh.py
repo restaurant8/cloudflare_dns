@@ -3,9 +3,7 @@ import hmac
 import ipaddress
 import json
 import secrets
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urljoin
@@ -13,13 +11,14 @@ from urllib.parse import urljoin
 import httpx
 from sqlalchemy.orm import Session, selectinload
 
+from .dns_resolution import resolve_hostname_ips_bounded
 from .events import add_event
-from .models import DohEndpoint, DohFailoverGroup, FailoverGroup, Origin
+from .models import AwsRoute53Output, DohEndpoint, DohFailoverGroup, FailoverGroup, Origin
 from .notifier import send_webhooks
 from .origin_expansion import (
     is_expanded_origin,
     published_ips,
-    resolve_hostname_ips,
+    resolved_ips,
     selected_publish_ip,
     set_published_ips,
     set_resolved_ips,
@@ -27,32 +26,7 @@ from .origin_expansion import (
 from .security import decrypt_secret
 
 
-_RESOLVER_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="doh-resolver")
-_RESOLUTION_CACHE: dict[tuple[str, int], tuple[float, list[str]]] = {}
-_RESOLUTION_CACHE_LOCK = threading.Lock()
-_RESOLUTION_CACHE_TTL_SECONDS = 30
-
-
-def resolve_hostname_ips_bounded(hostname: str, timeout_seconds: float) -> list[str]:
-    """Resolve without letting libc DNS block the scheduler indefinitely."""
-    key = (hostname.rstrip(".").lower(), id(resolve_hostname_ips))
-    now = time.monotonic()
-    with _RESOLUTION_CACHE_LOCK:
-        cached = _RESOLUTION_CACHE.get(key)
-        if cached and now - cached[0] < _RESOLUTION_CACHE_TTL_SECONDS:
-            return list(cached[1])
-    future = _RESOLVER_EXECUTOR.submit(resolve_hostname_ips, hostname)
-    try:
-        addresses = future.result(timeout=max(float(timeout_seconds), 0.1))
-    except FutureTimeoutError as exc:
-        future.cancel()
-        raise TimeoutError(f"DNS resolution timed out for {hostname}") from exc
-    with _RESOLUTION_CACHE_LOCK:
-        _RESOLUTION_CACHE[key] = (now, list(addresses))
-    return addresses
-
-
-def _origin_records(origin: Origin, *, resolve_timeout_seconds: float = 3) -> list[tuple[str, str]]:
+def _origin_records(origin: Origin, *, resolved_override: list[str] | None = None) -> list[tuple[str, str]]:
     if is_expanded_origin(origin):
         value = selected_publish_ip(origin)
         if not value:
@@ -62,15 +36,11 @@ def _origin_records(origin: Origin, *, resolve_timeout_seconds: float = 3) -> li
         # Private DoH must be the final source of truth. Returning a CNAME would
         # make the client resolve the target through its (possibly polluted)
         # recursive resolver, so resolve it here and publish address records.
-        try:
-            addresses = resolve_hostname_ips_bounded(origin.target, resolve_timeout_seconds)
-        except Exception:
-            # Keep the last successfully published address set. One transient or
-            # broken hostname must not blank this name or poison the endpoint.
-            addresses = published_ips(origin)
+        # Snapshot construction is deliberately pure. Resolution belongs to the
+        # preparation phase of an actual sync, never to GET /snapshot.
+        addresses = resolved_override if resolved_override is not None else published_ips(origin)
         if not addresses:
             return []
-        set_resolved_ips(origin, addresses)
         return [
             ("A" if ipaddress.ip_address(value).version == 4 else "AAAA", value)
             for value in addresses
@@ -101,14 +71,20 @@ def _endpoint_groups(db: Session, endpoint_id: int) -> list[FailoverGroup]:
     )
 
 
-def build_doh_snapshot(db: Session, endpoint: DohEndpoint) -> dict[str, Any]:
+def build_doh_snapshot(
+    db: Session,
+    endpoint: DohEndpoint,
+    *,
+    legacy_hostname_values: dict[int, list[str]] | None = None,
+) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     owners: dict[str, tuple[str, int]] = {}
     for group in _endpoint_groups(db, endpoint.id):
         origin = next((item for item in group.origins if item.id == group.current_origin_id), None)
         if origin is None or not origin.enabled:
             continue
-        desired_records = _origin_records(origin, resolve_timeout_seconds=min(max(endpoint.timeout_seconds, 1), 5))
+        override = (legacy_hostname_values or {}).get(origin.id)
+        desired_records = _origin_records(origin, resolved_override=override)
         if not desired_records:
             continue
         hostnames = group_doh_hostnames(group)
@@ -166,24 +142,84 @@ def build_doh_snapshot(db: Session, endpoint: DohEndpoint) -> dict[str, Any]:
                     "doh_failover_group_id": group.id,
                 }
             )
+    route53_outputs = (
+        db.query(AwsRoute53Output)
+        .join(AwsRoute53Output.group)
+        .filter(
+            AwsRoute53Output.enabled.is_(True),
+            AwsRoute53Output.doh_endpoint_id == endpoint.id,
+            FailoverGroup.enabled.is_(True),
+        )
+        .order_by(AwsRoute53Output.id)
+        .all()
+    )
+    for output in route53_outputs:
+        normalized_hostname = output.hostname.rstrip(".").lower()
+        previous_owner = owners.get(normalized_hostname)
+        owner = ("route53_output", output.id)
+        if previous_owner is not None and previous_owner != owner:
+            raise ValueError(f"DoH hostname {normalized_hostname} is assigned by {previous_owner} and {owner}")
+        owners[normalized_hostname] = owner
+        # Resolver-backed records are allowlist entries, not authoritative data.
+        # The EC2 service forwards matching questions to the VPC Resolver, where
+        # the Route 53 private hosted zone is the source of truth.
+        records.append(
+            {
+                "name": normalized_hostname,
+                "type": "A",
+                "value": "0.0.0.0",
+                "ttl": output.ttl,
+                "route53_output_id": output.id,
+                "source": "vpc_resolver",
+            }
+        )
     records.sort(
         key=lambda item: (
             item["name"],
             item["type"],
             item.get("group_id", 0),
             item.get("doh_failover_group_id", 0),
+            item.get("route53_output_id", 0),
+            item.get("source", ""),
         )
     )
     canonical_records = json.dumps(records, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     revision = hashlib.sha256(canonical_records.encode("utf-8")).hexdigest()
-    return {"version": 1, "revision": revision, "generated_at": int(time.time()), "records": records}
+    # Version 1 servers treat every entry as authoritative data. A resolver-backed
+    # marker would therefore become a successful 0.0.0.0 answer during a rolling
+    # upgrade. Version 2 makes old EC2 services reject the snapshot and retain
+    # their previous known-good configuration instead.
+    version = 2 if route53_outputs else 1
+    return {"version": version, "revision": revision, "generated_at": int(time.time()), "records": records}
 
 
 def _sync_url(endpoint: DohEndpoint) -> str:
     return urljoin(endpoint.base_url.rstrip("/") + "/", endpoint.sync_path.lstrip("/"))
 
 
-def _remember_successful_legacy_hostname_records(db: Session, payload: dict[str, Any]) -> None:
+def _resolve_legacy_hostname_values(db: Session, endpoint: DohEndpoint) -> dict[int, list[str]]:
+    values: dict[int, list[str]] = {}
+    timeout = min(max(endpoint.timeout_seconds, 1), 5)
+    for group in _endpoint_groups(db, endpoint.id):
+        origin = next((item for item in group.origins if item.id == group.current_origin_id), None)
+        if origin is None or not origin.enabled or origin.target_type != "hostname" or is_expanded_origin(origin):
+            continue
+        try:
+            addresses = resolve_hostname_ips_bounded(origin.target, timeout)
+        except Exception:
+            # A broken legacy rule keeps its persisted last-known-good values and
+            # cannot prevent unrelated records on the endpoint from syncing.
+            continue
+        if addresses:
+            values[origin.id] = addresses
+    return values
+
+
+def _remember_successful_legacy_hostname_records(
+    db: Session,
+    payload: dict[str, Any],
+    resolved_values: dict[int, list[str]],
+) -> None:
     values_by_group: dict[int, list[str]] = {}
     for record in payload.get("records", []):
         group_id = record.get("group_id")
@@ -200,6 +236,8 @@ def _remember_successful_legacy_hostname_records(db: Session, payload: dict[str,
     for group in groups:
         origin = next((item for item in group.origins if item.id == group.current_origin_id), None)
         if origin is not None and origin.target_type == "hostname" and not is_expanded_origin(origin):
+            if origin.id in resolved_values:
+                set_resolved_ips(origin, resolved_values[origin.id])
             set_published_ips(origin, values_by_group[group.id])
 
 
@@ -217,8 +255,10 @@ def sync_doh_endpoint(
         return False
     previous_revision = endpoint.last_revision
     previous_error = endpoint.last_error
+    resolved_values: dict[int, list[str]] = {}
     try:
-        payload = build_doh_snapshot(db, endpoint)
+        resolved_values = _resolve_legacy_hostname_values(db, endpoint)
+        payload = build_doh_snapshot(db, endpoint, legacy_hostname_values=resolved_values)
         if not force and endpoint.last_revision == payload["revision"] and endpoint.last_error is None:
             return False
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -262,7 +302,7 @@ def sync_doh_endpoint(
     endpoint.last_synced_at = now
     endpoint.sync_failure_count = 0
     endpoint.next_sync_retry_at = None
-    _remember_successful_legacy_hostname_records(db, payload)
+    _remember_successful_legacy_hostname_records(db, payload, resolved_values)
     if previous_revision != payload["revision"] or previous_error:
         data = {
             "endpoint_id": endpoint.id,
@@ -295,7 +335,7 @@ def sync_group_doh_endpoint(db: Session, group: FailoverGroup) -> bool:
     if endpoint is None or not endpoint.enabled:
         return False
     db.flush()
-    return sync_doh_endpoint(db, endpoint, force=True)
+    return sync_doh_endpoint(db, endpoint, force=True, ignore_backoff=True)
 
 
 def validate_doh_hostname_conflicts(
@@ -304,6 +344,7 @@ def validate_doh_hostname_conflicts(
     endpoint_id: int,
     hostnames: list[str],
     exclude_group_id: int | None = None,
+    exclude_route53_output_id: int | None = None,
 ) -> None:
     query = (
         db.query(FailoverGroup)
@@ -329,3 +370,13 @@ def validate_doh_hostname_conflicts(
     )
     if independent is not None:
         raise ValueError(f"DoH hostname {independent.hostname} is already assigned to independent DoH group {independent.id}")
+    route53_query = db.query(AwsRoute53Output).filter(
+        AwsRoute53Output.enabled.is_(True),
+        AwsRoute53Output.doh_endpoint_id == endpoint_id,
+        AwsRoute53Output.hostname.in_(wanted),
+    )
+    if exclude_route53_output_id is not None:
+        route53_query = route53_query.filter(AwsRoute53Output.id != exclude_route53_output_id)
+    route53 = route53_query.first()
+    if route53 is not None:
+        raise ValueError(f"DoH hostname {route53.hostname} is already assigned to Route 53 output {route53.id}")

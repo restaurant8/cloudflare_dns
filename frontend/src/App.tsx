@@ -33,7 +33,7 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteAccount, AlibabaHttpDnsRemoteZone, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, DohFailoverGroup, DohFailoverOrigin, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SynexVmSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
+import type { Agent, AlibabaHttpDnsCredential, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteZone, AwsRoute53Credential, AwsRoute53Output, AwsRoute53PrivateZone, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, DohFailoverGroup, DohFailoverOrigin, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SynexVmSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
 import {
   Sidebar,
   SidebarContent,
@@ -53,7 +53,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { ThemeToggle } from "@/components/theme-toggle";
 
-type Section = "overview" | "cloudflare" | "records" | "groups" | "doh" | "dohFailover" | "alibabaHttpDns" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
+type Section = "overview" | "cloudflare" | "records" | "groups" | "doh" | "dohFailover" | "awsRoute53" | "alibabaHttpDns" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
 type ProbeMode = "default" | "local_only" | "china_only" | "any";
 type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
@@ -94,9 +94,10 @@ const nav: { id: Section; label: string; icon: typeof Activity }[] = [
   { id: "overview", label: "总览", icon: Activity },
   { id: "cloudflare", label: "Cloudflare", icon: KeyRound },
   { id: "records", label: "解析记录", icon: Cloud },
-  { id: "groups", label: "故障切换", icon: ListRestart },
+  { id: "groups", label: "Cloudflare 故障切换", icon: ListRestart },
   { id: "doh", label: "DoH 服务", icon: ShieldCheck },
-  { id: "dohFailover", label: "DoH 故障切换", icon: ListRestart },
+  { id: "dohFailover", label: "旧版静态 DoH", icon: ListRestart },
+  { id: "awsRoute53", label: "AWS DoH 故障切换", icon: Router },
   { id: "alibabaHttpDns", label: "阿里云 HTTPDNS", icon: Router },
   { id: "targetPool", label: "IP 池子", icon: Server },
   { id: "externalIps", label: "外部 IP", icon: Globe2 },
@@ -508,6 +509,9 @@ export default function App() {
   const [groups, setGroups] = useState<FailoverGroup[]>([]);
   const [dohEndpoints, setDohEndpoints] = useState<DohEndpoint[]>([]);
   const [dohFailoverGroups, setDohFailoverGroups] = useState<DohFailoverGroup[]>([]);
+  const [awsRoute53Credentials, setAwsRoute53Credentials] = useState<AwsRoute53Credential[]>([]);
+  const [awsRoute53Outputs, setAwsRoute53Outputs] = useState<AwsRoute53Output[]>([]);
+  const [alibabaHttpDnsCredentials, setAlibabaHttpDnsCredentials] = useState<AlibabaHttpDnsCredential[]>([]);
   const [alibabaHttpDnsGroups, setAlibabaHttpDnsGroups] = useState<AlibabaHttpDnsGroup[]>([]);
   const [targetPool, setTargetPool] = useState<TargetPoolItem[]>([]);
   const [externalIpSources, setExternalIpSources] = useState<ExternalIpSource[]>([]);
@@ -545,7 +549,7 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextDohEndpoints, nextDohFailoverGroups, nextAlibabaHttpDnsGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelSettings, nextSynexVmSettings, nextAzPanelResources, nextIpChangeJobs, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextDohEndpoints, nextDohFailoverGroups, nextAwsCredentials, nextAwsOutputs, nextAlibabaHttpDnsCredentials, nextAlibabaHttpDnsGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelSettings, nextSynexVmSettings, nextAzPanelResources, nextIpChangeJobs, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
@@ -553,6 +557,9 @@ export default function App() {
       apiFetch<FailoverGroup[]>("/api/groups", activeToken),
       apiFetch<DohEndpoint[]>("/api/doh/endpoints", activeToken),
       apiFetch<DohFailoverGroup[]>("/api/doh-failover/groups", activeToken),
+      apiFetch<AwsRoute53Credential[]>("/api/route53/credentials", activeToken),
+      apiFetch<AwsRoute53Output[]>("/api/route53/outputs", activeToken),
+      apiFetch<AlibabaHttpDnsCredential[]>("/api/alibaba-httpdns/credentials", activeToken),
       apiFetch<AlibabaHttpDnsGroup[]>("/api/alibaba-httpdns/groups", activeToken),
       apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
@@ -576,6 +583,9 @@ export default function App() {
     setGroups(nextGroups);
     setDohEndpoints(nextDohEndpoints);
     setDohFailoverGroups(nextDohFailoverGroups);
+    setAwsRoute53Credentials(nextAwsCredentials);
+    setAwsRoute53Outputs(nextAwsOutputs);
+    setAlibabaHttpDnsCredentials(nextAlibabaHttpDnsCredentials);
     setAlibabaHttpDnsGroups(nextAlibabaHttpDnsGroups);
     setTargetPool(nextTargetPool);
     setExternalIpSources(nextExternalIpSources);
@@ -618,7 +628,20 @@ export default function App() {
 
   async function loadAlibabaHttpDnsSection(activeToken = token) {
     if (!activeToken) return;
-    setAlibabaHttpDnsGroups(await apiFetch<AlibabaHttpDnsGroup[]>("/api/alibaba-httpdns/groups", activeToken));
+    const [nextCredentials, nextOutputs, nextGroups, nextCollections, nextAzPanelResources, nextExternalIpItems] = await Promise.all([
+      apiFetch<AlibabaHttpDnsCredential[]>("/api/alibaba-httpdns/credentials", activeToken),
+      apiFetch<AlibabaHttpDnsGroup[]>("/api/alibaba-httpdns/groups", activeToken),
+      apiFetch<FailoverGroup[]>("/api/groups", activeToken),
+      apiFetch<FailoverCollection[]>("/api/groups/collections", activeToken),
+      apiFetch<AzPanelResource[]>("/api/integrations/azpanel/resources", activeToken),
+      apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken)
+    ]);
+    setAlibabaHttpDnsCredentials(nextCredentials);
+    setAlibabaHttpDnsGroups(nextOutputs);
+    setGroups(nextGroups);
+    setFailoverCollections(nextCollections);
+    setAzPanelResources(nextAzPanelResources);
+    setExternalIpItems(nextExternalIpItems);
   }
 
   async function loadRecords(zoneId = selectedZoneId) {
@@ -658,6 +681,17 @@ export default function App() {
       ]);
       setDohEndpoints(nextDohEndpoints);
       setDohFailoverGroups(nextDohFailoverGroups);
+    } else if (current === "awsRoute53") {
+      const [nextCredentials, nextOutputs, nextGroups, nextEndpoints] = await Promise.all([
+        apiFetch<AwsRoute53Credential[]>("/api/route53/credentials", activeToken),
+        apiFetch<AwsRoute53Output[]>("/api/route53/outputs", activeToken),
+        apiFetch<FailoverGroup[]>("/api/groups", activeToken),
+        apiFetch<DohEndpoint[]>("/api/doh/endpoints", activeToken)
+      ]);
+      setAwsRoute53Credentials(nextCredentials);
+      setAwsRoute53Outputs(nextOutputs);
+      setGroups(nextGroups);
+      setDohEndpoints(nextEndpoints);
     } else if (current === "targetPool") {
       setTargetPool(await apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken));
     } else if (current === "externalIps") {
@@ -966,12 +1000,21 @@ export default function App() {
           />
         )}
         {section === "groups" && (
-          <GroupsPanel token={token} collections={failoverCollections} groups={groups} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
+          <GroupsPanel providerType="cloudflare" token={token} collections={failoverCollections.filter((item) => item.provider_type === "cloudflare")} groups={groups.filter((item) => item.provider_type === "cloudflare")} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
         )}
         {section === "doh" && <DohPanel token={token} endpoints={dohEndpoints} act={act} />}
-        {section === "dohFailover" && <DohFailoverPanel token={token} endpoints={dohEndpoints} groups={dohFailoverGroups} cloudflareGroups={groups} act={act} />}
+        {section === "dohFailover" && <DohFailoverPanel token={token} endpoints={dohEndpoints} groups={dohFailoverGroups} cloudflareGroups={groups.filter((item) => item.provider_type === "cloudflare")} act={act} />}
+        {section === "awsRoute53" && (
+          <>
+            <AwsRoute53Panel token={token} credentials={awsRoute53Credentials} outputs={awsRoute53Outputs} endpoints={dohEndpoints} groups={groups.filter((item) => item.provider_type === "route53")} act={act} />
+            <GroupsPanel providerType="route53" token={token} collections={failoverCollections.filter((item) => item.provider_type === "route53")} groups={groups.filter((item) => item.provider_type === "route53")} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
+          </>
+        )}
         {section === "alibabaHttpDns" && (
-          <AlibabaHttpDnsPanel token={token} groups={alibabaHttpDnsGroups} busy={busy} act={actAlibabaHttpDns} />
+          <>
+            <AlibabaHttpDnsPanel token={token} credentials={alibabaHttpDnsCredentials} groups={alibabaHttpDnsGroups} failoverGroups={groups} busy={busy} act={actAlibabaHttpDns} />
+            <GroupsPanel providerType="alibaba_httpdns" token={token} collections={failoverCollections.filter((item) => item.provider_type === "alibaba_httpdns")} groups={groups.filter((item) => item.provider_type === "alibaba_httpdns")} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actAlibabaHttpDns} />
+          </>
         )}
         {section === "targetPool" && (
           <TargetPoolPanel token={token} targetPool={targetPool} groups={groups} act={act} />
@@ -994,6 +1037,293 @@ export default function App() {
         </main>
       </SidebarInset>
     </SidebarProvider>
+  );
+}
+
+function AwsRoute53Panel({
+  token,
+  credentials,
+  outputs,
+  endpoints,
+  groups,
+  act
+}: {
+  token: string;
+  credentials: AwsRoute53Credential[];
+  outputs: AwsRoute53Output[];
+  endpoints: DohEndpoint[];
+  groups: FailoverGroup[];
+  act: ActionRunner;
+}) {
+  const [credential, setCredential] = useState({ name: "AWS Hong Kong Route 53", access_key_id: "", secret_access_key: "", region: "ap-east-1" });
+  const [zones, setZones] = useState<AwsRoute53PrivateZone[]>([]);
+  const [draft, setDraft] = useState({ group_id: "", credential_id: "", doh_endpoint_id: "", hosted_zone_id: "", hostname: "", ttl: 60, adopt_existing: false });
+  const [standalone, setStandalone] = useState({ hostname: "", primary_target: "", primary_port: 22, ttl: 60, min_switch_interval_seconds: 120 });
+  const [zonesLoadedForCredentialId, setZonesLoadedForCredentialId] = useState<number | null>(null);
+  const [zonesLoadingForCredentialId, setZonesLoadingForCredentialId] = useState<number | null>(null);
+  const [zonesLoadError, setZonesLoadError] = useState("");
+  const [copiedGuideKey, setCopiedGuideKey] = useState("");
+  const zonesRequestId = useRef(0);
+  const selectedZone = zones.find((item) => item.id === draft.hosted_zone_id);
+  const selectedGroup = groups.find((item) => item.id === Number(draft.group_id));
+  const selectedEndpoint = endpoints.find((item) => item.id === Number(draft.doh_endpoint_id));
+  const activeOutput = outputs.find((item) => item.group_id === Number(draft.group_id)) || (draft.group_id ? undefined : outputs[0]);
+  const activeOutputEndpoint = endpoints.find((item) => item.id === activeOutput?.doh_endpoint_id) || selectedEndpoint;
+  const setupHostname = (draft.hostname || standalone.hostname || activeOutput?.hostname || "service.example.internal").trim();
+  const setupZoneId = selectedZone?.id || activeOutput?.hosted_zone_id || "ZPRIVATE_ZONE_ID";
+  const setupVpc = selectedZone?.vpcs[0];
+  const setupRegion = setupVpc?.region || credential.region || "ap-east-1";
+  const setupVpcId = setupVpc?.id || "VPC_ID";
+  const iamPolicy = JSON.stringify(
+    {
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Action: ["route53:ListHostedZones"],
+          Resource: "*"
+        },
+        {
+          Effect: "Allow",
+          Action: ["route53:GetHostedZone"],
+          Resource: "arn:aws:route53:::hostedzone/*"
+        },
+        {
+          Effect: "Allow",
+          Action: ["route53:ListResourceRecordSets", "route53:ChangeResourceRecordSets"],
+          Resource: `arn:aws:route53:::hostedzone/${setupZoneId}`
+        }
+      ]
+    },
+    null,
+    2
+  );
+  const hostedZoneCommands = [
+    `aws route53 list-hosted-zones-by-vpc --vpc-id ${setupVpcId} --vpc-region ${setupRegion}`,
+    "",
+    "# 仅在上面的列表为空时创建；本面板不会自动创建托管区",
+    `aws route53 create-hosted-zone --name ${setupHostname} \\\n  --vpc VPCRegion=${setupRegion},VPCId=${setupVpcId} \\\n  --hosted-zone-config Comment=\"Private DoH\",PrivateZone=true \\\n  --caller-reference \"private-doh-$(date +%s)\"`
+  ].join("\n");
+  const verifyHostname = activeOutput?.hostname || setupHostname;
+  const verifyZoneId = activeOutput?.hosted_zone_id || setupZoneId;
+  const verifyDohUrl = activeOutputEndpoint
+    ? `${activeOutputEndpoint.base_url}${activeOutputEndpoint.query_path}`
+    : "https://YOUR_CLOUDFRONT_DOMAIN/dns-query";
+  const verificationCommands = [
+    `aws route53 list-resource-record-sets --hosted-zone-id ${verifyZoneId} --query \"ResourceRecordSets[?Name=='${verifyHostname}.']\"`,
+    `dig @169.254.169.253 ${verifyHostname} A +noall +answer`,
+    `curl.exe -s -H \"accept: application/dns-json\" \"${verifyDohUrl}?name=${verifyHostname}&type=A\"`,
+    "sudo cat /var/lib/private-doh/records.json  # 应包含 source=vpc_resolver"
+  ].join("\n");
+  const setupSteps = [
+    {
+      ready: Boolean(selectedZone || activeOutput),
+      title: "Route 53 私有托管区",
+      detail: "必须预先创建并关联运行 DoH EC2 的 VPC；本面板不会创建托管区。"
+    },
+    {
+      ready: credentials.some((item) => item.enabled && item.secret_configured),
+      title: "最小权限 IAM 凭证",
+      detail: "使用专用 IAM 用户，不要使用 root Access Key；密钥只会加密保存在控制端。"
+    },
+    {
+      ready: Boolean(selectedGroup?.current_origin_id || activeOutput?.current_origin_id),
+      title: "已选出健康源站",
+      detail: "检查端口必须是实际可用端口。没有当前健康源站时，Route 53 不会出现 A/AAAA 记录。"
+    },
+    {
+      ready: Boolean(activeOutput),
+      title: "AWS 输出已绑定",
+      detail: "绑定故障切换组、私有托管区和 DoH 服务后，DoH 才会通过 VPC Resolver读取记录。"
+    }
+  ];
+
+  async function copyGuideText(key: string, value: string) {
+    await navigator.clipboard.writeText(value);
+    setCopiedGuideKey(key);
+    window.setTimeout(() => setCopiedGuideKey((current) => (current === key ? "" : current)), 1400);
+  }
+
+  async function loadZones(credentialId: number) {
+    const requestId = ++zonesRequestId.current;
+    setZones([]);
+    setZonesLoadedForCredentialId(null);
+    setZonesLoadingForCredentialId(credentialId);
+    setZonesLoadError("");
+    try {
+      const nextZones = await apiFetch<AwsRoute53PrivateZone[]>(`/api/route53/credentials/${credentialId}/private-hosted-zones`, token);
+      if (zonesRequestId.current === requestId) {
+        setZones(nextZones);
+        setZonesLoadedForCredentialId(credentialId);
+        setDraft((current) => ({
+          ...current,
+          credential_id: String(credentialId),
+          hosted_zone_id: nextZones.length === 1 ? nextZones[0].id : ""
+        }));
+      }
+      return nextZones;
+    } catch (error) {
+      if (zonesRequestId.current === requestId) setZonesLoadError(error instanceof Error ? error.message : "私有托管区加载失败");
+      throw error;
+    } finally {
+      if (zonesRequestId.current === requestId) setZonesLoadingForCredentialId(null);
+    }
+  }
+
+  async function addCredential(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () => apiFetch("/api/route53/credentials", token, { method: "POST", body: JSON.stringify({ ...credential, use_instance_role: false, enabled: true }) }),
+      "AWS Route 53 凭证已添加",
+      () => setCredential({ name: "AWS Hong Kong Route 53", access_key_id: "", secret_access_key: "", region: "ap-east-1" })
+    );
+  }
+
+  async function addOutput(event: FormEvent) {
+    event.preventDefault();
+    const zone = zones.find((item) => item.id === draft.hosted_zone_id);
+    if (!zone) throw new Error("请选择 Route 53 私有托管区");
+    await act(
+      () => apiFetch("/api/route53/outputs", token, {
+        method: "POST",
+        body: JSON.stringify({
+          group_id: Number(draft.group_id),
+          credential_id: Number(draft.credential_id),
+          doh_endpoint_id: Number(draft.doh_endpoint_id),
+          hosted_zone_id: zone.id,
+          hosted_zone_name: zone.name,
+          hostname: draft.hostname.trim(),
+          ttl: draft.ttl,
+          enabled: true,
+          adopt_existing: draft.adopt_existing
+        })
+      }),
+      "AWS 私有 DoH 输出已添加",
+      () => setDraft((current) => ({ ...current, adopt_existing: false }))
+    );
+  }
+
+  async function addStandaloneGroup(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () => apiFetch("/api/route53/groups", token, { method: "POST", body: JSON.stringify(standalone) }),
+      "独立故障切换组已创建",
+      () => setStandalone({ hostname: "", primary_target: "", primary_port: 22, ttl: 60, min_switch_interval_seconds: 120 })
+    );
+  }
+
+  return (
+    <section className="stack">
+      <div className="panel panelTitle">
+        <h2>AWS Route 53 私有 DoH</h2>
+        <p>本菜单独立管理 AWS 候选源站，并使用与 Cloudflare 相同的健康检测、优先级、自动换 IP 和分时规则；最终只发布到 Route 53。首次使用前请先把 EC2 升级到 PrivateDoH/2.0。</p>
+      </div>
+      <div className="panel awsSetupGuide">
+        <div className="panelTitle">
+          <h2>添加前检查</h2>
+          <p>正确链路是：健康检查选择真实 IP → Route 53 私有记录 → VPC Resolver → EC2 PrivateDoH → CloudFront/Clash。</p>
+        </div>
+        <div className="awsSetupWarning">
+          <strong>不要使用“DoH 故障切换”代替这里。</strong>
+          <span>“DoH 故障切换”只向 EC2 下发静态 IP，不创建、读取或修改 Route 53；两者使用同一查询域名还会产生冲突。</span>
+        </div>
+        <div className="awsSetupSteps">
+          {setupSteps.map((step, index) => (
+            <div className={`awsSetupStep ${step.ready ? "ready" : "pending"}`} key={step.title}>
+              <span className="awsSetupStepNumber">{step.ready ? <Check size={15} /> : index + 1}</span>
+              <div><strong>{step.title}</strong><small>{step.detail}</small></div>
+            </div>
+          ))}
+        </div>
+        <div className="awsGuideLinks">
+          <a href="https://console.aws.amazon.com/route53/v2/hostedzones#" target="_blank" rel="noreferrer">打开 Route 53 托管区</a>
+          <a href="https://console.aws.amazon.com/iam/home#/users" target="_blank" rel="noreferrer">打开 IAM 用户</a>
+        </div>
+        <details className="awsSetupDetails">
+          <summary>展开 IAM 最小权限模板与 AWS CLI 命令</summary>
+          <ol className="awsSetupList">
+            <li>IAM → 策略 → 创建策略 → JSON，粘贴下面的策略并保存为 <code>cloudflare-dns-route53</code>。</li>
+            <li>IAM → IAM 用户 → 创建用户；使用专用用户，不启用管理控制台访问，再附加该策略。</li>
+            <li>打开用户的「安全凭证」→「创建访问密钥」，使用案例选择「在 AWS 之外运行的应用程序」。</li>
+            <li>Secret Access Key 只显示一次：立即填入本面板，不截图、不发聊天；遗失时轮换密钥。</li>
+          </ol>
+          <div className="awsGuideCodeBlock">
+            <div className="commandHeader"><div><strong>最小权限策略</strong><small>选择托管区后会自动填入 Zone ID；若仍显示 ZPRIVATE_ZONE_ID，请先替换。</small></div><button type="button" className="miniBtn" onClick={() => copyGuideText("iam", iamPolicy)}>{copiedGuideKey === "iam" ? <Check size={14} /> : <Copy size={14} />}复制</button></div>
+            <pre className="tokenBox commandBox">{iamPolicy}</pre>
+          </div>
+          <div className="awsGuideCodeBlock">
+            <div className="commandHeader"><div><strong>检查/创建私有托管区</strong><small>先用 EC2 实际区域和 VPC ID 替换模板占位符。</small></div><button type="button" className="miniBtn" onClick={() => copyGuideText("zone", hostedZoneCommands)}>{copiedGuideKey === "zone" ? <Check size={14} /> : <Copy size={14} />}复制</button></div>
+            <pre className="tokenBox commandBox">{hostedZoneCommands}</pre>
+          </div>
+        </details>
+      </div>
+      <div className="gridTwo">
+        <form className="panel" onSubmit={addCredential}>
+          <h2>步骤 1：添加 AWS 凭证</h2>
+          <p className="awsFieldHint">先创建专用 IAM 用户并附加上面的最小权限策略，再创建“在 AWS 之外运行的应用程序”Access Key。不要使用 root 密钥，也不要把密钥发到聊天或写进文档。</p>
+          <label>名称<input value={credential.name} onChange={(event) => setCredential({ ...credential, name: event.target.value })} required /></label>
+          <label>Access Key ID<input autoComplete="off" value={credential.access_key_id} onChange={(event) => setCredential({ ...credential, access_key_id: event.target.value })} required /></label>
+          <label>Secret Access Key<input autoComplete="new-password" type="password" value={credential.secret_access_key} onChange={(event) => setCredential({ ...credential, secret_access_key: event.target.value })} required /></label>
+          <label>区域<input value={credential.region} onChange={(event) => setCredential({ ...credential, region: event.target.value })} required /></label>
+          <p className="awsFieldHint">Route 53 是全局服务；这里的区域用于 AWS SDK 配置，真正决定解析范围的是私有托管区关联的 VPC 区域。</p>
+          <button><Plus size={15} />保存并验证托管区读取</button>
+        </form>
+        <div className="panel">
+          <h2>AWS 凭证</h2>
+          <div className="list">{credentials.map((item) => <div className="row" key={item.id}><div><strong>{item.name}</strong><span>{item.region} · {item.enabled ? "已启用" : "已停用"} · {item.secret_configured ? "密钥已配置" : "缺少密钥"}</span>{item.last_error && <small className="error">{item.last_error}</small>}</div><button type="button" className="secondary" disabled={zonesLoadingForCredentialId !== null} onClick={() => act(() => loadZones(item.id), "私有托管区已加载")}>{zonesLoadingForCredentialId === item.id ? "读取中…" : "加载托管区"}</button></div>)}{credentials.length === 0 && <div className="emptyCell">还没有 AWS 凭证。</div>}</div>
+          {zonesLoadError && <div className="awsInlineWarning">读取失败：{zonesLoadError}。请检查 IAM 权限、Access Key 状态和账号是否正确，然后重试。</div>}
+          {zonesLoadedForCredentialId !== null && zones.length === 0 && <div className="awsInlineWarning">没有找到私有托管区。请确认托管区由该凭证所属账号拥有，并已关联 DoH EC2 所在 VPC；本面板不会自动创建托管区。</div>}
+          {zones.length > 0 && <div className="awsZoneSummary">已发现 {zones.length} 个私有托管区：{zones.map((zone) => <code key={zone.id}>{zone.name} · {zone.id}</code>)}</div>}
+        </div>
+      </div>
+      <form className="panel" onSubmit={addStandaloneGroup}>
+        <h2>步骤 2：创建 AWS DoH 故障切换组</h2>
+        <p>例如 service.example.internal。创建后直接在本页下方添加备用 IP、自动换 IP 资源和分时规则；不要在旧版静态 DoH 菜单重复创建同名规则。</p>
+        <div className="editGrid">
+          <label>查询域名<input value={standalone.hostname} onChange={(event) => setStandalone({ ...standalone, hostname: event.target.value })} placeholder="service.example.internal" required /></label>
+          <label>主用 IP / 域名<input value={standalone.primary_target} onChange={(event) => setStandalone({ ...standalone, primary_target: event.target.value })} placeholder="203.0.113.10" required /></label>
+          <label>实际业务检查端口<input type="number" min={1} max={65535} value={standalone.primary_port} onChange={(event) => setStandalone({ ...standalone, primary_port: Number(event.target.value) })} /></label>
+          <label>TTL<input type="number" min={0} max={86400} value={standalone.ttl} onChange={(event) => setStandalone({ ...standalone, ttl: Number(event.target.value) })} /></label>
+          <label>回切冷却（秒）<input type="number" min={0} max={86400} value={standalone.min_switch_interval_seconds} onChange={(event) => setStandalone({ ...standalone, min_switch_interval_seconds: Number(event.target.value) })} /></label>
+        </div>
+        <p className="awsFieldHint">端口必须是目标真实开放的 TCP 端口。例如业务在 443 就填写 443；随意填写 1.1.1.1:22 会一直显示不可用。</p>
+        <button><Plus size={15} />创建故障切换组</button>
+      </form>
+      <form className="panel" onSubmit={addOutput}>
+        <h2>步骤 3：绑定现有故障切换组</h2>
+        <p className="awsFieldHint">保存后，控制端把当前健康 IP 写入 Route 53；EC2 只接收域名白名单并通过 VPC Resolver 实时查询，不再保存静态真实 IP。</p>
+        <div className="editGrid">
+          <label>故障切换组<select value={draft.group_id} onChange={(event) => { const group = groups.find((item) => item.id === Number(event.target.value)); setDraft({ ...draft, group_id: event.target.value, hostname: group?.hostname || draft.hostname }); }} required><option value="">请选择</option>{groups.map((group) => <option value={group.id} key={group.id}>{group.hostname} · 当前 {group.current_origin_id ? `源站 #${group.current_origin_id}` : "未选择"}</option>)}</select></label>
+          <label>AWS 凭证<select value={draft.credential_id} onChange={(event) => { const id = Number(event.target.value); setDraft((current) => ({ ...current, credential_id: event.target.value, hosted_zone_id: "" })); if (id) act(() => loadZones(id), "私有托管区已加载"); }} required><option value="">请选择</option>{credentials.filter((item) => item.enabled).map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+          <label>私有托管区<select disabled={zonesLoadingForCredentialId !== null} value={draft.hosted_zone_id} onChange={(event) => setDraft({ ...draft, hosted_zone_id: event.target.value })} required><option value="">{zonesLoadingForCredentialId !== null ? "读取中…" : "请选择"}</option>{zones.map((zone) => <option value={zone.id} key={zone.id}>{zone.name} · {zone.vpcs.map((vpc) => `${vpc.region}/${vpc.id}`).join(", ")}</option>)}</select></label>
+          <label>DoH / CloudFront 服务<select value={draft.doh_endpoint_id} onChange={(event) => setDraft({ ...draft, doh_endpoint_id: event.target.value })} required><option value="">请选择</option>{endpoints.filter((item) => item.enabled).map((item) => <option value={item.id} key={item.id}>{item.name} · {item.base_url}{item.query_path}</option>)}</select></label>
+          <label>DoH 查询域名<input value={draft.hostname} onChange={(event) => setDraft({ ...draft, hostname: event.target.value })} placeholder="service.example.internal" required /></label>
+          <label>TTL<input type="number" min={0} max={86400} value={draft.ttl} onChange={(event) => setDraft({ ...draft, ttl: Number(event.target.value) })} /></label>
+        </div>
+        {selectedZone && <div className="awsZoneSummary"><code>{selectedZone.name}</code><code>{selectedZone.id}</code>{selectedZone.vpcs.map((vpc) => <code key={`${vpc.region}-${vpc.id}`}>{vpc.region}/{vpc.id}</code>)}</div>}
+        <label className="inlineCheck awsAdoptConfirm"><input type="checkbox" checked={draft.adopt_existing} onChange={(event) => setDraft({ ...draft, adopt_existing: event.target.checked })} />我确认接管并替换该域名现有的 Route 53 A/AAAA/CNAME 记录</label>
+        <p className="awsFieldHint">默认不会覆盖任何现有记录；若检测到普通、Alias、加权、延迟或地理路由记录，必须勾选确认后才能绑定。Traffic Policy 托管记录不能在这里接管。</p>
+        {selectedGroup && !selectedGroup.current_origin_id && <div className="awsInlineWarning">该组当前尚未选出健康源站。可以先绑定输出；绑定后下一轮健康检查会选择源站并发布 Route 53 记录。</div>}
+        {(credentials.length === 0 || groups.length === 0 || endpoints.filter((item) => item.enabled).length === 0) && <div className="awsInlineWarning">还缺少前置条件：{[credentials.length === 0 ? "AWS 凭证" : "", groups.length === 0 ? "故障切换组" : "", endpoints.filter((item) => item.enabled).length === 0 ? "已启用的 DoH/CloudFront 服务" : ""].filter(Boolean).join("、")}。</div>}
+        <button disabled={zonesLoadingForCredentialId !== null || credentials.length === 0 || groups.length === 0 || endpoints.filter((item) => item.enabled).length === 0}><Plus size={15} />添加 AWS 输出</button>
+      </form>
+      <div className="panel">
+        <h2>已绑定输出</h2>
+        <div className="list">{outputs.map((output) => {
+          const group = groups.find((item) => item.id === output.group_id);
+          const endpoint = endpoints.find((item) => item.id === output.doh_endpoint_id);
+          return <div className="row" key={output.id}><div><strong>{output.hostname}</strong><span>{group?.hostname || `组 #${output.group_id}`} → Route 53 {output.hosted_zone_name} · DoH {endpoint?.base_url}{endpoint?.query_path}</span><small>{output.last_record_type || "-"} {output.last_values.join(", ") || "尚未发布"} · {fmtDate(output.last_published_at)}</small>{output.last_error && <small className="error">{output.last_error}</small>}</div><div className="rowActions"><button className="secondary" onClick={() => act(() => apiFetch(`/api/route53/outputs/${output.id}/run`, token, { method: "POST" }), "已检查并对账")}>立即检查</button><button className="icon dangerBtn" onClick={() => window.confirm("取消管理后 AWS 当前记录会保留，确认继续？") && act(() => apiFetch(`/api/route53/outputs/${output.id}`, token, { method: "DELETE" }), "AWS 输出已移除")}><Trash2 size={14} /></button></div></div>;
+        })}{outputs.length === 0 && <div className="emptyCell">还没有 AWS Route 53 输出。</div>}</div>
+      </div>
+      <div className="panel awsSetupGuide">
+        <div className="panelTitle"><h2>步骤 4：发布后验证</h2><p>四处结果必须一致：Route 53 当前记录、VPC Resolver、CloudFront DoH，以及 EC2 白名单模式。</p></div>
+        <div className="awsGuideCodeBlock">
+          <div className="commandHeader"><strong>验证命令</strong><button type="button" className="miniBtn" onClick={() => copyGuideText("verify", verificationCommands)}>{copiedGuideKey === "verify" ? <Check size={14} /> : <Copy size={14} />}复制</button></div>
+          <pre className="tokenBox commandBox">{verificationCommands}</pre>
+        </div>
+        <div className="awsSetupWarning subtle"><strong>正确的 EC2 快照</strong><span><code>records.json</code> 中应看到 <code>source: "vpc_resolver"</code> 与占位值 <code>0.0.0.0</code>；如果仍是 <code>doh_failover_group_id</code> 加真实 IP，说明还在使用旧静态模式。</span></div>
+      </div>
+    </section>
   );
 }
 
@@ -1601,117 +1931,170 @@ function RecordsPanel({
   );
 }
 
-function AlibabaHttpDnsPanel({ token, groups, busy, act }: { token: string; groups: AlibabaHttpDnsGroup[]; busy: boolean; act: ActionRunner }) {
-  const [accounts, setAccounts] = useState<AlibabaHttpDnsRemoteAccount[]>([]);
+function AlibabaHttpDnsPanel({ token, credentials, groups, failoverGroups, busy, act }: { token: string; credentials: AlibabaHttpDnsCredential[]; groups: AlibabaHttpDnsGroup[]; failoverGroups: FailoverGroup[]; busy: boolean; act: ActionRunner }) {
   const [zones, setZones] = useState<AlibabaHttpDnsRemoteZone[]>([]);
-  const [accountId, setAccountId] = useState<number | "">("");
+  const [credentialId, setCredentialId] = useState<number | "">("");
   const [zoneId, setZoneId] = useState("");
   const [primaryPort, setPrimaryPort] = useState(22);
   const [cooldown, setCooldown] = useState(120);
-  const selectedAccount = accounts.find((item) => item.id === accountId);
+  const [credentialDraft, setCredentialDraft] = useState({ name: "阿里云 HTTPDNS", access_key_id: "", access_key_secret: "", region: "cn-hangzhou", endpoint: "alidns.aliyuncs.com" });
+  const [editingCredentialId, setEditingCredentialId] = useState<number | null>(null);
+  const [credentialEdit, setCredentialEdit] = useState({ name: "", access_key_id: "", access_key_secret: "", region: "cn-hangzhou", endpoint: "alidns.aliyuncs.com", enabled: true });
+  const selectedCredential = credentials.find((item) => item.id === credentialId);
   const selectedZone = zones.find((item) => item.ZoneId === zoneId);
-  const managedZones = useMemo(() => {
-    const items = new Map<string, { key: string; remoteAccountId: number; accountName: string; zoneId: string; zoneName: string; groups: AlibabaHttpDnsGroup[] }>();
-    groups.forEach((group) => {
-      const key = `${group.remote_account_id}:${group.zone_id}`;
-      const current = items.get(key) || { key, remoteAccountId: group.remote_account_id, accountName: group.account_name, zoneId: group.zone_id, zoneName: group.zone_name, groups: [] };
-      current.groups.push(group);
-      items.set(key, current);
-    });
-    return [...items.values()].sort((left, right) => left.zoneName.localeCompare(right.zoneName));
-  }, [groups]);
+  const directGroups = groups.filter((group) => group.credential_id != null);
+  const legacyGroups = groups.filter((group) => group.credential_id == null);
 
-  async function loadAccounts() {
-    const data = await apiFetch<AlibabaHttpDnsRemoteAccount[]>("/api/alibaba-httpdns/remote/accounts", token);
-    setAccounts(data);
-    if (!accountId && data.length) setAccountId(data[0].id);
-  }
-
-  async function loadZones(nextAccountId: number) {
-    const data = await apiFetch<AlibabaHttpDnsRemoteZone[]>(`/api/alibaba-httpdns/remote/zones?account_id=${nextAccountId}`, token);
+  async function loadZones(nextCredentialId: number) {
+    const data = await apiFetch<AlibabaHttpDnsRemoteZone[]>(`/api/alibaba-httpdns/credentials/${nextCredentialId}/zones`, token);
     setZones(data);
     setZoneId(data[0]?.ZoneId || "");
   }
 
   useEffect(() => {
-    loadAccounts().catch(() => undefined);
-  }, [token]);
+    if (!credentialId && credentials.length) setCredentialId(credentials[0].id);
+  }, [credentials, credentialId]);
 
   useEffect(() => {
-    if (accountId) loadZones(Number(accountId)).catch(() => undefined);
-  }, [accountId]);
+    if (credentialId) loadZones(Number(credentialId)).catch(() => undefined);
+    else {
+      setZones([]);
+      setZoneId("");
+    }
+  }, [credentialId, token]);
 
-  async function syncZone(account: AlibabaHttpDnsRemoteAccount | { id: number; name: string }, zone: AlibabaHttpDnsRemoteZone | { ZoneId: string; ZoneName: string }, port = primaryPort, nextCooldown = cooldown) {
+  async function addCredential(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () => apiFetch("/api/alibaba-httpdns/credentials", token, { method: "POST", body: JSON.stringify({ ...credentialDraft, enabled: true }) }),
+      "阿里云 HTTPDNS 凭证已添加",
+      () => setCredentialDraft({ name: "阿里云 HTTPDNS", access_key_id: "", access_key_secret: "", region: "cn-hangzhou", endpoint: "alidns.aliyuncs.com" })
+    );
+  }
+
+  function beginCredentialEdit(item: AlibabaHttpDnsCredential) {
+    setEditingCredentialId(item.id);
+    setCredentialEdit({ name: item.name, access_key_id: "", access_key_secret: "", region: item.region, endpoint: item.endpoint, enabled: item.enabled });
+  }
+
+  async function saveCredentialEdit(item: AlibabaHttpDnsCredential) {
+    const payload: Record<string, string | boolean> = {
+      name: credentialEdit.name.trim(),
+      region: credentialEdit.region.trim(),
+      endpoint: credentialEdit.endpoint.trim(),
+      enabled: credentialEdit.enabled
+    };
+    if (credentialEdit.access_key_id.trim()) payload.access_key_id = credentialEdit.access_key_id.trim();
+    if (credentialEdit.access_key_secret) payload.access_key_secret = credentialEdit.access_key_secret;
+    await act(
+      () => apiFetch(`/api/alibaba-httpdns/credentials/${item.id}`, token, { method: "PATCH", body: JSON.stringify(payload) }),
+      "阿里云 HTTPDNS 凭证已更新",
+      () => setEditingCredentialId(null)
+    );
+  }
+
+  async function syncZone(credential: AlibabaHttpDnsCredential, zone: AlibabaHttpDnsRemoteZone, port = primaryPort, nextCooldown = cooldown) {
     await apiFetch("/api/alibaba-httpdns/zones", token, {
       method: "POST",
-      body: JSON.stringify({ remote_account_id: account.id, account_name: account.name, zone_id: zone.ZoneId, zone_name: zone.ZoneName, primary_port: port, min_switch_interval_seconds: nextCooldown, enabled: true })
+      body: JSON.stringify({ credential_id: credential.id, remote_account_id: 0, account_name: credential.name, zone_id: zone.ZoneId, zone_name: zone.ZoneName, primary_port: port, min_switch_interval_seconds: nextCooldown, enabled: true })
     });
   }
 
   async function addSelectedZone() {
-    if (!selectedAccount || !selectedZone) throw new Error("请选择阿里云账户和内置权威域名");
-    await syncZone(selectedAccount, selectedZone);
+    if (!selectedCredential || !selectedZone) throw new Error("请选择阿里云凭证和内置权威域名");
+    await syncZone(selectedCredential, selectedZone);
   }
 
   return (
     <section className="stack alibabaHttpDnsWorkspace">
       <div className="panel alibabaHttpDnsIntro">
         <div className="panelTitle">
-          <h2>移动解析 HTTPDNS · 内置权威域名故障切换</h2>
-          <p>与 Cloudflare 公网 DNS、AWS 私有 DoH 并列运行；同一域名可在三边发布不同目标。域名型候选会逐 IP 检测，只发布健康地址。</p>
+          <h2>阿里云 HTTPDNS 故障切换</h2>
+          <p>cloudflare_dns 直接调用阿里云内置权威域名 API；AzPanel 只负责可选的机器换 IP，不再代理 HTTPDNS。下方故障组拥有与 Cloudflare 完全相同的检测、优先级、自动换 IP 和分时能力。</p>
         </div>
         <div className="rowActions">
-          <button className="secondary" disabled={busy} onClick={() => act(() => loadAccounts(), "阿里云账户已刷新")}><RefreshCw size={15} />刷新账户</button>
+          <button className="secondary" disabled={busy || !credentialId} onClick={() => act(() => loadZones(Number(credentialId)), "阿里云权威域名已刷新")}><RefreshCw size={15} />刷新域名</button>
           <button disabled={busy || groups.length === 0} onClick={() => act(() => apiFetch("/api/alibaba-httpdns/run", token, { method: "POST" }), "阿里云 HTTPDNS 检查完成")}><Play size={15} />立即检查</button>
         </div>
       </div>
 
-      <div className="panel">
-        <div className="panelTitle"><h2>添加内置权威域名</h2><p>不是逐条选择解析记录。系统会接管所选 Zone 下全部已启用、可切换的地址记录。</p></div>
+      <form className="panel" onSubmit={addCredential}>
+        <div className="panelTitle"><h2>步骤 1：添加阿里云 AccessKey</h2><p>建议使用只允许管理 HTTPDNS 内置权威域名的 RAM 用户；密钥加密保存在本项目数据库。</p></div>
         <div className="alibabaHttpDnsCreateGrid">
-          <label>阿里云账户<select value={accountId} onChange={(event) => setAccountId(event.target.value ? Number(event.target.value) : "")}><option value="">请选择账户</option>{accounts.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.proxy}</option>)}</select></label>
-          <label>内置权威域名<select value={zoneId} onChange={(event) => setZoneId(event.target.value)} disabled={!accountId}><option value="">请选择 Zone</option>{zones.map((item) => <option value={item.ZoneId} key={item.ZoneId}>{item.ZoneName} · {item.RecordCount || 0} 条</option>)}</select></label>
+          <label>名称<input value={credentialDraft.name} onChange={(event) => setCredentialDraft({ ...credentialDraft, name: event.target.value })} required /></label>
+          <label>AccessKey ID<input value={credentialDraft.access_key_id} onChange={(event) => setCredentialDraft({ ...credentialDraft, access_key_id: event.target.value })} autoComplete="off" required /></label>
+          <label>AccessKey Secret<input type="password" value={credentialDraft.access_key_secret} onChange={(event) => setCredentialDraft({ ...credentialDraft, access_key_secret: event.target.value })} autoComplete="new-password" required /></label>
+          <label>API 端点<input value={credentialDraft.endpoint} onChange={(event) => setCredentialDraft({ ...credentialDraft, endpoint: event.target.value })} required /></label>
+          <button disabled={busy}><Plus size={15} />验证并保存</button>
+        </div>
+        {credentials.map((item) => editingCredentialId === item.id ? (
+          <div className="alibabaHttpDnsCreateGrid" key={item.id}>
+            <label>名称<input value={credentialEdit.name} onChange={(event) => setCredentialEdit({ ...credentialEdit, name: event.target.value })} /></label>
+            <label>新 AccessKey ID（留空不变）<input value={credentialEdit.access_key_id} onChange={(event) => setCredentialEdit({ ...credentialEdit, access_key_id: event.target.value })} autoComplete="off" /></label>
+            <label>新 Secret（留空不变）<input type="password" value={credentialEdit.access_key_secret} onChange={(event) => setCredentialEdit({ ...credentialEdit, access_key_secret: event.target.value })} autoComplete="new-password" /></label>
+            <label>API 端点<input value={credentialEdit.endpoint} onChange={(event) => setCredentialEdit({ ...credentialEdit, endpoint: event.target.value })} /></label>
+            <label className="inlineCheck"><input type="checkbox" checked={credentialEdit.enabled} onChange={(event) => setCredentialEdit({ ...credentialEdit, enabled: event.target.checked })} />启用凭证</label>
+            <button type="button" onClick={() => saveCredentialEdit(item)}><Save size={14} />验证并保存</button>
+            <button type="button" className="secondary" onClick={() => setEditingCredentialId(null)}>取消</button>
+          </div>
+        ) : (
+          <div className="alibabaHttpDnsRemoteHint" key={item.id}>
+            <strong>{item.name}</strong> · {item.endpoint} · {item.last_error || "连接正常"}
+            <button type="button" className="icon secondaryIcon" onClick={() => beginCredentialEdit(item)}><Pencil size={14} /></button>
+            <button type="button" className="icon dangerBtn" disabled={groups.some((group) => group.credential_id === item.id)} onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/credentials/${item.id}`, token, { method: "DELETE" }), "凭证已删除")}><Trash2 size={14} /></button>
+          </div>
+        ))}
+      </form>
+
+      <div className="panel">
+        <div className="panelTitle"><h2>步骤 2：导入内置权威域名</h2><p>系统会为 Zone 下每条已启用的 A、AAAA、CNAME 记录创建一个独立的阿里云故障切换组。</p></div>
+        <div className="alibabaHttpDnsCreateGrid">
+          <label>阿里云凭证<select value={credentialId} onChange={(event) => setCredentialId(event.target.value ? Number(event.target.value) : "")}><option value="">请选择凭证</option>{credentials.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+          <label>内置权威域名<select value={zoneId} onChange={(event) => setZoneId(event.target.value)} disabled={!credentialId}><option value="">请选择 Zone</option>{zones.map((item) => <option value={item.ZoneId} key={item.ZoneId}>{item.ZoneName} · {item.RecordCount || 0} 条</option>)}</select></label>
           <label>默认检查端口<input type="number" min={1} max={65535} value={primaryPort} onChange={(event) => setPrimaryPort(Number(event.target.value))} /></label>
           <label>自动回切冷却（秒）<input type="number" min={0} max={86400} value={cooldown} onChange={(event) => setCooldown(Number(event.target.value))} /></label>
           <button disabled={busy || !zoneId} onClick={() => act(addSelectedZone, "权威域名及其解析记录已添加")}><Plus size={15} />添加权威域名</button>
         </div>
-        {selectedAccount && <p className="alibabaHttpDnsRemoteHint">访问密钥 {selectedAccount.access_key_hint} · {selectedAccount.proxy} · 通过 azpanel 实时读取 Zone 和记录</p>}
+        {selectedCredential && <p className="alibabaHttpDnsRemoteHint">直接连接 {selectedCredential.endpoint} · 不经过 AzPanel</p>}
       </div>
 
-      <div className="alibabaHttpDnsGrid">
-        {managedZones.map((zone) => {
-          const firstGroup = zone.groups[0];
-          const primaryPort = firstGroup.origins.slice().sort((a, b) => a.priority - b.priority)[0]?.port || 22;
-          return (
-            <section className="alibabaManagedZone" key={zone.key}>
-              <div className="alibabaManagedZoneHead">
-                <div><div className="originTitleLine"><Router size={19} /><h2>{zone.zoneName}</h2><span className="originBadge record">{zone.groups.length} 条解析记录</span></div><p>{zone.accountName} · Zone {zone.zoneId} · 每条记录独立检测和切换</p></div>
-                <div className="rowActions">
-                  <button className="secondary" disabled={busy} onClick={() => act(() => syncZone({ id: zone.remoteAccountId, name: zone.accountName }, { ZoneId: zone.zoneId, ZoneName: zone.zoneName }, primaryPort, firstGroup.min_switch_interval_seconds), "Zone 解析记录已同步")}><RefreshCw size={14} />同步记录</button>
-                  <button className="dangerBtn" disabled={busy} onClick={() => window.confirm(`确认取消管理 ${zone.zoneName} 吗？\n只删除本系统的切换配置，阿里云解析不会删除。`) && act(() => apiFetch("/api/alibaba-httpdns/zones/release", token, { method: "POST", body: JSON.stringify({ remote_account_id: zone.remoteAccountId, zone_id: zone.zoneId }) }), "已取消管理该权威域名")}><Trash2 size={14} />取消管理</button>
-                </div>
-              </div>
-              <div className="alibabaManagedRecords">
-                {zone.groups.slice().sort((a, b) => a.rr.localeCompare(b.rr)).map((group) => <AlibabaHttpDnsRecordCard token={token} group={group} busy={busy} act={act} key={group.id} />)}
-              </div>
-            </section>
-          );
-        })}
-        {managedZones.length === 0 && <div className="panel emptyGroupPanel"><Router size={28} /><h2>还没有管理内置权威域名</h2><p>在上方选择 Zone 并点击“添加权威域名”，系统会自动接管其地址记录。</p></div>}
+      <div className="panel">
+        <div className="panelTitle"><h2>阿里云发布绑定</h2><p>候选源站请直接在下面的“阿里云 HTTPDNS 故障切换组”中维护。</p></div>
+        <div className="alibabaHttpDnsGrid">
+          {directGroups.map((group) => <div className="alibabaHttpDnsSummary" key={group.id}><div><span>主机名</span><strong>{group.rr === "@" ? group.zone_name : `${group.rr}.${group.zone_name}`}</strong></div><div><span>记录</span><strong>{group.record_type} · TTL {group.ttl}</strong></div><div><span>当前发布</span><strong>{group.last_published_value || "等待健康检查"}</strong></div><div><span>状态</span><strong className={group.last_error ? "textDanger" : ""}>{group.last_error || "运行正常"}</strong></div></div>)}
+          {directGroups.length === 0 && <div className="emptyCell">还没有直接管理的阿里云 HTTPDNS 记录。</div>}
+        </div>
+        {legacyGroups.length > 0 && <div className="awsInlineWarning">检测到 {legacyGroups.length} 条旧版 AzPanel 代理配置。它们会继续兼容运行，但不会混入新菜单；后续可通过显式迁移工具转为直接凭证。</div>}
+        {legacyGroups.length > 0 && (
+          <details>
+            <summary>展开旧版兼容配置（{legacyGroups.length}）</summary>
+            <div className="alibabaManagedRecords">
+              {legacyGroups.map((group) => <AlibabaHttpDnsRecordCard token={token} group={group} failoverGroups={failoverGroups} busy={busy} act={act} key={group.id} />)}
+            </div>
+          </details>
+        )}
       </div>
     </section>
   );
 }
 
-function AlibabaHttpDnsRecordCard({ token, group, busy, act }: { token: string; group: AlibabaHttpDnsGroup; busy: boolean; act: ActionRunner }) {
+function AlibabaHttpDnsRecordCard({ token, group, failoverGroups, busy, act }: { token: string; group: AlibabaHttpDnsGroup; failoverGroups: FailoverGroup[]; busy: boolean; act: ActionRunner }) {
   const [adding, setAdding] = useState(false);
   const [originDraft, setOriginDraft] = useState({ target: "", port: group.origins[0]?.port || 22, priority: 10, remark: "", ignore_health_check: false });
   const [editingGroup, setEditingGroup] = useState(false);
   const [groupEdit, setGroupEdit] = useState({ ttl: group.ttl, min_switch_interval_seconds: group.min_switch_interval_seconds });
   const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
   const [originEdit, setOriginEdit] = useState({ target: "", port: 22, priority: 10, remark: "", enabled: true, ignore_health_check: false });
-  const current = group.origins.find((origin) => origin.id === group.current_origin_id);
+  const legacyPoolActive = group.source_group_id == null;
+  const current = legacyPoolActive ? group.origins.find((origin) => origin.id === group.current_origin_id) : undefined;
   const hostname = group.rr === "@" ? group.zone_name : `${group.rr}.${group.zone_name}`;
+
+  async function bindSourceGroup(sourceGroupId: string) {
+    await act(
+      () => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "PATCH", body: JSON.stringify({ source_group_id: sourceGroupId ? Number(sourceGroupId) : null }) }),
+      sourceGroupId ? "已改为跟随统一故障切换组" : "已恢复阿里云旧版独立候选池"
+    );
+  }
 
   function beginAdd() {
     setAdding(true);
@@ -1740,11 +2123,12 @@ function AlibabaHttpDnsRecordCard({ token, group, busy, act }: { token: string; 
       </div>
       {editingGroup && <div className="alibabaGroupSettings"><label>解析 TTL<select value={groupEdit.ttl} onChange={(event) => setGroupEdit({ ...groupEdit, ttl: Number(event.target.value) })}>{[5, 30, 60, 3600, 43200, 86400].map((ttl) => <option value={ttl} key={ttl}>{ttl} 秒</option>)}</select></label><label>自动回切冷却<input type="number" min={0} max={86400} value={groupEdit.min_switch_interval_seconds} onChange={(event) => setGroupEdit({ ...groupEdit, min_switch_interval_seconds: Number(event.target.value) })} /></label><button onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "PATCH", body: JSON.stringify(groupEdit) }), "切换设置已保存", () => setEditingGroup(false))}><Save size={14} />保存设置</button><button className="secondary" onClick={() => setEditingGroup(false)}>取消</button></div>}
       <div className="alibabaHttpDnsSummary"><div><span>阿里云实际已发布</span><strong>{group.last_published_value || current?.target || "尚未发布"}</strong></div><div><span>TTL / 线路</span><strong>{group.ttl}s · {group.request_source}</strong></div><div><span>最后切换</span><strong>{fmtDate(group.last_switch_at)}</strong></div><div><span>自动切换状态</span><strong className={group.last_error ? "textDanger" : ""}>{group.last_error || "运行正常"}</strong></div></div>
+      <div className="alibabaGroupSettings"><label>故障切换来源<select value={group.source_group_id || ""} onChange={(event) => bindSourceGroup(event.target.value)}><option value="">旧版：使用本记录自己的候选池</option>{failoverGroups.map((item) => <option value={item.id} key={item.id}>统一组：{item.hostname}</option>)}</select></label>{group.source_group_id && <small>已复用统一健康检测、优先级、自动换 IP 和分时规则；旧候选池仅保留作迁移备份，不参与当前解析状态。</small>}</div>
       <div className="originList">
         {group.origins.slice().sort((a, b) => a.priority - b.priority || a.id - b.id).map((origin) => editingOriginId === origin.id ? (
           <div className="origin originEditing" key={origin.id}><div className="originEditGrid alibabaOriginEditGrid"><label>IP / 域名<input value={originEdit.target} onChange={(event) => setOriginEdit({ ...originEdit, target: event.target.value })} /></label><label>检查端口<input type="number" min={1} max={65535} value={originEdit.port} onChange={(event) => setOriginEdit({ ...originEdit, port: Number(event.target.value) })} /></label><label>优先级<input type="number" min={0} value={originEdit.priority} onChange={(event) => setOriginEdit({ ...originEdit, priority: Number(event.target.value) })} /></label><label>备注<input value={originEdit.remark} onChange={(event) => setOriginEdit({ ...originEdit, remark: event.target.value })} /></label><label className="inlineCheck"><input type="checkbox" checked={originEdit.enabled} onChange={(event) => setOriginEdit({ ...originEdit, enabled: event.target.checked })} />启用</label><label className="inlineCheck"><input type="checkbox" checked={originEdit.ignore_health_check} onChange={(event) => setOriginEdit({ ...originEdit, ignore_health_check: event.target.checked })} />无视健康检查</label><button onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/origins/${origin.id}`, token, { method: "PATCH", body: JSON.stringify(originEdit) }), "目标已更新", () => setEditingOriginId(null))}><Save size={14} />保存</button><button className="secondary" onClick={() => setEditingOriginId(null)}>取消</button></div></div>
         ) : (
-          <div className={`origin ${origin.id === group.current_origin_id ? "originCurrent" : ""}`} key={origin.id}><span className={`status ${origin.enabled ? origin.status : "disabled"}`}>{statusText(origin.enabled ? origin.status : "disabled")}</span><div><div className="originTitleLine"><strong>{origin.remark || origin.target}</strong><span className={`originBadge ${origin.priority === 0 ? "primary" : "backup"}`}>{origin.priority === 0 ? "主用" : `备用 #${origin.priority}`}</span>{origin.id === group.current_origin_id && <span className="originBadge current">当前解析</span>}</div><span>{origin.target}:{origin.port} · {targetTypeText(origin.target_type)} · 最后检测 {fmtDate(origin.last_checked_at)}{origin.last_rtt_ms != null ? ` · ${origin.last_rtt_ms}ms` : ""}</span>{origin.target_type === "hostname" && origin.resolved_ips.length > 0 && <small>解析：{origin.resolved_ips.join(", ")}</small>}{origin.target_type === "hostname" && origin.healthy_ips.length > 0 && <small>健康：{origin.healthy_ips.join(", ")}</small>}{origin.id === group.current_origin_id && origin.published_ips.length > 0 && <small>阿里云已发布：{origin.published_ips.join(", ")}</small>}{origin.last_error && <span className="textDanger">{origin.last_error}</span>}</div><button className="icon secondaryIcon" title="编辑目标" onClick={() => beginEditOrigin(origin)}><Pencil size={14} /></button><button className="icon dangerBtn" title="删除目标" disabled={group.origins.length <= 1} onClick={() => window.confirm(`确认删除目标 ${origin.target} 吗？`) && act(() => apiFetch(`/api/alibaba-httpdns/origins/${origin.id}/delete`, token, { method: "POST" }), "目标已删除")}><Trash2 size={14} /></button></div>
+          <div className={`origin ${legacyPoolActive && origin.id === group.current_origin_id ? "originCurrent" : ""}`} key={origin.id}><span className={`status ${origin.enabled ? origin.status : "disabled"}`}>{statusText(origin.enabled ? origin.status : "disabled")}</span><div><div className="originTitleLine"><strong>{origin.remark || origin.target}</strong><span className={`originBadge ${origin.priority === 0 ? "primary" : "backup"}`}>{origin.priority === 0 ? "主用" : `备用 #${origin.priority}`}</span>{legacyPoolActive && origin.id === group.current_origin_id && <span className="originBadge current">当前解析</span>}</div><span>{origin.target}:{origin.port} · {targetTypeText(origin.target_type)} · 最后检测 {fmtDate(origin.last_checked_at)}{origin.last_rtt_ms != null ? ` · ${origin.last_rtt_ms}ms` : ""}</span>{origin.target_type === "hostname" && origin.resolved_ips.length > 0 && <small>解析：{origin.resolved_ips.join(", ")}</small>}{origin.target_type === "hostname" && origin.healthy_ips.length > 0 && <small>健康：{origin.healthy_ips.join(", ")}</small>}{legacyPoolActive && origin.id === group.current_origin_id && origin.published_ips.length > 0 && <small>阿里云已发布：{origin.published_ips.join(", ")}</small>}{origin.last_error && <span className="textDanger">{origin.last_error}</span>}</div><button className="icon secondaryIcon" title="编辑目标" onClick={() => beginEditOrigin(origin)}><Pencil size={14} /></button><button className="icon dangerBtn" title="删除目标" disabled={group.origins.length <= 1} onClick={() => window.confirm(`确认删除目标 ${origin.target} 吗？`) && act(() => apiFetch(`/api/alibaba-httpdns/origins/${origin.id}/delete`, token, { method: "POST" }), "目标已删除")}><Trash2 size={14} /></button></div>
         ))}
         {adding ? <div className="alibabaOriginAdd"><label>备用 IP / 域名<input autoFocus placeholder={group.record_type === "CNAME" ? "请输入实际备用域名，例如 backup.example.com" : "请输入实际备用 IP，例如 203.0.113.10"} value={originDraft.target} onChange={(event) => setOriginDraft({ ...originDraft, target: event.target.value })} /></label><label>检查端口<input type="number" min={1} max={65535} value={originDraft.port} onChange={(event) => setOriginDraft({ ...originDraft, port: Number(event.target.value) })} /></label><label>优先级<input type="number" min={0} value={originDraft.priority} onChange={(event) => setOriginDraft({ ...originDraft, priority: Number(event.target.value) })} /></label><label>备注<input placeholder="例如 香港备用" value={originDraft.remark} onChange={(event) => setOriginDraft({ ...originDraft, remark: event.target.value })} /></label><label className="inlineCheck"><input type="checkbox" checked={originDraft.ignore_health_check} onChange={(event) => setOriginDraft({ ...originDraft, ignore_health_check: event.target.checked })} />无视健康检查</label><button disabled={busy} onClick={() => act(addOrigin, "备用目标已添加", () => setAdding(false))}><Plus size={14} />确认添加</button><button className="secondary" onClick={() => setAdding(false)}>取消</button><p className="alibabaOriginInputHint">灰色示例不是已填写内容，请在第一个输入框中输入真实备用地址。</p></div> : <button className="secondary alibabaAddOriginButton" onClick={beginAdd}><Plus size={14} />添加备用 IP / 域名</button>}
       </div>
@@ -2336,7 +2720,7 @@ function DohFailoverPanel({
       {legacyBindings.length > 0 && (
         <div className="panel">
           <h2>旧版跟随型 DoH 绑定</h2>
-          <p>这些 Cloudflare 故障组仍在向 DoH 发布自己的当前源站。迁移到独立规则前，请先关闭对应旧绑定。</p>
+          <p>这些故障组仍在向 DoH 发布自己的当前源站。迁移到独立规则或 Route 53 输出前，可以直接关闭旧绑定；故障组允许暂时没有输出。</p>
           <div className="recordTable">
             {legacyBindings.map((group) => (
               <div className="recordRow" key={group.id}>
@@ -2346,7 +2730,6 @@ function DohFailoverPanel({
                 </div>
                 <button
                   className="secondary"
-                  disabled={!group.cloudflare_publish_enabled}
                   onClick={() => act(
                     () => apiFetch(`/api/groups/${group.id}`, token, {
                       method: "PATCH",
@@ -2355,12 +2738,12 @@ function DohFailoverPanel({
                     "旧版 DoH 绑定已关闭"
                   )}
                 >
-                  <PowerOff size={14} />{group.cloudflare_publish_enabled ? "关闭旧绑定" : "需先恢复公网输出"}
+                  <PowerOff size={14} />关闭旧绑定
                 </button>
               </div>
             ))}
           </div>
-          {legacyBindings.some((group) => !group.cloudflare_publish_enabled) && <small className="error">仅使用 DoH 输出的旧组必须先恢复 Cloudflare 公网输出，才能关闭最后一个输出通道。</small>}
+          <small className="awsFieldHint">关闭最后一个输出后，组仍可编辑和健康检查，但会显示“未启用任何输出通道”，直到绑定新的发布目标。</small>
         </div>
       )}
       <form className="panel" onSubmit={createGroup}>
@@ -2486,6 +2869,7 @@ function DohFailoverPanel({
 }
 
 function GroupsPanel({
+  providerType,
   token,
   collections,
   groups,
@@ -2495,6 +2879,7 @@ function GroupsPanel({
   agents,
   act
 }: {
+  providerType: "cloudflare" | "route53" | "alibaba_httpdns";
   token: string;
   collections: FailoverCollection[];
   groups: FailoverGroup[];
@@ -2528,6 +2913,7 @@ function GroupsPanel({
   // by default and expand into a compact table on demand.
   const [expandedInheritedGroupIds, setExpandedInheritedGroupIds] = useState<Set<number>>(new Set());
   const [azRemoteResources, setAzRemoteResources] = useState<AzPanelRemoteResource[]>([]);
+  const providerLabel = providerType === "cloudflare" ? "Cloudflare DNS" : providerType === "route53" ? "AWS Route 53" : "阿里云 HTTPDNS";
   const addingGlobalCollection = addingGlobalCollectionId ? collections.find((collection) => collection.id === addingGlobalCollectionId) : undefined;
   const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
   const addingHostnameGroup = addingHostnameGroupId ? groups.find((group) => group.id === addingHostnameGroupId) : undefined;
@@ -2589,7 +2975,7 @@ function GroupsPanel({
         }
         return apiFetch("/api/groups/collections", token, {
           method: "POST",
-          body: JSON.stringify({ name: collectionDraft.name.trim() })
+          body: JSON.stringify({ name: collectionDraft.name.trim(), provider_type: providerType })
         });
       },
       "业务分组已创建",
@@ -3493,8 +3879,8 @@ function GroupsPanel({
   return (
     <section className="stack">
       <div className="panelTitle groupsIntro">
-        <h2>故障切换组</h2>
-        <p>从解析记录页接管主用解析；业务分组里的全局备用会自动同步到该分组下所有切换组。</p>
+        <h2>{providerLabel} 故障切换组</h2>
+        <p>健康检查、优先级、自动换 IP、分时入口与通知使用统一引擎；这里的选择只发布到 {providerLabel}。</p>
       </div>
       <form className="collectionCreateBar" onSubmit={createCollection}>
         <label>
@@ -3558,14 +3944,14 @@ function GroupsPanel({
                 <div>
                   <div className="groupTitleLine">
                     <h2 className="groupHostname">{group.hostname}</h2>
-                    <span className="groupRoleBadge">主域名 {Math.max(groupHostnames.length, 1)} 个</span>
+                    <span className="groupRoleBadge">{providerLabel} · 主机名 {Math.max(groupHostnames.length, 1)} 个</span>
                   </div>
                   <span className="groupMetaLine">TTL {group.ttl} · 源站 {sortedOrigins.length} 个 · 当前 {currentTarget} · 最后检测 {fmtDate(groupLastCheckedAt)}</span>
                   <div className="hostnameChips">
                     {(groupHostnames.length > 0 ? groupHostnames : [{ id: 0, hostname: group.hostname, current_record_id: group.current_record_id }]).map((hostname) => (
                       <span className={`hostnameChip ${hostname.hostname === group.hostname ? "primary" : ""}`} key={hostname.id || hostname.hostname}>
                         {hostname.hostname}
-                        {groupHostnames.length > 1 && hostname.id > 0 && (
+                        {providerType === "cloudflare" && groupHostnames.length > 1 && hostname.id > 0 && (
                           <button
                             className="hostnameDeleteButton"
                             type="button"
@@ -3599,10 +3985,12 @@ function GroupsPanel({
                     <Plus size={15} />
                     <span>添加备用</span>
                   </button>
-                  <button className="secondary" title="添加主域名" onClick={() => beginAddHostname(group)}>
-                    <Plus size={15} />
-                    <span>主域名</span>
-                  </button>
+                  {providerType === "cloudflare" && (
+                    <button className="secondary" title="添加主域名" onClick={() => beginAddHostname(group)}>
+                      <Plus size={15} />
+                      <span>主域名</span>
+                    </button>
+                  )}
                   <button className="icon secondaryIcon" title="修改切换组" onClick={() => beginEditGroup(group)}>
                     <Pencil size={15} />
                   </button>
@@ -3623,7 +4011,13 @@ function GroupsPanel({
                     <div className="groupSettingsEdit">
                       <label>
                         TTL（秒）
-                        <input type="number" min={30} max={86400} value={groupEdit.ttl} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, ttl: Number(event.target.value) } }))} />
+                        {providerType === "alibaba_httpdns" ? (
+                          <select value={groupEdit.ttl} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, ttl: Number(event.target.value) } }))}>
+                            {[5, 30, 60, 3600, 43200, 86400].map((ttl) => <option value={ttl} key={ttl}>{ttl}</option>)}
+                          </select>
+                        ) : (
+                          <input type="number" min={providerType === "route53" ? 0 : 30} max={86400} value={groupEdit.ttl} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, ttl: Number(event.target.value) } }))} />
+                        )}
                       </label>
                       <label>
                         最小切换间隔（秒）
@@ -3640,13 +4034,15 @@ function GroupsPanel({
                           ))}
                         </select>
                       </label>
-                      <label>
-                        Cloudflare 公网输出
-                        <select value={groupEdit.cloudflare_publish_enabled ? "enabled" : "disabled"} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, cloudflare_publish_enabled: event.target.value === "enabled" } }))}>
-                          <option value="enabled">由故障切换接管真实源站</option>
-                          <option value="disabled">保留现有迷惑记录，不接管</option>
-                        </select>
-                      </label>
+                      {providerType === "cloudflare" && (
+                        <label>
+                          Cloudflare 公网输出
+                          <select value={groupEdit.cloudflare_publish_enabled ? "enabled" : "disabled"} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, cloudflare_publish_enabled: event.target.value === "enabled" } }))}>
+                            <option value="enabled">由故障切换接管真实源站</option>
+                            <option value="disabled">保留现有迷惑记录，不接管</option>
+                          </select>
+                        </label>
+                      )}
                       <label className="inlineCheck">
                         <input type="checkbox" checked={groupEdit.enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, enabled: event.target.checked } }))} />
                         启用这个切换组
@@ -4108,8 +4504,8 @@ function GroupsPanel({
         ))}
         {groups.length === 0 && collections.length === 0 && (
           <div className="panel emptyGroupPanel">
-            <h2>还没有故障切换组</h2>
-            <p>请先到解析记录页，选择一条 DNS-only A/AAAA/CNAME 记录，点击管理并确认接管。</p>
+            <h2>还没有 {providerLabel} 故障切换组</h2>
+            <p>{providerType === "cloudflare" ? "请先到解析记录页接管一条 DNS-only 记录。" : `请先在上方配置 ${providerLabel} 凭证和目标记录。`}</p>
           </div>
         )}
       </div>

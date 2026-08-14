@@ -140,6 +140,54 @@ def test_invalid_origin_target_returns_400_instead_of_500():
     assert exc_info.value.status_code == 400
 
 
+def test_provider_only_group_can_be_edited_before_an_output_is_attached(monkeypatch):
+    db = make_session()
+    _, user = setup_zone(db)
+    group = FailoverGroup(
+        zone_id=None,
+        hostname="private.example.com",
+        ttl=60,
+        enabled=True,
+        cloudflare_publish_enabled=False,
+        doh_enabled=False,
+    )
+    db.add(group)
+    db.commit()
+    monkeypatch.setattr("app.routes.groups.evaluate_failover_groups", lambda *_args, **_kwargs: 0)
+
+    updated = update_group(group.id, FailoverGroupUpdate(ttl=120), user, db)
+    assert updated.ttl == 120
+
+    disabled = update_group(group.id, FailoverGroupUpdate(enabled=False), user, db)
+    assert disabled.enabled is False
+
+
+def test_provider_only_group_can_add_hostname_even_when_matching_cloudflare_zone_exists():
+    db = make_session()
+    _, user = setup_zone(db)
+    group = FailoverGroup(
+        zone_id=None,
+        hostname="private.example.com",
+        cloudflare_publish_enabled=False,
+        doh_enabled=False,
+    )
+    db.add(group)
+    db.commit()
+
+    updated = add_group_hostname(
+        group.id,
+        FailoverHostnameCreate(hostname="private-alt.example.com"),
+        user,
+        db,
+    )
+
+    assert {entry.hostname for entry in updated.hostnames} == {
+        "private.example.com",
+        "private-alt.example.com",
+    }
+    assert all(entry.zone_id is None for entry in updated.hostnames)
+
+
 def test_upsert_time_rule_creates_then_updates_single_group_rule(monkeypatch):
     db = make_session()
     zone, user = setup_zone(db)

@@ -1,16 +1,26 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
 
-from ..alibaba_httpdns import evaluate_alibaba_httpdns_groups, list_remote_accounts, list_remote_records, list_remote_zones
+from ..alibaba_httpdns import (
+    evaluate_alibaba_httpdns_groups,
+    list_credential_records,
+    list_credential_zones,
+    list_remote_accounts,
+    list_remote_records,
+    list_remote_zones,
+)
 from ..database import get_db
 from ..deps import get_current_user
-from ..dns_utils import parse_target
+from ..dns_utils import normalize_hostname, parse_target
 from ..events import add_event
-from ..models import AlibabaHttpDnsGroup, AlibabaHttpDnsOrigin, User
+from ..models import AlibabaHttpDnsCredential, AlibabaHttpDnsGroup, AlibabaHttpDnsOrigin, FailoverGroup, Origin, User
 from ..schemas import (
     AlibabaHttpDnsGroupCreate,
     AlibabaHttpDnsGroupOut,
     AlibabaHttpDnsGroupUpdate,
+    AlibabaHttpDnsCredentialCreate,
+    AlibabaHttpDnsCredentialOut,
+    AlibabaHttpDnsCredentialUpdate,
     AlibabaHttpDnsOriginCreate,
     AlibabaHttpDnsOriginOut,
     AlibabaHttpDnsOriginUpdate,
@@ -22,6 +32,7 @@ from ..schemas import (
     Message,
 )
 from ..origin_expansion import published_ips, set_published_ips
+from ..security import encrypt_secret
 
 
 router = APIRouter(prefix="/alibaba-httpdns", tags=["alibaba-httpdns"])
@@ -31,8 +42,15 @@ def _group_query(db: Session):
     return db.query(AlibabaHttpDnsGroup).options(selectinload(AlibabaHttpDnsGroup.origins))
 
 
-def _find_remote_record(db: Session, account_id: int, zone_id: str, record_id: str) -> dict:
-    record = next((item for item in list_remote_records(db, account_id, zone_id) if str(item.get("RecordId") or "") == record_id), None)
+def _find_remote_record(
+    db: Session,
+    account_id: int,
+    zone_id: str,
+    record_id: str,
+    credential: AlibabaHttpDnsCredential | None = None,
+) -> dict:
+    records = list_credential_records(credential, zone_id) if credential is not None else list_remote_records(db, account_id, zone_id)
+    record = next((item for item in records if str(item.get("RecordId") or "") == record_id), None)
     if record is None:
         raise HTTPException(status_code=404, detail="阿里云 HTTPDNS 解析记录不存在")
     if str(record.get("Type") or "").upper() not in {"A", "AAAA", "CNAME"}:
@@ -63,6 +81,7 @@ def _adopt_record(
     primary_port: int,
     enabled: bool,
     min_switch_interval_seconds: int,
+    credential_id: int | None = None,
 ) -> AlibabaHttpDnsGroup:
     record_id = str(record.get("RecordId") or "").strip()
     if not record_id:
@@ -81,6 +100,7 @@ def _adopt_record(
     if target.record_type != record_type:
         raise ValueError(f"记录 {record_id} 的类型和值不匹配")
     group = AlibabaHttpDnsGroup(
+        credential_id=credential_id,
         remote_account_id=remote_account_id,
         account_name=account_name.strip(),
         zone_id=zone_id.strip(),
@@ -99,6 +119,37 @@ def _adopt_record(
     )
     db.add(group)
     db.flush()
+    if credential_id is not None:
+        hostname = normalize_hostname(f"{group.rr}.{group.zone_name}".replace("@.", ""))
+        source_group = FailoverGroup(
+            provider_type="alibaba_httpdns",
+            zone_id=None,
+            hostname=hostname,
+            ttl=group.ttl,
+            enabled=enabled,
+            min_switch_interval_seconds=min_switch_interval_seconds,
+            cloudflare_publish_enabled=False,
+            doh_enabled=False,
+        )
+        db.add(source_group)
+        db.flush()
+        source_origin = Origin(
+            group_id=source_group.id,
+            target=target.value,
+            target_type=target.target_type,
+            publish_mode="expanded" if target.target_type == "hostname" and record_type != "CNAME" else "direct",
+            port=primary_port,
+            priority=0,
+            remark="Alibaba HTTPDNS primary",
+            enabled=True,
+            status="unknown",
+        )
+        db.add(source_origin)
+        db.flush()
+        source_group.current_origin_id = source_origin.id
+        group.source_group_id = source_group.id
+        group.source_current_origin_id = source_origin.id
+        return group
     origin = AlibabaHttpDnsOrigin(
         group_id=group.id,
         target=target.value,
@@ -114,6 +165,131 @@ def _adopt_record(
         set_published_ips(origin, [target.value])
     group.current_origin_id = origin.id
     return group
+
+
+def _credential(db: Session, credential_id: int) -> AlibabaHttpDnsCredential:
+    credential = db.get(AlibabaHttpDnsCredential, credential_id)
+    if credential is None:
+        raise HTTPException(status_code=404, detail="Alibaba HTTPDNS credential not found")
+    return credential
+
+
+@router.get("/credentials", response_model=list[AlibabaHttpDnsCredentialOut])
+def credentials(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return db.query(AlibabaHttpDnsCredential).order_by(AlibabaHttpDnsCredential.name).all()
+
+
+@router.post("/credentials", response_model=AlibabaHttpDnsCredentialOut)
+def create_credential(
+    payload: AlibabaHttpDnsCredentialCreate,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = AlibabaHttpDnsCredential(
+        name=payload.name.strip(),
+        access_key_id_encrypted=encrypt_secret(payload.access_key_id.strip()),
+        access_key_secret_encrypted=encrypt_secret(payload.access_key_secret),
+        region=payload.region.strip(),
+        endpoint=payload.endpoint.strip(),
+        enabled=True,
+    )
+    db.add(credential)
+    try:
+        db.flush()
+        list_credential_zones(credential)
+        credential.enabled = payload.enabled
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Alibaba HTTPDNS credential test failed: {exc}") from exc
+    db.commit()
+    db.refresh(credential)
+    return credential
+
+
+@router.patch("/credentials/{credential_id}", response_model=AlibabaHttpDnsCredentialOut)
+def update_credential(
+    credential_id: int,
+    payload: AlibabaHttpDnsCredentialUpdate,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, credential_id)
+    updates = payload.model_dump(exclude_unset=True)
+    requested_enabled = updates.pop("enabled", credential.enabled)
+    if "access_key_id" in updates:
+        value = updates.pop("access_key_id")
+        if value:
+            credential.access_key_id_encrypted = encrypt_secret(value.strip())
+    if "access_key_secret" in updates:
+        value = updates.pop("access_key_secret")
+        if value:
+            credential.access_key_secret_encrypted = encrypt_secret(value)
+    for key, value in updates.items():
+        setattr(credential, key, value.strip() if isinstance(value, str) else value)
+    try:
+        credential.enabled = True
+        list_credential_zones(credential)
+        credential.enabled = requested_enabled
+        credential.last_error = None
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Alibaba HTTPDNS credential test failed: {exc}") from exc
+    db.commit()
+    db.refresh(credential)
+    return credential
+
+
+@router.delete("/credentials/{credential_id}", response_model=Message)
+def delete_credential(
+    credential_id: int,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, credential_id)
+    used = db.query(AlibabaHttpDnsGroup).filter(AlibabaHttpDnsGroup.credential_id == credential.id).count()
+    if used:
+        raise HTTPException(status_code=409, detail=f"Credential is used by {used} Alibaba HTTPDNS rule(s)")
+    db.delete(credential)
+    db.commit()
+    return Message(message="Alibaba HTTPDNS credential deleted")
+
+
+@router.get("/credentials/{credential_id}/zones", response_model=list[AlibabaHttpDnsRemoteZoneOut])
+def credential_zones(
+    credential_id: int,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, credential_id)
+    try:
+        result = list_credential_zones(credential)
+        credential.last_error = None
+        db.commit()
+        return result
+    except Exception as exc:
+        credential.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/credentials/{credential_id}/zones/{zone_id}/records", response_model=list[AlibabaHttpDnsRemoteRecordOut])
+def credential_records(
+    credential_id: int,
+    zone_id: str,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _credential(db, credential_id)
+    try:
+        return [
+            item
+            for item in list_credential_records(credential, zone_id)
+            if str(item.get("Type") or "").upper() in {"A", "AAAA", "CNAME"}
+        ]
+    except Exception as exc:
+        credential.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/remote/accounts", response_model=list[AlibabaHttpDnsRemoteAccountOut])
@@ -147,8 +323,14 @@ def list_groups(_: User = Depends(get_current_user), db: Session = Depends(get_d
 
 @router.post("/zones", response_model=Message)
 def adopt_zone(payload: AlibabaHttpDnsZoneAdopt, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    credential = _credential(db, payload.credential_id) if payload.credential_id is not None else None
+    account_id = -credential.id if credential is not None else payload.remote_account_id
     try:
-        records = list_remote_records(db, payload.remote_account_id, payload.zone_id)
+        records = (
+            list_credential_records(credential, payload.zone_id)
+            if credential is not None
+            else list_remote_records(db, account_id, payload.zone_id)
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     candidates = [
@@ -161,7 +343,7 @@ def adopt_zone(payload: AlibabaHttpDnsZoneAdopt, _: User = Depends(get_current_u
     existing_ids = {
         item.record_id
         for item in db.query(AlibabaHttpDnsGroup).filter(
-            AlibabaHttpDnsGroup.remote_account_id == payload.remote_account_id,
+            AlibabaHttpDnsGroup.remote_account_id == account_id,
             AlibabaHttpDnsGroup.zone_id == payload.zone_id,
         ).all()
     }
@@ -176,14 +358,15 @@ def adopt_zone(payload: AlibabaHttpDnsZoneAdopt, _: User = Depends(get_current_u
         try:
             _adopt_record(
                 db,
-                remote_account_id=payload.remote_account_id,
-                account_name=payload.account_name,
+                remote_account_id=account_id,
+                account_name=credential.name if credential is not None else payload.account_name,
                 zone_id=payload.zone_id,
                 zone_name=payload.zone_name,
                 record=record,
                 primary_port=payload.primary_port,
                 enabled=payload.enabled,
                 min_switch_interval_seconds=payload.min_switch_interval_seconds,
+                credential_id=credential.id if credential is not None else None,
             )
             created += 1
         except ValueError as exc:
@@ -195,7 +378,7 @@ def adopt_zone(payload: AlibabaHttpDnsZoneAdopt, _: User = Depends(get_current_u
         "alibaba_httpdns.zone_adopted",
         "info",
         f"阿里云 HTTPDNS 权威域名 {payload.zone_name} 已接管，新增 {created} 条记录",
-        {"account_id": payload.remote_account_id, "zone_id": payload.zone_id, "created": created, "existing": skipped, "errors": errors},
+        {"account_id": account_id, "credential_id": payload.credential_id, "zone_id": payload.zone_id, "created": created, "existing": skipped, "errors": errors},
     )
     db.commit()
     return Message(message=f"权威域名已同步：新增 {created} 条，已有 {skipped} 条", detail={"created": created, "existing": skipped, "errors": errors})
@@ -208,6 +391,11 @@ def _release_zone(db: Session, remote_account_id: int, zone_id: str) -> Message:
     ).all()
     if not groups:
         raise HTTPException(status_code=404, detail="这个权威域名尚未接管")
+    if any(group.source_group is not None and group.source_group.provider_type == "alibaba_httpdns" for group in groups):
+        raise HTTPException(
+            status_code=409,
+            detail="Direct Alibaba rules own full failover groups; delete them individually in the Alibaba failover list so every source deletion is explicit",
+        )
     for group in groups:
         db.delete(group)
     db.commit()
@@ -217,7 +405,8 @@ def _release_zone(db: Session, remote_account_id: int, zone_id: str) -> Message:
 @router.post("/zones/release", response_model=Message)
 def release_zone_action(payload: AlibabaHttpDnsZoneRelease, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """POST compatibility endpoint for reverse proxies that do not forward DELETE reliably."""
-    return _release_zone(db, payload.remote_account_id, payload.zone_id)
+    account_id = -payload.credential_id if payload.credential_id is not None else payload.remote_account_id
+    return _release_zone(db, account_id, payload.zone_id)
 
 
 @router.delete("/zones/{remote_account_id}/{zone_id}", response_model=Message)
@@ -227,29 +416,32 @@ def release_zone(remote_account_id: int, zone_id: str, _: User = Depends(get_cur
 
 @router.post("/groups", response_model=AlibabaHttpDnsGroupOut)
 def create_group(payload: AlibabaHttpDnsGroupCreate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    credential = _credential(db, payload.credential_id) if payload.credential_id is not None else None
+    account_id = -credential.id if credential is not None else payload.remote_account_id
     duplicate = db.query(AlibabaHttpDnsGroup).filter(
-        AlibabaHttpDnsGroup.remote_account_id == payload.remote_account_id,
+        AlibabaHttpDnsGroup.remote_account_id == account_id,
         AlibabaHttpDnsGroup.zone_id == payload.zone_id,
         AlibabaHttpDnsGroup.record_id == payload.record_id,
     ).one_or_none()
     if duplicate is not None:
         raise HTTPException(status_code=409, detail="这条阿里云 HTTPDNS 记录已经创建切换组")
     try:
-        record = _find_remote_record(db, payload.remote_account_id, payload.zone_id, payload.record_id)
+        record = _find_remote_record(db, account_id, payload.zone_id, payload.record_id, credential)
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     group = _adopt_record(
         db,
-        remote_account_id=payload.remote_account_id,
-        account_name=payload.account_name.strip(),
+        remote_account_id=account_id,
+        account_name=credential.name if credential is not None else payload.account_name.strip(),
         zone_id=payload.zone_id.strip(),
         zone_name=payload.zone_name.strip(),
         record=record,
         primary_port=payload.primary_port,
         enabled=payload.enabled,
         min_switch_interval_seconds=payload.min_switch_interval_seconds,
+        credential_id=credential.id if credential is not None else None,
     )
     add_event(db, "alibaba_httpdns.group_created", "info", f"阿里云 HTTPDNS {group.rr}.{group.zone_name} 切换组已创建", {"group_id": group.id, "record_id": group.record_id})
     db.commit()
@@ -261,7 +453,15 @@ def update_group(group_id: int, payload: AlibabaHttpDnsGroupUpdate, _: User = De
     group = db.get(AlibabaHttpDnsGroup, group_id)
     if group is None:
         raise HTTPException(status_code=404, detail="阿里云 HTTPDNS 切换组不存在")
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    if "source_group_id" in updates and updates["source_group_id"] is not None:
+        source = db.get(FailoverGroup, updates["source_group_id"])
+        if source is None:
+            raise HTTPException(status_code=404, detail="Linked failover group not found")
+    if "source_group_id" in updates and updates["source_group_id"] != group.source_group_id:
+        group.source_current_origin_id = None
+        group.last_switch_at = None
+    for key, value in updates.items():
         setattr(group, key, value)
     db.commit()
     if group.enabled:
@@ -275,6 +475,11 @@ def delete_group(group_id: int, _: User = Depends(get_current_user), db: Session
     group = db.get(AlibabaHttpDnsGroup, group_id)
     if group is None:
         raise HTTPException(status_code=404, detail="阿里云 HTTPDNS 切换组不存在")
+    if group.source_group is not None and group.source_group.provider_type == "alibaba_httpdns":
+        raise HTTPException(
+            status_code=409,
+            detail="Delete this direct Alibaba rule from its full failover group card",
+        )
     db.delete(group)
     db.commit()
     return Message(message="阿里云 HTTPDNS 切换组已删除，云端记录保持不变")

@@ -7,7 +7,18 @@ from app.database import Base
 from app.dns_utils import parse_target
 from app.cloudflare import CloudflareError
 from app.failover import choose_desired_origin, evaluate_failover_groups, publish_origin, validate_group_hostname_records
-from app.models import CloudflareCredential, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, Zone
+from app.models import (
+    AlibabaHttpDnsGroup,
+    AwsRoute53Credential,
+    AwsRoute53Output,
+    CloudflareCredential,
+    DohEndpoint,
+    FailoverGroup,
+    FailoverHostname,
+    FailoverTimeRule,
+    Origin,
+    Zone,
+)
 from app.origin_expansion import EXPANDED_PUBLISH_MODE, selected_healthy_ip, selected_publish_ip, set_expanded_ip_priorities, set_healthy_ips, set_published_ips, set_resolved_ips
 from app.security import encrypt_secret
 
@@ -1022,6 +1033,32 @@ def test_cloudflare_disabled_group_does_not_read_write_or_emit_fake_dns_events(m
         assert evaluate_failover_groups(db) == 0
 
     assert events == []
+    assert group.last_error == "未启用任何输出通道"
+
+
+def test_zero_output_group_does_not_advance_selection_and_explains_why():
+    db = make_session()
+    group, failed = setup_group(db, "192.0.2.10")
+    healthy = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=2,
+        ignore_health_check=True,
+    )
+    failed.status = "unhealthy"
+    failed.priority = 1
+    group.current_origin_id = failed.id
+    group.cloudflare_publish_enabled = False
+    group.doh_enabled = False
+    db.add(healthy)
+    db.commit()
+
+    assert evaluate_failover_groups(db) == 0
+    assert group.current_origin_id == failed.id
+    assert group.last_error == "未启用任何输出通道"
 
 
 def test_cloudflare_failure_and_unavailable_doh_does_not_advance_selection(monkeypatch):
@@ -1049,6 +1086,81 @@ def test_cloudflare_failure_and_unavailable_doh_does_not_advance_selection(monke
 
     assert evaluate_failover_groups(db) == 0
     assert group.current_origin_id == failed.id
+
+
+def test_provider_success_advances_selection_when_cloudflare_and_doh_fail(monkeypatch):
+    db = make_session()
+    group, failed = setup_group(db, "192.0.2.10")
+    backup = Origin(
+        group_id=group.id,
+        target="192.0.2.20",
+        target_type="ipv4",
+        port=443,
+        status="healthy",
+        priority=2,
+    )
+    failed.status = "unhealthy"
+    failed.priority = 1
+    group.current_origin_id = failed.id
+    group.doh_enabled = True
+    credential = AwsRoute53Credential(name="aws", region="ap-east-1", use_instance_role=True)
+    endpoint = DohEndpoint(
+        name="private-doh",
+        provider_type="route53",
+        base_url="https://doh.example.com",
+        hmac_secret_encrypted=encrypt_secret("secret"),
+    )
+    db.add_all([backup, credential, endpoint])
+    db.flush()
+    group.doh_endpoint_id = endpoint.id
+    route53_output = AwsRoute53Output(
+        group_id=group.id,
+        credential_id=credential.id,
+        doh_endpoint_id=endpoint.id,
+        hosted_zone_id="ZPRIVATE",
+        hosted_zone_name="example.com",
+        hostname=group.hostname,
+        enabled=True,
+        current_origin_id=failed.id,
+    )
+    alibaba_output = AlibabaHttpDnsGroup(
+        source_group_id=group.id,
+        remote_account_id=7,
+        account_name="Alibaba",
+        zone_id="zone-1",
+        zone_name="example.com",
+        record_id="record-1",
+        rr="www",
+        record_type="A",
+        enabled=True,
+        source_current_origin_id=failed.id,
+    )
+    db.add_all([route53_output, alibaba_output])
+    db.commit()
+
+    def publish_route53(_db, _group, origin):
+        route53_output.current_origin_id = origin.id
+        route53_output.last_error = None
+        return True
+
+    def publish_alibaba(_db, _group, origin):
+        alibaba_output.source_current_origin_id = origin.id
+        alibaba_output.last_error = None
+        return True
+
+    monkeypatch.setattr("app.failover.run_local_checks", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("app.failover.publish_origin", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("cf unavailable")))
+    monkeypatch.setattr("app.failover.sync_group_doh_endpoint", lambda *args, **kwargs: False)
+    monkeypatch.setattr("app.failover.sync_group_route53_outputs", publish_route53)
+    monkeypatch.setattr("app.failover.sync_group_alibaba_outputs", publish_alibaba)
+    monkeypatch.setattr("app.failover.add_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.failover.send_webhooks", lambda *args, **kwargs: None)
+
+    assert evaluate_failover_groups(db, check_dns_consistency=False) == 1
+    assert group.current_origin_id == backup.id
+    assert group.last_switch_at is not None
+    assert route53_output.current_origin_id == backup.id
+    assert alibaba_output.source_current_origin_id == backup.id
 
 
 def test_failed_current_origin_escapes_cooldown(monkeypatch):

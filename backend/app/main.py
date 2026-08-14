@@ -16,6 +16,7 @@ from .failover import evaluate_failover_groups
 from .integrations import auto_sync_synexvm_statuses, reconcile_pending_synexvm_changes
 from .health import mark_stale_agents, run_local_checks
 from .retention import prune_old_rows
+from .route53 import reconcile_route53_outputs
 from .runtime_settings import get_runtime_settings
 from .routes import routers
 
@@ -50,6 +51,10 @@ def _run_scheduler_tick() -> int:
             db,
             commit_per_group=True,
             consistency_check_interval_seconds=get_settings().dns_consistency_check_interval_seconds,
+        )
+        reconcile_route53_outputs(
+            db,
+            interval_seconds=get_settings().dns_consistency_check_interval_seconds,
         )
         evaluate_alibaba_httpdns_groups(db, commit_per_group=True, check_cache=check_cache)
         evaluate_doh_failover_groups(db, commit_per_group=True, check_cache=check_cache)

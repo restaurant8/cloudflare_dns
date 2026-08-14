@@ -78,7 +78,9 @@ def _best_effort_sync(db: Session, endpoint_ids: set[int]) -> None:
     for endpoint_id in endpoint_ids:
         endpoint = db.get(DohEndpoint, endpoint_id)
         if endpoint is not None and endpoint.enabled:
-            sync_doh_endpoint(db, endpoint)
+            # Configuration deletion/disable changes the desired snapshot and
+            # must not wait behind periodic reconciliation backoff.
+            sync_doh_endpoint(db, endpoint, force=True, ignore_backoff=True)
     db.commit()
 
 

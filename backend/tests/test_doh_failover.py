@@ -278,7 +278,7 @@ def test_hostname_candidate_publishes_only_individually_healthy_ips(monkeypatch)
     assert [record["value"] for record in build_doh_snapshot(db, endpoint)["records"]] == ["203.0.113.10"]
 
 
-def test_endpoint_failure_backoff_suppresses_repeated_posts(monkeypatch):
+def test_real_failover_retry_is_not_blocked_by_endpoint_backoff(monkeypatch):
     db = make_session()
     endpoint, group, _, _ = setup_group(db)
     calls = []
@@ -291,6 +291,68 @@ def test_endpoint_failure_backoff_suppresses_repeated_posts(monkeypatch):
     for _ in range(5):
         evaluate_doh_failover_groups(db, [group.id])
 
-    assert len(calls) == 1
-    assert endpoint.sync_failure_count == 1
+    assert len(calls) == 5
+    assert endpoint.sync_failure_count == 5
     assert endpoint.next_sync_retry_at is not None
+
+
+def test_failure_backoff_does_not_block_next_real_origin_change(monkeypatch):
+    db = make_session()
+    endpoint, group, primary, backup = setup_group(db)
+    responses = [False, True]
+    calls = []
+
+    class Response:
+        def __init__(self, succeeds):
+            self.succeeds = succeeds
+
+        def raise_for_status(self):
+            if not self.succeeds:
+                raise RuntimeError("temporary 503")
+
+    def post(*args, **kwargs):
+        calls.append(1)
+        return Response(responses.pop(0))
+
+    monkeypatch.setattr("app.doh.httpx.post", post)
+    assert evaluate_doh_failover_groups(db, [group.id]) == 0
+    assert endpoint.next_sync_retry_at is not None
+
+    primary.enabled = False
+    assert evaluate_doh_failover_groups(db, [group.id]) == 1
+    assert calls == [1, 1]
+    assert group.current_origin_id == backup.id
+    assert group.last_error is None
+
+
+def test_unprobed_hostname_addresses_are_never_published(monkeypatch):
+    db = make_session()
+    endpoint, group, primary, backup = setup_group(db)
+    group.current_origin_id = primary.id
+    primary.target = "never-healthy.example.net"
+    primary.target_type = "hostname"
+    primary.ignore_health_check = False
+    primary.status = "healthy"
+    primary.published_ips_json = "[]"
+    backup.enabled = False
+    db.commit()
+
+    class Result:
+        success = False
+        rtt_ms = None
+        error = "connection refused"
+
+    monkeypatch.setattr(
+        "app.doh_failover.resolve_hostname_ips_bounded",
+        lambda *_args: ["198.51.100.7", "198.51.100.8"],
+    )
+    monkeypatch.setattr("app.doh_failover.tcp_check", lambda *args: Result())
+    monkeypatch.setattr(
+        "app.doh.httpx.post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not publish unprobed values")),
+    )
+
+    evaluate_doh_failover_groups(db, [group.id])
+
+    assert primary.published_ips == []
+    assert build_doh_snapshot(db, endpoint)["records"] == []

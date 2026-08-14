@@ -6,7 +6,8 @@ from typing import Any
 from sqlalchemy.orm import Session, selectinload
 
 from .dns_utils import tcp_check
-from .doh import resolve_hostname_ips_bounded, sync_doh_endpoint
+from .dns_resolution import resolve_hostname_ips_bounded
+from .doh import sync_doh_endpoint
 from .events import add_event
 from .models import DohFailoverGroup, DohFailoverOrigin
 from .notifier import send_webhooks
@@ -72,7 +73,10 @@ def origin_records(origin: DohFailoverOrigin) -> list[tuple[str, str]]:
     """
     values = published_ips(origin)
     if not values and origin.target_type != "hostname":
-        # Upgrade compatibility for a direct-IP rule selected by the first release.
+        # Upgrade compatibility: a direct-IP current origin was necessarily the
+        # value selected by older releases even though they did not persist the
+        # published metadata. Hostnames never use this shortcut because their
+        # resolved addresses may not have passed individual probes.
         values = [str(ipaddress.ip_address(origin.target))]
     return [("A" if ipaddress.ip_address(value).version == 4 else "AAAA", value) for value in values]
 
@@ -128,11 +132,6 @@ def probe_origin(
         return
 
     set_resolved_ips(origin, candidates)
-    if origin.group.current_origin_id == origin.id and not published_ips(origin):
-        # Upgrade compatibility: the first release selected an origin without
-        # persisting its published addresses. Seed only an already-current origin;
-        # a newly edited current origin retains its non-empty old published set.
-        set_published_ips(origin, candidates)
     if origin.ignore_health_check:
         set_healthy_ips(origin, candidates)
         origin.status = "healthy"
@@ -282,7 +281,7 @@ def evaluate_doh_failover_groups(
             group.current_origin_id = desired.id
             set_published_ips(desired, proposed_ips)
             db.flush()
-            if not sync_doh_endpoint(db, group.endpoint, force=True):
+            if not sync_doh_endpoint(db, group.endpoint, force=True, ignore_backoff=True):
                 group.current_origin_id = old_origin_id
                 set_published_ips(desired, old_published_ips)
                 group.last_error = group.endpoint.last_error or "DoH endpoint is disabled or retry is deferred"

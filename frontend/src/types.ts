@@ -20,7 +20,7 @@ export type Zone = {
 
 export type DnsRecord = {
   id: number;
-  zone_id: number;
+  zone_id: number | null;
   cf_record_id: string;
   name: string;
   type: string;
@@ -35,6 +35,17 @@ export type AlibabaHttpDnsRemoteAccount = {
   name: string;
   access_key_hint: string;
   proxy: string;
+};
+
+export type AlibabaHttpDnsCredential = {
+  id: number;
+  name: string;
+  region: string;
+  endpoint: string;
+  enabled: boolean;
+  secret_configured: boolean;
+  last_error: string | null;
+  created_at: string;
 };
 
 export type AlibabaHttpDnsRemoteZone = {
@@ -80,6 +91,8 @@ export type AlibabaHttpDnsOrigin = {
 
 export type AlibabaHttpDnsGroup = {
   id: number;
+  credential_id: number | null;
+  source_group_id: number | null;
   remote_account_id: number;
   account_name: string;
   zone_id: string;
@@ -95,6 +108,7 @@ export type AlibabaHttpDnsGroup = {
   enabled: boolean;
   min_switch_interval_seconds: number;
   current_origin_id: number | null;
+  source_current_origin_id: number | null;
   last_switch_at: string | null;
   last_error: string | null;
   last_published_value: string | null;
@@ -208,6 +222,7 @@ export type FailoverGlobalOrigin = {
 
 export type FailoverCollection = {
   id: number;
+  provider_type: "cloudflare" | "route53" | "alibaba_httpdns";
   name: string;
   global_origins: FailoverGlobalOrigin[];
   created_at: string;
@@ -246,7 +261,8 @@ export type ExternalIpItem = {
 
 export type FailoverGroup = {
   id: number;
-  zone_id: number;
+  provider_type: "cloudflare" | "route53" | "alibaba_httpdns";
+  zone_id: number | null;
   collection_id: number | null;
   hostname: string;
   ttl: number;
@@ -263,6 +279,44 @@ export type FailoverGroup = {
   time_rule: FailoverTimeRule | null;
   hostnames: FailoverHostname[];
   origins: Origin[];
+};
+
+export type AwsRoute53Credential = {
+  id: number;
+  name: string;
+  region: string;
+  use_instance_role: boolean;
+  enabled: boolean;
+  secret_configured: boolean;
+  last_error: string | null;
+  created_at: string;
+};
+
+export type AwsRoute53PrivateZone = {
+  id: string;
+  name: string;
+  record_count: number;
+  vpcs: { id: string; region: string }[];
+};
+
+export type AwsRoute53Output = {
+  id: number;
+  group_id: number;
+  credential_id: number;
+  doh_endpoint_id: number;
+  hosted_zone_id: string;
+  hosted_zone_name: string;
+  hostname: string;
+  ttl: number;
+  enabled: boolean;
+  current_origin_id: number | null;
+  last_record_type: string | null;
+  last_ttl: number | null;
+  last_values: string[];
+  last_published_at: string | null;
+  last_consistency_check_at: string | null;
+  last_error: string | null;
+  created_at: string;
 };
 
 export type DohEndpoint = {

@@ -6,6 +6,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
 from ..cloudflare import CloudflareClient, CloudflareError
+from ..alibaba_httpdns import sync_group_alibaba_outputs
 from ..database import get_db
 from ..deps import get_current_user
 from ..dns_utils import normalize_hostname, parse_target
@@ -14,7 +15,7 @@ from ..doh import sync_doh_endpoint, sync_group_doh_endpoint, validate_doh_hostn
 from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records, zone_for_hostname
 from ..health import run_local_checks
 from ..integrations import azpanel_settings, refresh_legacy_origin_mirror, sync_resource_current_ip_to_origin
-from ..models import Agent, AzPanelRemoteResource, AzPanelResource, DohEndpoint, ExternalIpItem, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, User, Zone
+from ..models import Agent, AlibabaHttpDnsGroup, AzPanelRemoteResource, AzPanelResource, DohEndpoint, ExternalIpItem, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
 from ..origin_expansion import (
     DIRECT_PUBLISH_MODE,
@@ -25,6 +26,7 @@ from ..origin_expansion import (
     set_published_ips,
     set_resolved_ips,
 )
+from ..route53 import sync_group_route53_outputs
 from ..schemas import (
     FailoverCollectionCreate,
     FailoverCollectionOut,
@@ -151,8 +153,9 @@ def _validate_group_outputs(
     doh_hostnames: list[str],
     group_id: int | None = None,
 ) -> None:
-    if not cloudflare_publish_enabled and not doh_enabled:
-        raise HTTPException(status_code=400, detail="At least one output channel must be enabled")
+    # Origin selection and output publication are deliberately decoupled. A group
+    # may temporarily have no output while it is being assembled, disabled, or
+    # moved between providers. Provider-specific routes validate their bindings.
     if doh_enabled:
         endpoint = db.get(DohEndpoint, doh_endpoint_id) if doh_endpoint_id else None
         if endpoint is None or not endpoint.enabled:
@@ -215,9 +218,12 @@ def _resolve_hostname_zone(db: Session, group: FailoverGroup, hostname: str) -> 
     candidates = [zone for zone in db.query(Zone).all() if _zone_matches_hostname(zone.name, hostname)]
     if not candidates:
         return None
-    group_credential_id = group.zone.credential_id
+    group_credential_id = group.zone.credential_id if group.zone is not None else None
     candidates.sort(
-        key=lambda zone: (len(zone.name or ""), 1 if zone.credential_id == group_credential_id else 0),
+        key=lambda zone: (
+            len(zone.name or ""),
+            1 if group_credential_id is not None and zone.credential_id == group_credential_id else 0,
+        ),
         reverse=True,
     )
     return candidates[0]
@@ -503,6 +509,10 @@ def _publish_current_group_origin(db: Session, group: FailoverGroup) -> None:
             publish_origin(db, group, current_origin)
         if group.doh_enabled:
             _require_group_doh_sync(db, group)
+        if any(output.enabled for output in group.route53_outputs):
+            sync_group_route53_outputs(db, group, current_origin, force_consistency=True)
+        if any(output.enabled for output in group.alibaba_httpdns_outputs):
+            sync_group_alibaba_outputs(db, group, current_origin, force_consistency=True)
     except Exception as exc:
         group.last_error = str(exc)
     else:
@@ -512,6 +522,8 @@ def _publish_current_group_origin(db: Session, group: FailoverGroup) -> None:
 def _validate_group_collection(group: FailoverGroup, collection: FailoverCollection | None) -> None:
     if collection is None:
         return
+    if collection.provider_type != group.provider_type:
+        raise HTTPException(status_code=400, detail="A failover group can only use a business group from the same provider")
     group_hostnames = _group_hostname_values(group)
     conflict = next(
         (
@@ -536,7 +548,7 @@ def create_collection(payload: FailoverCollectionCreate, _: User = Depends(get_c
     existing = db.query(FailoverCollection).filter(FailoverCollection.name == name).one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="业务分组名称已经存在")
-    collection = FailoverCollection(name=name)
+    collection = FailoverCollection(name=name, provider_type=payload.provider_type)
     db.add(collection)
     db.commit()
     return _collection_query(db).filter(FailoverCollection.id == collection.id).one()
@@ -778,9 +790,15 @@ def list_groups(_: User = Depends(get_current_user), db: Session = Depends(get_d
 
 @router.post("", response_model=FailoverGroupOut)
 def create_group(payload: FailoverGroupCreate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    zone = db.get(Zone, payload.zone_id)
-    if zone is None:
+    zone = db.get(Zone, payload.zone_id) if payload.zone_id is not None else None
+    if payload.zone_id is not None and zone is None:
         raise HTTPException(status_code=404, detail="域名区域不存在")
+    if payload.provider_type != "cloudflare" and (payload.zone_id is not None or payload.cloudflare_publish_enabled):
+        raise HTTPException(status_code=400, detail="Only Cloudflare groups can own a Cloudflare zone or public output")
+    if payload.provider_type == "cloudflare" and payload.ttl < 30:
+        raise HTTPException(status_code=400, detail="Cloudflare group TTL must be at least 30 seconds")
+    if payload.provider_type == "alibaba_httpdns" and payload.ttl not in {5, 30, 60, 3600, 43200, 86400}:
+        raise HTTPException(status_code=400, detail="Alibaba HTTPDNS TTL must be one of 5, 30, 60, 3600, 43200 or 86400")
     collection = db.get(FailoverCollection, payload.collection_id) if payload.collection_id else None
     if payload.collection_id and collection is None:
         raise HTTPException(status_code=404, detail="业务分组不存在")
@@ -796,7 +814,20 @@ def create_group(payload: FailoverGroupCreate, _: User = Depends(get_current_use
         doh_endpoint_id=payload.doh_endpoint_id,
         doh_hostnames=doh_hostnames,
     )
-    existing = db.query(FailoverGroup).filter(FailoverGroup.zone_id == zone.id, FailoverGroup.hostname == hostname).one_or_none()
+    if zone is None and payload.cloudflare_publish_enabled:
+        raise HTTPException(status_code=400, detail="Cloudflare output requires a Cloudflare zone")
+    if zone is None and payload.adopt_record_id:
+        raise HTTPException(status_code=400, detail="A Cloudflare record cannot be adopted without a Cloudflare zone")
+    existing_query = db.query(FailoverGroup).filter(
+        FailoverGroup.provider_type == payload.provider_type,
+        FailoverGroup.hostname == hostname,
+    )
+    existing_query = (
+        existing_query.filter(FailoverGroup.zone_id == zone.id)
+        if zone is not None
+        else existing_query.filter(FailoverGroup.zone_id.is_(None))
+    )
+    existing = existing_query.one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="该主机名已经存在故障切换组")
     client = None
@@ -808,7 +839,8 @@ def create_group(payload: FailoverGroupCreate, _: User = Depends(get_current_use
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     group = FailoverGroup(
-        zone_id=zone.id,
+        provider_type=payload.provider_type,
+        zone_id=zone.id if zone else None,
         collection_id=collection.id if collection else None,
         hostname=hostname,
         ttl=payload.ttl,
@@ -859,6 +891,13 @@ def update_group(group_id: int, payload: FailoverGroupUpdate, _: User = Depends(
         raise HTTPException(status_code=404, detail="切换组不存在")
     previous_doh_endpoint_id = group.doh_endpoint_id if group.doh_enabled else None
     updates = payload.model_dump(exclude_unset=True)
+    if group.provider_type != "cloudflare" and updates.get("cloudflare_publish_enabled"):
+        raise HTTPException(status_code=400, detail="This provider group cannot enable Cloudflare output")
+    next_ttl = updates.get("ttl", group.ttl)
+    if group.provider_type == "cloudflare" and next_ttl < 30:
+        raise HTTPException(status_code=400, detail="Cloudflare group TTL must be at least 30 seconds")
+    if group.provider_type == "alibaba_httpdns" and next_ttl not in {5, 30, 60, 3600, 43200, 86400}:
+        raise HTTPException(status_code=400, detail="Alibaba HTTPDNS TTL must be one of 5, 30, 60, 3600, 43200 or 86400")
     previous_doh_hostnames = group.doh_hostnames or [entry.hostname for entry in group.hostnames] or [group.hostname]
     previous_outputs = (
         group.cloudflare_publish_enabled,
@@ -884,6 +923,8 @@ def update_group(group_id: int, payload: FailoverGroupUpdate, _: User = Depends(
         doh_hostnames=next_doh_hostnames,
         group_id=group.id,
     )
+    if updates.get("cloudflare_publish_enabled", group.cloudflare_publish_enabled) and group.zone_id is None:
+        raise HTTPException(status_code=400, detail="Cloudflare output requires a Cloudflare zone")
     if "doh_hostnames" in updates:
         updates.pop("doh_hostnames")
         updates["doh_hostnames_json"] = json.dumps(next_doh_hostnames)
@@ -900,6 +941,11 @@ def update_group(group_id: int, payload: FailoverGroupUpdate, _: User = Depends(
     ttl_changed = "ttl" in updates and updates["ttl"] != group.ttl
     for key, value in updates.items():
         setattr(group, key, value)
+    if ttl_changed:
+        for output in group.route53_outputs:
+            output.ttl = group.ttl
+        for output in group.alibaba_httpdns_outputs:
+            output.ttl = group.ttl
     outputs_changed = previous_outputs != (
         group.cloudflare_publish_enabled,
         group.doh_enabled,
@@ -916,13 +962,17 @@ def update_group(group_id: int, payload: FailoverGroupUpdate, _: User = Depends(
                     publish_origin(db, group, current_origin)
                 if group.doh_enabled:
                     _require_group_doh_sync(db, group)
+                if any(output.enabled for output in group.route53_outputs):
+                    sync_group_route53_outputs(db, group, current_origin, force_consistency=ttl_changed)
+                if any(output.enabled for output in group.alibaba_httpdns_outputs):
+                    sync_group_alibaba_outputs(db, group, current_origin, force_consistency=ttl_changed)
             except Exception as exc:
                 db.rollback()
                 raise HTTPException(status_code=502, detail=f"Output publishing failed; changes were not saved: {exc}") from exc
     if outputs_changed and previous_doh_endpoint_id and previous_doh_endpoint_id != (group.doh_endpoint_id if group.doh_enabled else None):
         previous_endpoint = db.get(DohEndpoint, previous_doh_endpoint_id)
         if previous_endpoint is not None:
-            sync_doh_endpoint(db, previous_endpoint, force=True)
+            sync_doh_endpoint(db, previous_endpoint, force=True, ignore_backoff=True)
     db.commit()
     return _group_query(db).filter(FailoverGroup.id == group_id).one()
 
@@ -984,6 +1034,8 @@ def add_group_hostname(group_id: int, payload: FailoverHostnameCreate, _: User =
     group = db.get(FailoverGroup, group_id)
     if group is None:
         raise HTTPException(status_code=404, detail="切换组不存在")
+    if group.provider_type != "cloudflare":
+        raise HTTPException(status_code=400, detail="Additional managed hostnames are only supported by Cloudflare groups")
     ensure_group_hostname_entries(db, group)
     try:
         hostname = normalize_hostname(payload.hostname)
@@ -1032,7 +1084,7 @@ def add_group_hostname(group_id: int, payload: FailoverHostnameCreate, _: User =
             raise HTTPException(status_code=400, detail=f"该主域名和业务分组全局备用 {conflict.target} 冲突")
 
     target_zone = _resolve_hostname_zone(db, group, hostname)
-    if target_zone is None:
+    if target_zone is None and group.cloudflare_publish_enabled:
         raise HTTPException(
             status_code=409,
             detail=f"域名 {hostname} 所属的 Cloudflare 区域尚未在系统中添加，请先在区域页面同步该区域后再试",
@@ -1049,7 +1101,11 @@ def add_group_hostname(group_id: int, payload: FailoverHostnameCreate, _: User =
     hostname_entry = FailoverHostname(
         group=group,
         hostname=hostname,
-        zone_id=target_zone.id if target_zone.id != group.zone_id else None,
+        zone_id=(
+            target_zone.id
+            if target_zone is not None and group.zone_id is not None and target_zone.id != group.zone_id
+            else None
+        ),
         current_record_id=payload.adopt_record_id or existing_record_id,
     )
     db.add(hostname_entry)
@@ -1085,6 +1141,8 @@ def delete_group_hostname(hostname_id: int, _: User = Depends(get_current_user),
     if hostname_entry is None:
         raise HTTPException(status_code=404, detail="主域名不存在")
     group = hostname_entry.group
+    if group.provider_type != "cloudflare":
+        raise HTTPException(status_code=400, detail="Managed hostname removal is only supported by Cloudflare groups")
     ensure_group_hostname_entries(db, group)
     remaining = [item for item in group.hostnames if item.id != hostname_entry.id]
     if not remaining:
@@ -1132,13 +1190,24 @@ def delete_group(group_id: int, _: User = Depends(get_current_user), db: Session
             global_origin = db.get(FailoverGlobalOrigin, origin.global_origin_id)
             if global_origin is not None and global_origin.azpanel_resource_id:
                 azpanel_resource_ids.add(global_origin.azpanel_resource_id)
+    if group.provider_type == "alibaba_httpdns":
+        db.query(AlibabaHttpDnsGroup).filter(AlibabaHttpDnsGroup.source_group_id == group.id).delete(
+            synchronize_session=False,
+        )
+    else:
+        # Legacy shared outputs are preserved when their original Cloudflare group
+        # is removed. They can then be migrated or deleted explicitly.
+        db.query(AlibabaHttpDnsGroup).filter(AlibabaHttpDnsGroup.source_group_id == group.id).update(
+            {AlibabaHttpDnsGroup.source_group_id: None, AlibabaHttpDnsGroup.source_current_origin_id: None},
+            synchronize_session=False,
+        )
     db.delete(group)
     db.flush()
     _refresh_azpanel_resource_bindings(db, azpanel_resource_ids)
     if doh_endpoint_id:
         endpoint = db.get(DohEndpoint, doh_endpoint_id)
         if endpoint is not None:
-            sync_doh_endpoint(db, endpoint, force=True)
+            sync_doh_endpoint(db, endpoint, force=True, ignore_backoff=True)
     db.commit()
     return Message(message="切换组已删除")
 

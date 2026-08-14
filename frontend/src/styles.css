@@ -435,6 +435,183 @@ button.zonePill.active {
   grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
 }
 
+.awsSetupGuide {
+  display: grid;
+  gap: 14px;
+}
+
+.awsSetupWarning {
+  background: #fff7e6;
+  border: 1px solid #f7d08a;
+  border-radius: 8px;
+  color: #7a4a00;
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+}
+
+.awsSetupWarning.subtle {
+  background: #f3f8fb;
+  border-color: #cfe0ea;
+  color: #26374a;
+}
+
+.awsSetupWarning span,
+.awsFieldHint {
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.awsSetupSteps {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.awsSetupStep {
+  align-items: start;
+  border: 1px solid #dfe6ee;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 12px;
+}
+
+.awsSetupStep.ready {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.awsSetupStep.pending {
+  background: #f8fafc;
+}
+
+.awsSetupStepNumber {
+  align-items: center;
+  background: #e9eff6;
+  border-radius: 999px;
+  color: #516070;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  height: 24px;
+  justify-content: center;
+  width: 24px;
+}
+
+.awsSetupStep.ready .awsSetupStepNumber {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.awsSetupStep > div {
+  display: grid;
+  gap: 4px;
+}
+
+.awsSetupStep small,
+.awsFieldHint {
+  color: #667789;
+}
+
+.awsGuideLinks,
+.awsZoneSummary {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.awsGuideLinks a {
+  background: #f3f8fb;
+  border: 1px solid #cfe0ea;
+  border-radius: 6px;
+  color: #245b7a;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 8px 10px;
+  text-decoration: none;
+}
+
+.awsGuideLinks a:hover {
+  background: #e8f2f8;
+}
+
+.awsSetupDetails {
+  border-top: 1px solid #dfe6ee;
+  padding-top: 12px;
+}
+
+.awsSetupDetails summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.awsSetupDetails[open] summary {
+  margin-bottom: 12px;
+}
+
+.awsSetupList {
+  color: #516070;
+  display: grid;
+  font-size: 13px;
+  gap: 7px;
+  line-height: 1.5;
+  list-style: decimal;
+  margin: 0;
+  padding-left: 22px;
+}
+
+.awsSetupList code {
+  color: #26374a;
+}
+
+.awsGuideCodeBlock .commandHeader > div {
+  display: grid;
+  gap: 2px;
+}
+
+.awsGuideCodeBlock .commandHeader small {
+  color: #667789;
+}
+
+.awsGuideCodeBlock {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.awsGuideCodeBlock pre {
+  margin: 0;
+  max-height: 360px;
+  white-space: pre-wrap;
+}
+
+.awsInlineWarning {
+  background: #fff7e6;
+  border: 1px solid #f7d08a;
+  border-radius: 6px;
+  color: #7a4a00;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-top: 12px;
+  padding: 10px;
+}
+
+.awsZoneSummary {
+  color: #516070;
+  font-size: 13px;
+  margin-top: 12px;
+}
+
+.awsZoneSummary code {
+  background: #eef4f8;
+  border-radius: 5px;
+  color: #26374a;
+  padding: 4px 7px;
+}
+
 .accountPanel {
   max-width: 520px;
 }
@@ -2097,6 +2274,7 @@ form.panel {
   }
 
   .gridTwo,
+  .awsSetupSteps,
   .targetPoolPanel,
   .externalIpPanel,
   .snippetPanel,

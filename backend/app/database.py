@@ -38,6 +38,7 @@ def _migrate_existing_schema() -> None:
     inspector = inspect(engine)
     table_names = inspector.get_table_names()
     dialect = engine.dialect.name
+    sqlite_requires_failover_group_rebuild = False
     with engine.begin() as connection:
         if "origins" in table_names:
             existing = {column["name"] for column in inspector.get_columns("origins")}
@@ -72,6 +73,16 @@ def _migrate_existing_schema() -> None:
             # Constraint changes need their own transactions (see below), so they run
             # after this block rather than inline with the column additions.
 
+        if "failover_collections" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("failover_collections")}
+            if "provider_type" not in existing:
+                connection.execute(
+                    text(
+                        "ALTER TABLE failover_collections ADD COLUMN provider_type "
+                        "VARCHAR(32) NOT NULL DEFAULT 'cloudflare'"
+                    )
+                )
+
         if "target_pool_items" in table_names:
             existing = {column["name"] for column in inspector.get_columns("target_pool_items")}
             for column_name, statement in _target_pool_migration_statements(dialect).items():
@@ -93,6 +104,17 @@ def _migrate_existing_schema() -> None:
 
         if "failover_groups" in table_names:
             existing_columns = {column["name"]: column for column in inspector.get_columns("failover_groups")}
+            zone_id_column = existing_columns.get("zone_id")
+            if zone_id_column is not None and not zone_id_column.get("nullable", False):
+                if dialect == "mysql":
+                    connection.execute(text("ALTER TABLE failover_groups MODIFY zone_id INT NULL"))
+                elif dialect == "postgresql":
+                    connection.execute(text("ALTER TABLE failover_groups ALTER COLUMN zone_id DROP NOT NULL"))
+                else:
+                    # SQLite cannot drop a NOT NULL constraint in place. Finish all
+                    # additive migrations first, then rebuild the table outside this
+                    # transaction while foreign-key enforcement is temporarily off.
+                    sqlite_requires_failover_group_rebuild = True
             if "collection_id" not in existing_columns:
                 connection.execute(text(_failover_group_collection_migration_statement(dialect)))
             if "no_healthy_notified_at" not in existing_columns:
@@ -152,9 +174,23 @@ def _migrate_existing_schema() -> None:
 
         if "alibaba_httpdns_groups" in table_names:
             existing = {column["name"] for column in inspector.get_columns("alibaba_httpdns_groups")}
+            split_shared_origin_ids = "source_current_origin_id" not in existing
             for column_name, statement in _alibaba_httpdns_group_migration_statements(dialect).items():
                 if column_name not in existing:
                     connection.execute(text(statement))
+            # A short-lived unified-output implementation stored FailoverGroup
+            # Origin ids in current_origin_id, which otherwise belongs to the
+            # legacy AlibabaHttpDnsOrigin table. Split those id spaces during
+            # upgrade so an accidental numeric collision cannot label a legacy
+            # candidate as the currently published shared origin.
+            if split_shared_origin_ids:
+                connection.execute(
+                    text(
+                        "UPDATE alibaba_httpdns_groups "
+                        "SET source_current_origin_id = current_origin_id, current_origin_id = NULL "
+                        "WHERE source_group_id IS NOT NULL AND source_current_origin_id IS NULL"
+                    )
+                )
 
         if "alibaba_httpdns_origins" in table_names:
             existing = {column["name"] for column in inspector.get_columns("alibaba_httpdns_origins")}
@@ -185,8 +221,65 @@ def _migrate_existing_schema() -> None:
             if "last_status_sync_at" not in existing:
                 connection.execute(text(f"ALTER TABLE azpanel_resources ADD COLUMN last_status_sync_at {timestamp_type} NULL"))
 
+    if sqlite_requires_failover_group_rebuild:
+        _rebuild_sqlite_failover_groups_with_nullable_zone()
+
     if "failover_global_origins" in table_names:
         _migrate_global_origin_constraints(dialect)
+
+
+def _rebuild_sqlite_failover_groups_with_nullable_zone() -> None:
+    """Make ``failover_groups.zone_id`` nullable without losing SQLite data.
+
+    Child tables already point at the stable name ``failover_groups``. Disabling
+    foreign-key checks for the copy/swap keeps those references unchanged while
+    the current model definition supplies the nullable column and all constraints.
+    """
+    from .models import FailoverGroup
+
+    inspector = inspect(engine)
+    zone_column = next(
+        (column for column in inspector.get_columns("failover_groups") if column["name"] == "zone_id"),
+        None,
+    )
+    if zone_column is None or zone_column.get("nullable", False):
+        return
+
+    source_table = FailoverGroup.__table__
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        connection.exec_driver_sql("PRAGMA legacy_alter_table=ON")
+        connection.commit()
+        transaction = connection.begin()
+        try:
+            connection.execute(text("DROP TABLE IF EXISTS failover_groups_rebuild"))
+            rebuild_metadata = MetaData()
+            for foreign_key in source_table.foreign_keys:
+                referenced = foreign_key.column.table
+                if referenced.name not in rebuild_metadata.tables:
+                    referenced.to_metadata(rebuild_metadata)
+            rebuilt = source_table.to_metadata(rebuild_metadata, name="failover_groups_rebuild")
+            rebuilt.create(bind=connection)
+
+            existing = {column["name"] for column in inspect(connection).get_columns("failover_groups")}
+            columns = [column.name for column in source_table.columns if column.name in existing]
+            column_list = ", ".join(columns)
+            connection.execute(
+                text(
+                    f"INSERT INTO failover_groups_rebuild ({column_list}) "
+                    f"SELECT {column_list} FROM failover_groups"
+                )
+            )
+            connection.execute(text("DROP TABLE failover_groups"))
+            connection.execute(text("ALTER TABLE failover_groups_rebuild RENAME TO failover_groups"))
+            transaction.commit()
+        except Exception:
+            transaction.rollback()
+            raise
+        finally:
+            connection.exec_driver_sql("PRAGMA legacy_alter_table=OFF")
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+            connection.commit()
 
 
 def _global_origin_constraint_names() -> set[str]:
@@ -387,12 +480,14 @@ def _failover_group_collection_migration_statement(dialect: str) -> str:
 def _failover_group_output_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":
         return {
+            "provider_type": "ALTER TABLE failover_groups ADD COLUMN provider_type VARCHAR(32) NOT NULL DEFAULT 'cloudflare'",
             "cloudflare_publish_enabled": "ALTER TABLE failover_groups ADD COLUMN cloudflare_publish_enabled TINYINT(1) NOT NULL DEFAULT 1",
             "doh_enabled": "ALTER TABLE failover_groups ADD COLUMN doh_enabled TINYINT(1) NOT NULL DEFAULT 0",
             "doh_endpoint_id": "ALTER TABLE failover_groups ADD COLUMN doh_endpoint_id INT NULL",
             "doh_hostnames_json": "ALTER TABLE failover_groups ADD COLUMN doh_hostnames_json TEXT NULL",
         }
     return {
+        "provider_type": "ALTER TABLE failover_groups ADD COLUMN provider_type VARCHAR(32) NOT NULL DEFAULT 'cloudflare'",
         "cloudflare_publish_enabled": "ALTER TABLE failover_groups ADD COLUMN cloudflare_publish_enabled BOOLEAN NOT NULL DEFAULT TRUE",
         "doh_enabled": "ALTER TABLE failover_groups ADD COLUMN doh_enabled BOOLEAN NOT NULL DEFAULT FALSE",
         "doh_endpoint_id": "ALTER TABLE failover_groups ADD COLUMN doh_endpoint_id INTEGER",
@@ -403,6 +498,7 @@ def _failover_group_output_migration_statements(dialect: str) -> dict[str, str]:
 def _doh_endpoint_migration_statements(dialect: str) -> dict[str, str]:
     timestamp_type = "TIMESTAMP" if dialect == "postgresql" else "DATETIME"
     return {
+        "provider_type": "ALTER TABLE doh_endpoints ADD COLUMN provider_type VARCHAR(32) NOT NULL DEFAULT 'cloudflare'",
         "sync_failure_count": "ALTER TABLE doh_endpoints ADD COLUMN sync_failure_count INTEGER NOT NULL DEFAULT 0",
         "next_sync_retry_at": f"ALTER TABLE doh_endpoints ADD COLUMN next_sync_retry_at {timestamp_type} NULL",
     }
@@ -426,6 +522,9 @@ def _doh_failover_origin_migration_statements(dialect: str) -> dict[str, str]:
 
 def _alibaba_httpdns_group_migration_statements(dialect: str) -> dict[str, str]:
     return {
+        "credential_id": "ALTER TABLE alibaba_httpdns_groups ADD COLUMN credential_id INTEGER NULL",
+        "source_group_id": "ALTER TABLE alibaba_httpdns_groups ADD COLUMN source_group_id INTEGER NULL",
+        "source_current_origin_id": "ALTER TABLE alibaba_httpdns_groups ADD COLUMN source_current_origin_id INTEGER NULL",
         "last_published_value": "ALTER TABLE alibaba_httpdns_groups ADD COLUMN last_published_value VARCHAR(255) NULL",
     }
 

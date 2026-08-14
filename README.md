@@ -14,20 +14,27 @@ A self-hosted Cloudflare DNS failover dashboard for DNS-only A, AAAA, and CNAME 
 - Switches DNS by health and priority, then fails back automatically when better targets recover.
 - Supports a scheduled peak-hours entry while retaining health-based fallback to other origins.
 - Sends Telegram and webhook events for status changes and DNS switches.
-- Manages Alibaba Cloud Mobile HTTPDNS built-in authoritative records in a separate failover menu through the existing azpanel integration, including per-account proxy routing, health thresholds, cooldowns, drift repair, and A/AAAA/CNAME switching.
+- Manages Alibaba Cloud Mobile HTTPDNS built-in authoritative records directly with encrypted Alibaba AccessKeys; AzPanel remains an optional machine-IP rotation provider and is not in the HTTPDNS publication path.
 - Supports split-view publishing for self-hosted DoH: disable failover ownership of the existing Cloudflare decoy record while an HMAC-authenticated DoH endpoint receives the real origin selected by the existing health checks, priorities, failover/failback, and automatic IP rotation.
 - Adds a separate **DoH Failover** menu for arbitrary query names. Each rule owns independent candidate IPs/hostnames, TCP health checks, priorities, failover state, and DoH-only publishing without touching Cloudflare.
+- Supports **AWS Private DoH** publishing: the shared failover engine writes the selected healthy address to a Route 53 private hosted zone, while PrivateDoH resolves it through the VPC Resolver. See [`deploy/AWS_ROUTE53_PRIVATE_DOH_ZH.md`](deploy/AWS_ROUTE53_PRIVATE_DOH_ZH.md).
 
-## Alibaba Cloud HTTPDNS failover
+## Three independent failover providers
 
-Configure and enable the existing **azpanel** integration under **Auto IP Change**, using the same internal token configured as `CLOUDFLARE_DNS_INTERNAL_TOKEN` on azpanel. Alibaba Cloud AccessKeys stay in azpanel; this application only stores the selected account/Zone/record IDs and calls azpanel's authenticated internal gateway. The proxy assigned to each Alibaba Cloud account in azpanel is therefore also used for zone reads and record updates.
+The dashboard has separate **Cloudflare Failover**, **AWS DoH Failover**, and **Alibaba HTTPDNS** menus. Each menu owns independent groups, business-group/global backups, current-origin state, and published values. All three reuse the same full health-selection engine: local/agent probes, priorities, time rules, external IP sources, AzPanel/SynexVM machine bindings, automatic IP rotation, cooldowns, notifications, and drift reconciliation.
+
+- Cloudflare groups publish public Cloudflare DNS records.
+- AWS groups publish Route 53 private hosted-zone records; EC2 PrivateDoH resolves those records through the VPC Resolver and exposes the allowlisted DoH query name.
+- Alibaba groups publish Mobile HTTPDNS built-in authoritative records directly through the Alibaba Cloud API.
+
+AzPanel is only an optional source of machine inventory and public-IP changes. New Alibaba configurations never send HTTPDNS API requests through AzPanel. Older AzPanel-proxied HTTPDNS configurations remain readable and schedulable as a compatibility path until they are manually recreated with a direct credential.
 
 For the AWS EC2 + CloudFront allowlist DoH deployment, see
 [`deploy/AWS_DOH_UPGRADE_ZH.md`](deploy/AWS_DOH_UPGRADE_ZH.md). Existing failover
 groups retain legacy Cloudflare-follow-failover behaviour after upgrade until
 Cloudflare ownership is explicitly disabled and DoH publishing is enabled.
 
-The separate **Alibaba Cloud HTTPDNS** menu adopts a Mobile HTTPDNS built-in authoritative Zone. It automatically imports every enabled A, AAAA, and CNAME record in that Zone, treating each current record value as its primary origin. Add backup IPs or hostnames per record, set their probe port and priority, and optionally adjust the supported Alibaba TTL and recovery cooldown. Hostname targets are resolved with a bounded timeout and checked per address; only healthy addresses matching the record family are published. The last successful remote value is retained while an edited target is still recovering, and account-level exponential backoff prevents a gateway outage from generating one request per record per scheduler tick.
+The **Alibaba HTTPDNS** menu validates and encrypts a dedicated Alibaba AccessKey, then imports every enabled A, AAAA, and CNAME record in the selected built-in authoritative Zone. Each record becomes a full provider-specific failover group. Hostname targets are resolved with a bounded timeout and checked per address; only healthy addresses matching the record family are published. The last successful remote value is retained while an edited target is still recovering, and account-level exponential backoff throttles only periodic reconciliation—not a real failover write.
 
 Cloudflare public DNS, Alibaba HTTPDNS, and AWS private DoH are independent output channels. The same hostname may exist in all three at once, with separate candidates, health state, selected targets, and different published values.
 

@@ -1,7 +1,12 @@
 import ipaddress
 import json
+import hashlib
+import hmac
+import uuid
+import base64
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy.orm import Session, selectinload
@@ -10,7 +15,14 @@ from .doh import resolve_hostname_ips_bounded
 from .dns_utils import tcp_check
 from .events import add_event
 from .integrations import _azpanel_token, _raise_for_status_with_body, azpanel_settings
-from .models import AlibabaHttpDnsAccountState, AlibabaHttpDnsGroup, AlibabaHttpDnsOrigin
+from .models import (
+    AlibabaHttpDnsAccountState,
+    AlibabaHttpDnsCredential,
+    AlibabaHttpDnsGroup,
+    AlibabaHttpDnsOrigin,
+    FailoverGroup,
+    Origin,
+)
 from .notifier import send_webhooks
 from .origin_expansion import (
     healthy_ips,
@@ -21,6 +33,119 @@ from .origin_expansion import (
     set_resolved_ips,
 )
 from .runtime_settings import get_runtime_settings
+from .route53 import desired_origin_records
+from .security import decrypt_secret
+
+
+ALIBABA_HTTPDNS_API_VERSION = "2015-01-09"
+
+
+def _rpc_quote(value: object) -> str:
+    return quote(str(value), safe="~-._")
+
+
+def call_alibaba_api(
+    credential: AlibabaHttpDnsCredential,
+    action: str,
+    **parameters: Any,
+) -> dict[str, Any]:
+    """Call Alibaba Cloud's Alidns RPC API without routing through AzPanel."""
+    if not credential.enabled:
+        raise RuntimeError(f"Alibaba HTTPDNS credential {credential.name} is disabled")
+    access_key_id = decrypt_secret(credential.access_key_id_encrypted).strip()
+    access_key_secret = decrypt_secret(credential.access_key_secret_encrypted)
+    if not access_key_id or not access_key_secret:
+        raise RuntimeError("Alibaba Cloud AccessKey is not configured")
+    query: dict[str, Any] = {
+        "AccessKeyId": access_key_id,
+        "Action": action,
+        "Format": "JSON",
+        "SignatureMethod": "HMAC-SHA1",
+        "SignatureNonce": uuid.uuid4().hex,
+        "SignatureVersion": "1.0",
+        "Timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "Version": ALIBABA_HTTPDNS_API_VERSION,
+    }
+    query.update({key: value for key, value in parameters.items() if value is not None})
+    canonical = "&".join(f"{_rpc_quote(key)}={_rpc_quote(query[key])}" for key in sorted(query))
+    string_to_sign = f"POST&%2F&{_rpc_quote(canonical)}"
+    query["Signature"] = hmac.new(
+        f"{access_key_secret}&".encode("utf-8"),
+        string_to_sign.encode("utf-8"),
+        hashlib.sha1,
+    ).digest()
+    query["Signature"] = base64.b64encode(query["Signature"]).decode("ascii")
+    endpoint = credential.endpoint.strip().rstrip("/")
+    url = endpoint if endpoint.startswith(("https://", "http://")) else f"https://{endpoint}"
+    response = httpx.post(url, params=query, timeout=60)
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+    if response.is_error or data.get("Code"):
+        code = str(data.get("Code") or response.status_code)
+        message = str(data.get("Message") or response.text or "Alibaba Cloud API request failed")
+        raise RuntimeError(f"Alibaba Cloud {code}: {message}")
+    return data if isinstance(data, dict) else {}
+
+
+def _response_items(response: dict[str, Any], paths: tuple[tuple[str, ...], ...]) -> list[dict[str, Any]]:
+    for path in paths:
+        value: Any = response
+        for part in path:
+            if not isinstance(value, dict) or part not in value:
+                value = None
+                break
+            value = value[part]
+        if isinstance(value, dict):
+            return [value]
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _list_credential_pages(
+    credential: AlibabaHttpDnsCredential,
+    action: str,
+    paths: tuple[tuple[str, ...], ...],
+    **parameters: Any,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for page in range(1, 1001):
+        response = call_alibaba_api(
+            credential,
+            action,
+            PageNumber=page,
+            PageSize=100,
+            **parameters,
+        )
+        page_items = _response_items(response, paths)
+        items.extend(page_items)
+        if page >= max(1, int(response.get("TotalPages") or 1)) or len(page_items) < 100:
+            break
+    return items
+
+
+def list_credential_zones(credential: AlibabaHttpDnsCredential) -> list[dict[str, Any]]:
+    return _list_credential_pages(
+        credential,
+        "ListRecursionZones",
+        (("RecursionZones", "RecursionZone"), ("Zones", "Zone"), ("RecursionZones",), ("Zones",)),
+    )
+
+
+def list_credential_records(credential: AlibabaHttpDnsCredential, zone_id: str) -> list[dict[str, Any]]:
+    return _list_credential_pages(
+        credential,
+        "ListRecursionRecords",
+        (
+            ("Records", "Record"),
+            ("RecursionRecords", "RecursionRecord"),
+            ("Records",),
+            ("RecursionRecords",),
+        ),
+        ZoneId=zone_id,
+    )
 
 
 def _endpoint(db: Session) -> tuple[str, dict[str, str], int]:
@@ -100,6 +225,67 @@ def list_remote_zones(db: Session, account_id: int) -> list[dict[str, Any]]:
 
 def list_remote_records(db: Session, account_id: int, zone_id: str) -> list[dict[str, Any]]:
     return list(call_azpanel_httpdns(db, account_id=account_id, zone_id=zone_id).get("records") or [])
+
+
+def call_credential_httpdns(
+    db: Session,
+    credential: AlibabaHttpDnsCredential,
+    action: str,
+    *,
+    respect_backoff: bool = False,
+    **parameters: Any,
+) -> dict[str, Any]:
+    """Call a directly configured Alibaba account with per-account retry state."""
+    state = _account_state(db, -credential.id)
+    now = datetime.utcnow()
+    if respect_backoff and state.next_retry_at and state.next_retry_at > now:
+        raise RuntimeError(state.last_error or f"Alibaba HTTPDNS retry deferred until {state.next_retry_at.isoformat()}Z")
+    try:
+        result = call_alibaba_api(credential, action, **parameters)
+    except Exception as exc:
+        state.failure_count = int(state.failure_count or 0) + 1
+        delay_seconds = min(600, 30 * (2 ** min(state.failure_count - 1, 5)))
+        state.next_retry_at = now + timedelta(seconds=delay_seconds)
+        state.last_error = str(exc)
+        credential.last_error = str(exc)
+        raise
+    state.failure_count = 0
+    state.next_retry_at = None
+    state.last_error = None
+    state.last_success_at = now
+    credential.last_error = None
+    return result
+
+
+def _credential_records_for_sync(
+    db: Session,
+    credential: AlibabaHttpDnsCredential,
+    zone_id: str,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for page in range(1, 1001):
+        response = call_credential_httpdns(
+            db,
+            credential,
+            "ListRecursionRecords",
+            respect_backoff=True,
+            ZoneId=zone_id,
+            PageNumber=page,
+            PageSize=100,
+        )
+        page_items = _response_items(
+            response,
+            (
+                ("Records", "Record"),
+                ("RecursionRecords", "RecursionRecord"),
+                ("Records",),
+                ("RecursionRecords",),
+            ),
+        )
+        items.extend(page_items)
+        if page >= max(1, int(response.get("TotalPages") or 1)) or len(page_items) < 100:
+            break
+    return items
 
 
 def _ip_probe_states(origin: AlibabaHttpDnsOrigin) -> dict[str, dict[str, Any]]:
@@ -272,6 +458,12 @@ def _desired_value(group: AlibabaHttpDnsGroup, origin: AlibabaHttpDnsOrigin) -> 
 
 
 def _remote_record(db: Session, group: AlibabaHttpDnsGroup) -> dict[str, Any]:
+    if group.credential is not None:
+        records = _credential_records_for_sync(db, group.credential, group.zone_id)
+        record = next((item for item in records if str(item.get("RecordId") or "") == group.record_id), None)
+        if record is None:
+            raise RuntimeError("Alibaba HTTPDNS record no longer exists")
+        return record
     payload = call_azpanel_httpdns(
         db,
         account_id=group.remote_account_id,
@@ -303,6 +495,40 @@ def publish_origin(
     published_value = value or _desired_value(group, origin)
     if not published_value:
         raise RuntimeError(f"Alibaba HTTPDNS target {origin.target} has no healthy publishable address")
+    return publish_value(db, group, published_value)
+
+
+def publish_value(db: Session, group: AlibabaHttpDnsGroup, published_value: str) -> dict[str, Any]:
+    if group.credential is not None:
+        parameters: dict[str, Any] = {
+            "RecordId": group.record_id,
+            "Rr": group.rr,
+            "Type": group.record_type,
+            "Value": published_value,
+            "Ttl": group.ttl,
+            "RequestSource": group.request_source,
+            "Weight": group.weight,
+            "ClientToken": uuid.uuid4().hex,
+        }
+        if group.record_type == "MX":
+            parameters["Priority"] = group.priority
+        call_credential_httpdns(
+            db,
+            group.credential,
+            "UpdateRecursionRecord",
+            # A real failover write must bypass periodic-read backoff.
+            respect_backoff=False,
+            **parameters,
+        )
+        return {
+            "RecordId": group.record_id,
+            "Rr": group.rr,
+            "Type": group.record_type,
+            "Value": published_value,
+            "Ttl": group.ttl,
+            "RequestSource": group.request_source,
+            "Weight": group.weight,
+        }
     result = call_azpanel_httpdns(
         db,
         method="PUT",
@@ -317,9 +543,129 @@ def publish_origin(
         weight=group.weight,
         priority=group.priority,
         remark=group.remark or "",
-        respect_backoff=True,
+        # A publish represents a real target/value change. Account backoff only
+        # throttles periodic remote reconciliation reads, never failover writes.
+        respect_backoff=False,
     )
     return dict(result.get("record") or {})
+
+
+def _shared_group_value(group: AlibabaHttpDnsGroup, origin: Origin) -> str:
+    if group.record_type == "CNAME":
+        if origin.target_type != "hostname" or origin.publish_mode == "expanded":
+            raise RuntimeError("Alibaba HTTPDNS CNAME output requires a direct hostname origin")
+        return origin.target
+    records = desired_origin_records(origin)
+    values = records.get(group.record_type.upper()) or []
+    if not values:
+        raise RuntimeError(
+            f"Selected failover origin {origin.target} has no {group.record_type} value for Alibaba HTTPDNS"
+        )
+    return values[0]
+
+
+def _sync_alibaba_output(
+    db: Session,
+    source: FailoverGroup,
+    output: AlibabaHttpDnsGroup,
+    origin: Origin,
+    *,
+    force_consistency: bool = False,
+) -> bool:
+    now = datetime.utcnow()
+    value = _shared_group_value(output, origin)
+    origin_changed = output.source_current_origin_id != origin.id
+    needs_publish = origin_changed or output.last_published_value != value
+    consistency_succeeded = False
+    if force_consistency and not needs_publish:
+        output.last_consistency_check_at = now
+        needs_publish = not _record_matches(_remote_record(db, output), output, value)
+        consistency_succeeded = True
+    if not needs_publish:
+        if consistency_succeeded:
+            output.last_error = None
+        return False
+    old_origin_id = output.source_current_origin_id
+    publish_value(db, output, value)
+    output.source_current_origin_id = origin.id
+    output.last_published_value = value
+    output.last_consistency_check_at = now
+    if origin_changed:
+        output.last_switch_at = now
+    output.last_error = None
+    payload = {
+        "provider": "alibaba_httpdns",
+        "group_id": source.id,
+        "output_id": output.id,
+        "hostname": f"{output.rr}.{output.zone_name}".replace("@.", ""),
+        "old_origin_id": old_origin_id,
+        "new_origin_id": origin.id,
+        "record_id": output.record_id,
+        "record_type": output.record_type,
+        "content": value,
+    }
+    event_type = "alibaba_httpdns.switched" if origin_changed else "alibaba_httpdns.records_updated"
+    add_event(db, event_type, "info", f"Alibaba HTTPDNS {payload['hostname']} published {value}", payload)
+    send_webhooks(db, event_type, payload)
+    return True
+
+
+def sync_group_alibaba_outputs(
+    db: Session,
+    source: FailoverGroup,
+    origin: Origin,
+    *,
+    force_consistency: bool = False,
+) -> bool:
+    """Publish every enabled Alibaba binding independently."""
+    changed = False
+    for output in source.alibaba_httpdns_outputs:
+        if not output.enabled:
+            continue
+        try:
+            changed = _sync_alibaba_output(
+                db,
+                source,
+                output,
+                origin,
+                force_consistency=force_consistency,
+            ) or changed
+        except Exception as exc:
+            output.last_error = str(exc)
+            if output.credential is not None:
+                output.credential.last_error = str(exc)
+            payload = {
+                "provider": "alibaba_httpdns",
+                "group_id": source.id,
+                "output_id": output.id,
+                "hostname": f"{output.rr}.{output.zone_name}".replace("@.", ""),
+                "error": str(exc),
+            }
+            add_event(db, "alibaba_httpdns.publish_failed", "error", f"Alibaba HTTPDNS {payload['hostname']} publish failed: {exc}", payload)
+            send_webhooks(db, "alibaba_httpdns.publish_failed", payload)
+    return changed
+
+
+def _evaluate_shared_group_output(db: Session, group: AlibabaHttpDnsGroup, now: datetime, force_consistency: bool) -> bool:
+    source = group.source_group
+    if source is None:
+        raise RuntimeError("The linked failover group no longer exists")
+    if not source.enabled or source.current_origin_id is None:
+        # The source group owns health/no-origin reporting. There is no provider
+        # publish attempt to fail here, so do not duplicate its alert or leave the
+        # Alibaba output marked as a failed publish.
+        group.last_error = None
+        return False
+    origin = next((item for item in source.origins if item.id == source.current_origin_id), None)
+    if origin is None or not origin.enabled:
+        group.last_error = None
+        return False
+    consistency_due = force_consistency or group.last_consistency_check_at is None or (
+        now - group.last_consistency_check_at
+    ).total_seconds() >= 300
+    old_origin_id = group.source_current_origin_id
+    changed = _sync_alibaba_output(db, source, group, origin, force_consistency=consistency_due)
+    return changed and old_origin_id != origin.id
 
 
 def evaluate_alibaba_httpdns_groups(
@@ -331,7 +677,12 @@ def evaluate_alibaba_httpdns_groups(
 ) -> int:
     query = (
         db.query(AlibabaHttpDnsGroup)
-        .options(selectinload(AlibabaHttpDnsGroup.origins))
+        .options(
+            selectinload(AlibabaHttpDnsGroup.origins),
+            selectinload(AlibabaHttpDnsGroup.credential),
+            selectinload(AlibabaHttpDnsGroup.source_group).selectinload(FailoverGroup.origins),
+            selectinload(AlibabaHttpDnsGroup.source_group).selectinload(FailoverGroup.alibaba_httpdns_outputs),
+        )
         .filter(AlibabaHttpDnsGroup.enabled.is_(True))
     )
     if group_ids is not None:
@@ -345,6 +696,11 @@ def evaluate_alibaba_httpdns_groups(
     for group in query.order_by(AlibabaHttpDnsGroup.id).all():
         previous_error = group.last_error
         try:
+            if group.source_group_id is not None:
+                switched += int(_evaluate_shared_group_output(db, group, now, force_consistency))
+                if commit_per_group:
+                    db.commit()
+                continue
             for origin in group.origins:
                 if origin.enabled:
                     probe_origin(db, origin, cache)
@@ -392,7 +748,10 @@ def evaluate_alibaba_httpdns_groups(
             current = next((item for item in group.origins if item.id == group.current_origin_id), None)
             origin_changed = desired.id != group.current_origin_id
             value_changed = group.last_published_value not in {None, desired_value}
-            needs_publish = origin_changed or value_changed or group.last_error is not None
+            # A failed consistency read is not evidence that the value changed.
+            # Keep it on account backoff instead of turning every later tick into
+            # an unconditional PUT. Real origin/value changes still publish now.
+            needs_publish = origin_changed or value_changed
             consistency_due = (
                 force_consistency
                 or group.last_consistency_check_at is None

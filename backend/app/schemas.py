@@ -217,7 +217,8 @@ class DnsRecordUpdate(DnsRecordCreate):
 
 
 class AlibabaHttpDnsGroupCreate(BaseModel):
-    remote_account_id: int = Field(ge=1)
+    remote_account_id: int = Field(default=0, ge=0)
+    credential_id: int | None = Field(default=None, ge=1)
     account_name: str = Field(min_length=1, max_length=160)
     zone_id: str = Field(min_length=1, max_length=80)
     zone_name: str = Field(min_length=1, max_length=255)
@@ -228,7 +229,8 @@ class AlibabaHttpDnsGroupCreate(BaseModel):
 
 
 class AlibabaHttpDnsZoneAdopt(BaseModel):
-    remote_account_id: int = Field(ge=1)
+    remote_account_id: int = Field(default=0, ge=0)
+    credential_id: int | None = Field(default=None, ge=1)
     account_name: str = Field(min_length=1, max_length=160)
     zone_id: str = Field(min_length=1, max_length=80)
     zone_name: str = Field(min_length=1, max_length=255)
@@ -238,11 +240,13 @@ class AlibabaHttpDnsZoneAdopt(BaseModel):
 
 
 class AlibabaHttpDnsZoneRelease(BaseModel):
-    remote_account_id: int = Field(ge=1)
+    remote_account_id: int = Field(default=0, ge=0)
+    credential_id: int | None = Field(default=None, ge=1)
     zone_id: str = Field(min_length=1, max_length=80)
 
 
 class AlibabaHttpDnsGroupUpdate(BaseModel):
+    source_group_id: int | None = None
     enabled: bool | None = None
     ttl: int | None = Field(default=None, ge=5, le=86400)
     min_switch_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
@@ -298,6 +302,8 @@ class AlibabaHttpDnsOriginOut(BaseModel):
 
 class AlibabaHttpDnsGroupOut(BaseModel):
     id: int
+    credential_id: int | None
+    source_group_id: int | None
     remote_account_id: int
     account_name: str
     zone_id: str
@@ -313,6 +319,7 @@ class AlibabaHttpDnsGroupOut(BaseModel):
     enabled: bool
     min_switch_interval_seconds: int
     current_origin_id: int | None
+    source_current_origin_id: int | None
     last_switch_at: datetime | None
     last_error: str | None
     last_published_value: str | None
@@ -328,6 +335,37 @@ class AlibabaHttpDnsRemoteAccountOut(BaseModel):
     name: str
     access_key_hint: str = ""
     proxy: str = ""
+
+
+class AlibabaHttpDnsCredentialCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    access_key_id: str = Field(min_length=1, max_length=256)
+    access_key_secret: str = Field(min_length=1, max_length=512)
+    region: str = Field(default="cn-hangzhou", min_length=1, max_length=32)
+    endpoint: str = Field(default="alidns.aliyuncs.com", min_length=1, max_length=255)
+    enabled: bool = True
+
+
+class AlibabaHttpDnsCredentialUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    access_key_id: str | None = Field(default=None, min_length=1, max_length=256)
+    access_key_secret: str | None = Field(default=None, min_length=1, max_length=512)
+    region: str | None = Field(default=None, min_length=1, max_length=32)
+    endpoint: str | None = Field(default=None, min_length=1, max_length=255)
+    enabled: bool | None = None
+
+
+class AlibabaHttpDnsCredentialOut(BaseModel):
+    id: int
+    name: str
+    region: str
+    endpoint: str
+    enabled: bool
+    secret_configured: bool
+    last_error: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AlibabaHttpDnsRemoteZoneOut(BaseModel):
@@ -351,10 +389,11 @@ class AlibabaHttpDnsRemoteRecordOut(BaseModel):
 
 
 class FailoverGroupCreate(BaseModel):
-    zone_id: int
+    provider_type: Literal["cloudflare", "route53", "alibaba_httpdns"] = "cloudflare"
+    zone_id: int | None = None
     collection_id: int | None = None
     hostname: str = Field(min_length=1, max_length=255)
-    ttl: int = Field(default=60, ge=30, le=86400)
+    ttl: int = Field(default=60, ge=0, le=86400)
     primary_port: int = Field(default=22, ge=1, le=65535)
     enabled: bool = True
     min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
@@ -367,7 +406,7 @@ class FailoverGroupCreate(BaseModel):
 
 class FailoverGroupUpdate(BaseModel):
     collection_id: int | None = None
-    ttl: int | None = Field(default=None, ge=30, le=86400)
+    ttl: int | None = Field(default=None, ge=0, le=86400)
     enabled: bool | None = None
     min_switch_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
     cloudflare_publish_enabled: bool | None = None
@@ -449,6 +488,7 @@ class FailoverTimeRuleOut(BaseModel):
 
 
 class FailoverCollectionCreate(BaseModel):
+    provider_type: Literal["cloudflare", "route53", "alibaba_httpdns"] = "cloudflare"
     name: str = Field(min_length=1, max_length=120)
 
 
@@ -604,6 +644,7 @@ class FailoverGlobalOriginOut(BaseModel):
 
 class FailoverCollectionOut(BaseModel):
     id: int
+    provider_type: str
     name: str
     global_origins: list[FailoverGlobalOriginOut] = []
     created_at: datetime
@@ -1012,7 +1053,8 @@ class ExternalIpSourceOut(BaseModel):
 
 class FailoverGroupOut(BaseModel):
     id: int
-    zone_id: int
+    provider_type: str
+    zone_id: int | None
     collection_id: int | None
     hostname: str
     ttl: int
@@ -1166,6 +1208,104 @@ class DohFailoverGroupOut(BaseModel):
     origins: list[DohFailoverOriginOut] = []
     created_at: datetime
     updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AwsRoute53CredentialCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    access_key_id: str | None = Field(default=None, max_length=256)
+    secret_access_key: str | None = Field(default=None, max_length=512)
+    session_token: str | None = Field(default=None, max_length=4096)
+    region: str = Field(default="ap-east-1", min_length=1, max_length=32)
+    use_instance_role: bool = False
+    enabled: bool = True
+
+
+class AwsRoute53CredentialUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    access_key_id: str | None = Field(default=None, max_length=256)
+    secret_access_key: str | None = Field(default=None, max_length=512)
+    session_token: str | None = Field(default=None, max_length=4096)
+    region: str | None = Field(default=None, min_length=1, max_length=32)
+    use_instance_role: bool | None = None
+    enabled: bool | None = None
+
+
+class AwsRoute53CredentialOut(BaseModel):
+    id: int
+    name: str
+    region: str
+    use_instance_role: bool
+    enabled: bool
+    secret_configured: bool
+    last_error: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AwsRoute53VpcOut(BaseModel):
+    id: str
+    region: str
+
+
+class AwsRoute53PrivateHostedZoneOut(BaseModel):
+    id: str
+    name: str
+    record_count: int
+    vpcs: list[AwsRoute53VpcOut] = []
+
+
+class AwsRoute53OutputCreate(BaseModel):
+    group_id: int
+    credential_id: int
+    doh_endpoint_id: int
+    hosted_zone_id: str = Field(min_length=1, max_length=64)
+    hosted_zone_name: str = Field(min_length=1, max_length=255)
+    hostname: str = Field(min_length=1, max_length=255)
+    ttl: int = Field(default=60, ge=0, le=86400)
+    enabled: bool = True
+    adopt_existing: bool = False
+
+
+class AwsRoute53StandaloneGroupCreate(BaseModel):
+    hostname: str = Field(min_length=1, max_length=255)
+    primary_target: str = Field(min_length=1, max_length=255)
+    primary_port: int = Field(default=22, ge=1, le=65535)
+    ttl: int = Field(default=60, ge=0, le=86400)
+    min_switch_interval_seconds: int = Field(default=120, ge=0, le=86400)
+
+
+class AwsRoute53OutputUpdate(BaseModel):
+    credential_id: int | None = None
+    doh_endpoint_id: int | None = None
+    hosted_zone_id: str | None = Field(default=None, min_length=1, max_length=64)
+    hosted_zone_name: str | None = Field(default=None, min_length=1, max_length=255)
+    hostname: str | None = Field(default=None, min_length=1, max_length=255)
+    ttl: int | None = Field(default=None, ge=0, le=86400)
+    enabled: bool | None = None
+    adopt_existing: bool = False
+
+
+class AwsRoute53OutputOut(BaseModel):
+    id: int
+    group_id: int
+    credential_id: int
+    doh_endpoint_id: int
+    hosted_zone_id: str
+    hosted_zone_name: str
+    hostname: str
+    ttl: int
+    enabled: bool
+    current_origin_id: int | None
+    last_record_type: str | None
+    last_ttl: int | None
+    last_values: list[str]
+    last_published_at: datetime | None
+    last_consistency_check_at: datetime | None
+    last_error: str | None
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
