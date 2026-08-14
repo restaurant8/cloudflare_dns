@@ -2119,6 +2119,15 @@ function AlibabaHttpDnsRecordCard({ token, group, failoverGroups, busy, act }: {
           <button className="secondary" disabled={busy || !group.enabled} onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}/run`, token, { method: "POST" }), "该解析记录检查完成")}><Play size={14} />立即检查</button>
           <button className="icon secondaryIcon" title="TTL 与自动回切设置" onClick={() => setEditingGroup(true)}><SlidersHorizontal size={15} /></button>
           <button className="icon secondaryIcon" title={group.enabled ? "停用自动切换" : "启用自动切换"} onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "PATCH", body: JSON.stringify({ enabled: !group.enabled }) }), group.enabled ? "该记录已停用" : "该记录已启用")}>{group.enabled ? <PowerOff size={15} /> : <Power size={15} />}</button>
+          <button
+            className="icon dangerBtn"
+            title="删除旧版兼容配置"
+            disabled={busy}
+            onClick={() => window.confirm(`确认删除 ${hostname} 的旧版兼容配置吗？\n\n只删除本项目中的旧配置，阿里云云端解析记录保持不变。`) && act(
+              () => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "DELETE" }),
+              "旧版兼容配置已删除，阿里云云端记录保持不变"
+            )}
+          ><Trash2 size={15} /></button>
         </div>
       </div>
       {editingGroup && <div className="alibabaGroupSettings"><label>解析 TTL<select value={groupEdit.ttl} onChange={(event) => setGroupEdit({ ...groupEdit, ttl: Number(event.target.value) })}>{[5, 30, 60, 3600, 43200, 86400].map((ttl) => <option value={ttl} key={ttl}>{ttl} 秒</option>)}</select></label><label>自动回切冷却<input type="number" min={0} max={86400} value={groupEdit.min_switch_interval_seconds} onChange={(event) => setGroupEdit({ ...groupEdit, min_switch_interval_seconds: Number(event.target.value) })} /></label><button onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/groups/${group.id}`, token, { method: "PATCH", body: JSON.stringify(groupEdit) }), "切换设置已保存", () => setEditingGroup(false))}><Save size={14} />保存设置</button><button className="secondary" onClick={() => setEditingGroup(false)}>取消</button></div>}
