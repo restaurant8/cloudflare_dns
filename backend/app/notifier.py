@@ -27,9 +27,14 @@ _DELIVERY_BACKOFF_SECONDS = (0, 2, 5)
 
 EVENT_NAMES = {
     "dns.switched": "DNS 已切换",
+    "doh.switched": "私有 DoH 已切换",
+    "route53.switched": "AWS DoH 已切换",
+    "alibaba_httpdns.switched": "阿里云 HTTPDNS 已切换",
     "origin.status_changed": "源站状态变化",
+    "alibaba_httpdns.origin_status_changed": "阿里云 HTTPDNS 源站状态变化",
     "agent.status_changed": "探针状态变化",
     "failover.no_healthy_origin": "无健康源站",
+    "alibaba_httpdns.no_healthy_origin": "阿里云 HTTPDNS 无健康源站",
     "dns.publish_failed": "DNS 发布失败",
     "cloudflare.sync_failed": "Cloudflare 同步失败",
     "cloudflare.synced": "Cloudflare 已同步",
@@ -93,11 +98,16 @@ TELEGRAM_LEVEL_PRIORITIES = {
 
 TELEGRAM_EVENT_PRIORITIES = {
     "origin.status_changed": 10,
+    "alibaba_httpdns.origin_status_changed": 10,
     "agent.status_changed": 10,
     "cloudflare.synced": 10,
     "dns.switched": 30,
+    "doh.switched": 30,
+    "route53.switched": 30,
+    "alibaba_httpdns.switched": 30,
     "dns.publish_failed": 30,
     "failover.no_healthy_origin": 30,
+    "alibaba_httpdns.no_healthy_origin": 30,
     "cloudflare.sync_failed": 30,
     "azpanel.ip_changed": 30,
     "azpanel.ip_change_failed": 30,
@@ -143,7 +153,7 @@ def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
     title = EVENT_NAMES.get(event_type, "系统事件")
     lines = [f"<b>{escape(title)}</b>"]
 
-    if event_type == "dns.switched":
+    if event_type in {"dns.switched", "doh.switched", "route53.switched", "alibaba_httpdns.switched"}:
         lines.extend(
             [
                 _line("主机名", payload.get("hostname")),
@@ -157,7 +167,7 @@ def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
             lines.append(_line("切换原因", SWITCH_REASON_NAMES.get(str(switch_reason), switch_reason)))
         if payload.get("time_rule_id"):
             lines.append(_line("分时规则 ID", payload.get("time_rule_id")))
-    elif event_type == "origin.status_changed":
+    elif event_type in {"origin.status_changed", "alibaba_httpdns.origin_status_changed"}:
         lines.extend(
             [
                 _line("源站", f"{payload.get('target', '-')}:{payload.get('port', '-')}"),
@@ -174,7 +184,7 @@ def render_telegram_message(event_type: str, payload: dict[str, Any]) -> str:
                 _line("最后上报", _format_shanghai_time(payload.get("last_seen_at"))),
             ]
         )
-    elif event_type == "failover.no_healthy_origin":
+    elif event_type in {"failover.no_healthy_origin", "alibaba_httpdns.no_healthy_origin"}:
         lines.extend([_line("主机名", payload.get("hostname")), "当前没有健康源站，不代表探针离线；请查看下面的源站健康状态。"])
         origins = payload.get("origins")
         if isinstance(origins, list):
@@ -238,6 +248,8 @@ def telegram_event_priority(event_type: str, payload: dict[str, Any]) -> int:
         return 30
     if event_type == "agent.status_changed":
         return 30 if payload.get("status") in {"offline", "disabled"} else 10
+    if event_type in {"origin.status_changed", "alibaba_httpdns.origin_status_changed"}:
+        return 30 if payload.get("status") in {"unhealthy", "blocked", "machine_down"} else 10
     return TELEGRAM_EVENT_PRIORITIES.get(event_type, 10)
 
 
