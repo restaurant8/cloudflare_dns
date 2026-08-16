@@ -2,6 +2,7 @@ import ipaddress
 import json
 import hashlib
 import hmac
+import time
 import uuid
 import base64
 from datetime import datetime, timedelta
@@ -43,10 +44,16 @@ from .security import decrypt_secret
 
 
 ALIBABA_HTTPDNS_API_VERSION = "2015-01-09"
+EFFECTIVE_SCOPE_VERIFY_ATTEMPTS = 3
+EFFECTIVE_SCOPE_VERIFY_DELAY_SECONDS = 0.2
 
 
 class AlibabaOutputConfigurationError(ValueError):
     """A user-configurable Alibaba output/source incompatibility."""
+
+
+class AlibabaEffectiveScopeVerificationError(RuntimeError):
+    """Alibaba accepted a scope update but did not return the requested state."""
 
 
 def _origin_supports_alibaba_record_type(record_type: str, origin: Origin) -> bool:
@@ -306,12 +313,47 @@ def _list_credential_pages(
     return items
 
 
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _normalized_scope_ids(values: list[Any]) -> list[str]:
+    return sorted({str(value).strip() for value in values if value is not None and str(value).strip()})
+
+
+def zone_effective_scope_ids(zone: dict[str, Any]) -> list[str]:
+    """Normalize Alibaba's nested EffectiveScopes response to account IDs."""
+    raw_scopes = zone.get("EffectiveScopes")
+    if isinstance(raw_scopes, dict) and "EffectiveScope" in raw_scopes:
+        entries = _as_list(raw_scopes.get("EffectiveScope"))
+    else:
+        entries = _as_list(raw_scopes)
+
+    account_ids: list[Any] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        effective_type = str(entry.get("EffectiveType") or "account").strip().lower()
+        if effective_type != "account":
+            continue
+        values: Any = entry.get("Scopes", entry.get("Scope"))
+        if isinstance(values, dict):
+            values = values.get("Scope")
+        account_ids.extend(_as_list(values))
+    return _normalized_scope_ids(account_ids)
+
+
 def list_credential_zones(credential: AlibabaHttpDnsCredential) -> list[dict[str, Any]]:
-    return _list_credential_pages(
+    zones = _list_credential_pages(
         credential,
         "ListRecursionZones",
         (("RecursionZones", "RecursionZone"), ("Zones", "Zone"), ("RecursionZones",), ("Zones",)),
     )
+    return [{**zone, "EffectiveScopeIds": zone_effective_scope_ids(zone)} for zone in zones]
 
 
 def list_credential_records(credential: AlibabaHttpDnsCredential, zone_id: str) -> list[dict[str, Any]]:
@@ -361,7 +403,8 @@ def create_credential_zone(
         "AddRecursionZone",
         ZoneName=zone_name,
         ProxyPattern=proxy_pattern,
-        ClientToken=_stable_client_token("zone", credential, zone_name, proxy_pattern),
+        # A deleted Zone must not reuse an old AddRecursionZone idempotency result.
+        ClientToken=uuid.uuid4().hex,
     )
     zone_id = str(response.get("ZoneId") or "").strip()
     if not zone_id:
@@ -379,8 +422,8 @@ def update_credential_zone_effective_scope(
     credential: AlibabaHttpDnsCredential,
     zone_id: str,
     scope_ids: list[str],
-) -> None:
-    normalized = sorted({str(value).strip() for value in scope_ids if str(value).strip()})
+) -> list[str]:
+    normalized = _normalized_scope_ids(scope_ids)
     if not normalized:
         raise ValueError("请至少选择一个阿里云 HTTPDNS 生效配置")
     parameters: dict[str, Any] = {
@@ -393,6 +436,44 @@ def update_credential_zone_effective_scope(
     for index, value in enumerate(normalized, start=1):
         parameters[f"EffectiveScopes.1.Scope.{index}"] = value
     call_alibaba_api(credential, "UpdateRecursionZoneEffectiveScope", **parameters)
+    actual: list[str] = []
+    zone_seen = False
+    last_read_error: Exception | None = None
+    for attempt in range(EFFECTIVE_SCOPE_VERIFY_ATTEMPTS):
+        try:
+            zone = next(
+                (
+                    item
+                    for item in list_credential_zones(credential)
+                    if str(item.get("ZoneId") or "").strip() == str(zone_id).strip()
+                ),
+                None,
+            )
+            last_read_error = None
+            if zone is not None:
+                zone_seen = True
+                actual = zone_effective_scope_ids(zone)
+                if actual == normalized:
+                    return actual
+        except Exception as exc:
+            last_read_error = exc
+        if attempt + 1 < EFFECTIVE_SCOPE_VERIFY_ATTEMPTS:
+            time.sleep(EFFECTIVE_SCOPE_VERIFY_DELAY_SECONDS * (attempt + 1))
+
+    expected_text = ", ".join(normalized)
+    if last_read_error is not None:
+        raise AlibabaEffectiveScopeVerificationError(
+            f"阿里云已接收生效范围更新，但读回校验失败：{last_read_error}"
+        ) from last_read_error
+    if not zone_seen:
+        raise AlibabaEffectiveScopeVerificationError(
+            f"阿里云已接收生效范围更新，但多次读回仍找不到 Zone {zone_id}"
+        )
+    actual_text = ", ".join(actual) if actual else "空"
+    raise AlibabaEffectiveScopeVerificationError(
+        f"阿里云已接收生效范围更新，但多次读回校验不一致"
+        f"（期望 account IDs: {expected_text}；实际: {actual_text}）"
+    )
 
 
 def add_credential_record(
@@ -432,6 +513,21 @@ def add_credential_record(
         "Remark": "",
         "EnableStatus": "enable",
     }
+
+
+def delete_credential_record(
+    credential: AlibabaHttpDnsCredential,
+    record_id: str,
+) -> None:
+    normalized_record_id = str(record_id).strip()
+    if not normalized_record_id:
+        raise ValueError("阿里云 HTTPDNS RecordId 不能为空")
+    call_alibaba_api(
+        credential,
+        "DeleteRecursionRecord",
+        RecordId=normalized_record_id,
+        ClientToken=_stable_client_token("delete-record", credential, normalized_record_id),
+    )
 
 
 def delete_empty_credential_zone(credential: AlibabaHttpDnsCredential, zone_id: str) -> None:

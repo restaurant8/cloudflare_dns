@@ -33,7 +33,7 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, AlibabaHttpDnsCredential, AlibabaHttpDnsEffectiveScope, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteZone, AwsRoute53Credential, AwsRoute53Output, AwsRoute53PrivateZone, AwsVpc, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SynexVmSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
+import type { Agent, AlibabaHttpDnsCredential, AlibabaHttpDnsEffectiveScope, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteRecord, AlibabaHttpDnsRemoteZone, AwsRoute53Credential, AwsRoute53Output, AwsRoute53PrivateZone, AwsVpc, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SynexVmSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
 import {
   Sidebar,
   SidebarContent,
@@ -169,6 +169,7 @@ const eventTypeLabels: Record<string, string> = {
   "alibaba_httpdns.publish_failed": "阿里云 HTTPDNS 发布失败",
   "alibaba_httpdns.switched": "阿里云 HTTPDNS 已切换",
   "alibaba_httpdns.records_updated": "阿里云 HTTPDNS 健康地址已更新",
+  "alibaba_httpdns.record_deleted": "阿里云 HTTPDNS 解析记录已删除",
   "webhook.failed": "Webhook 发送失败",
   "telegram.failed": "Telegram 发送失败",
   "telegram.test": "Telegram 测试",
@@ -2015,6 +2016,12 @@ function RecordsPanel({
 function AlibabaHttpDnsPanel({ token, credentials, groups, failoverGroups, busy, act }: { token: string; credentials: AlibabaHttpDnsCredential[]; groups: AlibabaHttpDnsGroup[]; failoverGroups: FailoverGroup[]; busy: boolean; act: ActionRunner }) {
   const [zones, setZones] = useState<AlibabaHttpDnsRemoteZone[]>([]);
   const [effectiveScopes, setEffectiveScopes] = useState<AlibabaHttpDnsEffectiveScope[]>([]);
+  const [effectiveScopesError, setEffectiveScopesError] = useState("");
+  const [expandedRecordZoneKeys, setExpandedRecordZoneKeys] = useState<string[]>([]);
+  const [zoneRecords, setZoneRecords] = useState<Record<string, AlibabaHttpDnsRemoteRecord[]>>({});
+  const [zoneRecordsLoading, setZoneRecordsLoading] = useState<Record<string, boolean>>({});
+  const [zoneRecordsError, setZoneRecordsError] = useState<Record<string, string>>({});
+  const [deleteInProgress, setDeleteInProgress] = useState(false);
   const [credentialId, setCredentialId] = useState<number | "">("");
   const [zoneId, setZoneId] = useState("");
   const [selectedScopeIds, setSelectedScopeIds] = useState<string[]>([]);
@@ -2025,6 +2032,10 @@ function AlibabaHttpDnsPanel({ token, credentials, groups, failoverGroups, busy,
   const [credentialDraft, setCredentialDraft] = useState({ name: "阿里云 HTTPDNS", access_key_id: "", access_key_secret: "", region: "cn-hangzhou", endpoint: "alidns.aliyuncs.com" });
   const [editingCredentialId, setEditingCredentialId] = useState<number | null>(null);
   const [credentialEdit, setCredentialEdit] = useState({ name: "", access_key_id: "", access_key_secret: "", region: "cn-hangzhou", endpoint: "alidns.aliyuncs.com", enabled: true });
+  const credentialRequestEpoch = useRef(0);
+  const activeCredentialId = useRef<number | "">("");
+  const availableCredentialIds = useRef<number[]>(credentials.map((item) => item.id));
+  const deleteInProgressRef = useRef(false);
   const selectedCredential = credentials.find((item) => item.id === credentialId);
   const selectedZone = zones.find((item) => item.ZoneId === zoneId);
   const directGroups = groups.filter((group) => group.credential_id != null);
@@ -2041,41 +2052,187 @@ function AlibabaHttpDnsPanel({ token, credentials, groups, failoverGroups, busy,
         "pubdns:DeleteRecursionZone",
         "pubdns:AddRecursionRecord",
         "pubdns:UpdateRecursionRecord",
+        "pubdns:DeleteRecursionRecord",
         "pubdns:UpdateRecursionZoneEffectiveScope"
       ],
       Resource: "*"
     }]
   }, null, 2);
 
-  async function loadAlibabaResources(nextCredentialId: number) {
-    const nextZones = await apiFetch<AlibabaHttpDnsRemoteZone[]>(`/api/alibaba-httpdns/credentials/${nextCredentialId}/zones`, token);
-    let nextScopes: AlibabaHttpDnsEffectiveScope[] = [];
+  const availableScopeIds = effectiveScopes.map((scope) => scope.id).filter(Boolean).sort();
+
+  function alibabaPathSegment(value: string | number): string {
+    return encodeURIComponent(String(value));
+  }
+
+  function zoneRecordStateKey(nextCredentialId: number, nextZoneId: string): string {
+    return `${nextCredentialId}:${nextZoneId}`;
+  }
+
+  function isCurrentCredentialRequest(nextCredentialId: number, requestEpoch: number): boolean {
+    return activeCredentialId.current === nextCredentialId && credentialRequestEpoch.current === requestEpoch;
+  }
+
+  function changeAlibabaCredential(nextCredentialId: number | "") {
+    if (deleteInProgressRef.current) return;
+    credentialRequestEpoch.current += 1;
+    activeCredentialId.current = nextCredentialId;
+    setCredentialId(nextCredentialId);
+  }
+
+  function normalizedZoneScopeIds(zone: AlibabaHttpDnsRemoteZone): string[] {
+    return Array.from(new Set((zone.EffectiveScopeIds || []).map((value) => String(value).trim()).filter(Boolean))).sort();
+  }
+
+  function zoneScopeState(zone: AlibabaHttpDnsRemoteZone): "active" | "missing" | "mismatch" {
+    const current = normalizedZoneScopeIds(zone);
+    if (!current.length) return "missing";
+    return availableScopeIds.length > 0 && availableScopeIds.every((value) => current.includes(value))
+      ? "active"
+      : "mismatch";
+  }
+
+  function toggleSelectedScope(scopeId: string, checked: boolean) {
+    setSelectedScopeIds((current) => checked
+      ? Array.from(new Set([...current, scopeId]))
+      : current.filter((id) => id !== scopeId));
+  }
+
+  function renderEffectiveScopeSelector(title: string) {
+    return (
+      <div className="alibabaHttpDnsRemoteHint alibabaEffectiveScopeSelector">
+        <strong>{title}</strong>
+        {effectiveScopes.map((scope) => (
+          <label className="inlineCheck" key={scope.id}>
+            <input type="checkbox" checked={selectedScopeIds.includes(scope.id)} onChange={(event) => toggleSelectedScope(scope.id, event.target.checked)} />
+            {scope.name} · ID {scope.id} · {scope.state || "状态未知"} · {scope.services || "服务未知"}
+          </label>
+        ))}
+        {effectiveScopesError && <span className="textDanger">读取生效范围失败：{effectiveScopesError}</span>}
+        {!effectiveScopesError && effectiveScopes.length === 0 && <span>当前账号没有可用的 HTTPDNS 配置。请确认服务已开通，并给 RAM 用户增加 pubdns:DescribePdnsUserInfo 权限。</span>}
+        {!effectiveScopesError && effectiveScopes.length > 0 && <span>设置或修复时只会添加选中的配置 ID，不会移除 Zone 已有的其他配置 ID。</span>}
+      </div>
+    );
+  }
+
+  async function loadAlibabaResources(nextCredentialId: number, requestEpoch = credentialRequestEpoch.current): Promise<boolean> {
+    if (!isCurrentCredentialRequest(nextCredentialId, requestEpoch)) return false;
+    let nextZones: AlibabaHttpDnsRemoteZone[];
     try {
-      nextScopes = await apiFetch<AlibabaHttpDnsEffectiveScope[]>(`/api/alibaba-httpdns/credentials/${nextCredentialId}/effective-scopes`, token);
-    } catch {
-      nextScopes = [];
+      nextZones = await apiFetch<AlibabaHttpDnsRemoteZone[]>(`/api/alibaba-httpdns/credentials/${alibabaPathSegment(nextCredentialId)}/zones`, token);
+    } catch (error) {
+      if (isCurrentCredentialRequest(nextCredentialId, requestEpoch)) throw error;
+      return false;
     }
+    if (!isCurrentCredentialRequest(nextCredentialId, requestEpoch)) return false;
+    let nextScopes: AlibabaHttpDnsEffectiveScope[] = [];
+    let nextScopesError = "";
+    try {
+      nextScopes = await apiFetch<AlibabaHttpDnsEffectiveScope[]>(`/api/alibaba-httpdns/credentials/${alibabaPathSegment(nextCredentialId)}/effective-scopes`, token);
+    } catch (error) {
+      nextScopesError = error instanceof Error ? error.message : "无法读取阿里云 HTTPDNS 生效范围";
+    }
+    if (!isCurrentCredentialRequest(nextCredentialId, requestEpoch)) return false;
     setZones(nextZones);
     setEffectiveScopes(nextScopes);
+    setEffectiveScopesError(nextScopesError);
     setZoneId((current) => nextZones.some((item) => item.ZoneId === current) ? current : nextZones[0]?.ZoneId || "");
     setSelectedScopeIds((current) => {
       const available = current.filter((id) => nextScopes.some((item) => item.id === id));
       return available.length ? available : nextScopes.map((item) => item.id);
     });
+    if (nextScopesError) throw new Error(nextScopesError);
+    return true;
+  }
+
+  async function loadAlibabaZoneRecords(nextCredentialId: number, nextZoneId: string, requestEpoch = credentialRequestEpoch.current, allowDuringDelete = false): Promise<AlibabaHttpDnsRemoteRecord[]> {
+    if (deleteInProgressRef.current && !allowDuringDelete) return [];
+    if (!isCurrentCredentialRequest(nextCredentialId, requestEpoch)) return [];
+    const stateKey = zoneRecordStateKey(nextCredentialId, nextZoneId);
+    setZoneRecordsLoading((current) => ({ ...current, [stateKey]: true }));
+    setZoneRecordsError((current) => ({ ...current, [stateKey]: "" }));
+    try {
+      const records = await apiFetch<AlibabaHttpDnsRemoteRecord[]>(`/api/alibaba-httpdns/credentials/${alibabaPathSegment(nextCredentialId)}/zones/${alibabaPathSegment(nextZoneId)}/records`, token);
+      if (!isCurrentCredentialRequest(nextCredentialId, requestEpoch)) return [];
+      setZoneRecords((current) => ({ ...current, [stateKey]: records }));
+      return records;
+    } catch (error) {
+      if (!isCurrentCredentialRequest(nextCredentialId, requestEpoch)) return [];
+      const message = error instanceof Error ? error.message : "无法读取阿里云 HTTPDNS 解析记录";
+      setZoneRecordsError((current) => ({ ...current, [stateKey]: message }));
+      throw error;
+    } finally {
+      if (isCurrentCredentialRequest(nextCredentialId, requestEpoch)) {
+        setZoneRecordsLoading((current) => ({ ...current, [stateKey]: false }));
+      }
+    }
+  }
+
+  function toggleAlibabaZoneRecords(nextCredentialId: number, nextZoneId: string) {
+    if (deleteInProgressRef.current) return;
+    const stateKey = zoneRecordStateKey(nextCredentialId, nextZoneId);
+    const expanded = expandedRecordZoneKeys.includes(stateKey);
+    setExpandedRecordZoneKeys((current) => expanded
+      ? current.filter((value) => value !== stateKey)
+      : [...current, stateKey]);
+    if (!expanded && !Object.prototype.hasOwnProperty.call(zoneRecords, stateKey)) {
+      loadAlibabaZoneRecords(nextCredentialId, nextZoneId).catch(() => undefined);
+    }
+  }
+
+  function recordBindings(zone: AlibabaHttpDnsRemoteZone, record: AlibabaHttpDnsRemoteRecord): AlibabaHttpDnsGroup[] {
+    return groups.filter((group) => group.zone_id === zone.ZoneId && String(group.record_id) === String(record.RecordId));
+  }
+
+  function alibabaRecordHostname(zone: AlibabaHttpDnsRemoteZone, record: AlibabaHttpDnsRemoteRecord): string {
+    const rr = String(record.Rr || "@").trim();
+    return rr === "@" || !rr ? zone.ZoneName : `${rr}.${zone.ZoneName}`;
+  }
+
+  function alibabaRecordStatus(status: string): string {
+    const normalized = String(status || "").trim().toLowerCase();
+    if (["enable", "enabled"].includes(normalized)) return "已启用";
+    if (["disable", "disabled"].includes(normalized)) return "已停用";
+    return status || "状态未知";
+  }
+
+  function beginAlibabaDelete(): boolean {
+    if (deleteInProgressRef.current) return false;
+    deleteInProgressRef.current = true;
+    credentialRequestEpoch.current += 1;
+    setZoneRecordsLoading({});
+    setDeleteInProgress(true);
+    return true;
+  }
+
+  function finishAlibabaDelete() {
+    deleteInProgressRef.current = false;
+    setDeleteInProgress(false);
+    const current = activeCredentialId.current;
+    if (current && !availableCredentialIds.current.includes(current)) {
+      changeAlibabaCredential(availableCredentialIds.current[0] || "");
+    }
   }
 
   useEffect(() => {
-    if (!credentialId && credentials.length) setCredentialId(credentials[0].id);
+    availableCredentialIds.current = credentials.map((item) => item.id);
+    if (credentialId && credentials.some((item) => item.id === credentialId)) return;
+    changeAlibabaCredential(credentials[0]?.id || "");
   }, [credentials, credentialId]);
 
   useEffect(() => {
-    if (credentialId) loadAlibabaResources(Number(credentialId)).catch(() => undefined);
-    else {
-      setZones([]);
-      setEffectiveScopes([]);
-      setZoneId("");
-      setSelectedScopeIds([]);
-    }
+    const requestEpoch = ++credentialRequestEpoch.current;
+    activeCredentialId.current = credentialId;
+    setZones([]);
+    setEffectiveScopes([]);
+    setEffectiveScopesError("");
+    setZoneId("");
+    setSelectedScopeIds([]);
+    setExpandedRecordZoneKeys([]);
+    setZoneRecords({});
+    setZoneRecordsLoading({});
+    setZoneRecordsError({});
+    if (credentialId) loadAlibabaResources(Number(credentialId), requestEpoch).catch(() => undefined);
   }, [credentialId, token]);
 
   async function addCredential(event: FormEvent) {
@@ -2102,7 +2259,7 @@ function AlibabaHttpDnsPanel({ token, credentials, groups, failoverGroups, busy,
     if (credentialEdit.access_key_id.trim()) payload.access_key_id = credentialEdit.access_key_id.trim();
     if (credentialEdit.access_key_secret.trim()) payload.access_key_secret = credentialEdit.access_key_secret.trim();
     await act(
-      () => apiFetch(`/api/alibaba-httpdns/credentials/${item.id}`, token, { method: "PATCH", body: JSON.stringify(payload) }),
+      () => apiFetch(`/api/alibaba-httpdns/credentials/${alibabaPathSegment(item.id)}`, token, { method: "PATCH", body: JSON.stringify(payload) }),
       "阿里云 HTTPDNS 凭证已更新",
       () => setEditingCredentialId(null)
     );
@@ -2122,17 +2279,34 @@ function AlibabaHttpDnsPanel({ token, credentials, groups, failoverGroups, busy,
 
   async function createAlibabaZone() {
     if (!selectedCredential || !zoneDraft.zone_name.trim()) throw new Error("请选择凭证并填写内置权威域名");
+    if (!selectedScopeIds.length) throw new Error("请至少选择一个 HTTPDNS 生效配置");
     const ok = await act(
-      () => apiFetch(`/api/alibaba-httpdns/credentials/${selectedCredential.id}/zones`, token, {
+      () => apiFetch(`/api/alibaba-httpdns/credentials/${alibabaPathSegment(selectedCredential.id)}/zones`, token, {
         method: "POST",
-        body: JSON.stringify({ ...zoneDraft, zone_name: zoneDraft.zone_name.trim() })
+        body: JSON.stringify({ ...zoneDraft, zone_name: zoneDraft.zone_name.trim(), effective_scope_ids: selectedScopeIds })
       }),
-      "阿里云内置权威域名已创建"
+      "阿里云内置权威域名已创建并设置生效范围"
     );
     if (ok) {
       setZoneDraft((current) => ({ ...current, zone_name: "" }));
       await loadAlibabaResources(selectedCredential.id);
     }
+  }
+
+  async function updateAlibabaZoneEffectiveScope(zone: AlibabaHttpDnsRemoteZone) {
+    if (!selectedCredential) throw new Error("请选择阿里云凭证");
+    if (!selectedScopeIds.length) throw new Error("请至少选择一个 HTTPDNS 生效配置");
+    const state = zoneScopeState(zone);
+    await act(
+      async () => {
+        await apiFetch(`/api/alibaba-httpdns/credentials/${alibabaPathSegment(selectedCredential.id)}/zones/${alibabaPathSegment(zone.ZoneId)}/effective-scope`, token, {
+          method: "PATCH",
+          body: JSON.stringify({ scope_ids: selectedScopeIds })
+        });
+        await loadAlibabaResources(selectedCredential.id);
+      },
+      state === "active" ? "阿里云 HTTPDNS 生效范围已重新应用" : "阿里云 HTTPDNS 生效范围已设置"
+    );
   }
 
   async function deleteAlibabaZone(zone: AlibabaHttpDnsRemoteZone) {
@@ -2148,14 +2322,59 @@ function AlibabaHttpDnsPanel({ token, credentials, groups, failoverGroups, busy,
     }
     const confirmation = window.prompt(`删除内置权威域名不可恢复。请输入完整名称确认：${zone.ZoneName}`);
     if (confirmation?.trim().replace(/\.$/, "").toLowerCase() !== zone.ZoneName.toLowerCase()) return;
-    const ok = await act(
-      () => apiFetch(`/api/alibaba-httpdns/credentials/${selectedCredential.id}/zones/${zone.ZoneId}`, token, {
-        method: "DELETE",
-        body: JSON.stringify({ confirm_name: zone.ZoneName })
-      }),
-      "阿里云内置权威域名已删除"
+    const deletionCredentialId = selectedCredential.id;
+    const currentEpoch = credentialRequestEpoch.current;
+    if (!isCurrentCredentialRequest(deletionCredentialId, currentEpoch) || !beginAlibabaDelete()) return;
+    const deletionEpoch = credentialRequestEpoch.current;
+    try {
+      const ok = await act(
+        () => apiFetch(`/api/alibaba-httpdns/credentials/${alibabaPathSegment(deletionCredentialId)}/zones/${alibabaPathSegment(zone.ZoneId)}`, token, {
+          method: "DELETE",
+          body: JSON.stringify({ confirm_name: zone.ZoneName })
+        }),
+        "阿里云内置权威域名已删除"
+      );
+      if (ok && isCurrentCredentialRequest(deletionCredentialId, deletionEpoch)) {
+        await Promise.allSettled([loadAlibabaResources(deletionCredentialId, deletionEpoch)]);
+      }
+    } finally {
+      finishAlibabaDelete();
+    }
+  }
+
+  async function deleteAlibabaRecord(zone: AlibabaHttpDnsRemoteZone, record: AlibabaHttpDnsRemoteRecord) {
+    if (!selectedCredential) return;
+    const bindings = recordBindings(zone, record);
+    if (bindings.length) {
+      window.alert(`这条记录仍绑定 ${bindings.length} 个阿里云故障组，请先删除对应故障组。`);
+      return;
+    }
+    const hostname = alibabaRecordHostname(zone, record);
+    const confirmation = window.prompt(
+      `删除阿里云解析记录不可恢复，也不会自动删除或修改其他记录。\n\n${hostname} ${record.Type} ${record.Value}\n\n请输入完整 RecordId 确认：${record.RecordId}`
     );
-    if (ok) await loadAlibabaResources(selectedCredential.id);
+    if (confirmation?.trim() !== String(record.RecordId)) return;
+    const deletionCredentialId = selectedCredential.id;
+    const currentEpoch = credentialRequestEpoch.current;
+    if (!isCurrentCredentialRequest(deletionCredentialId, currentEpoch) || !beginAlibabaDelete()) return;
+    const deletionEpoch = credentialRequestEpoch.current;
+    try {
+      const ok = await act(
+        () => apiFetch(`/api/alibaba-httpdns/credentials/${alibabaPathSegment(deletionCredentialId)}/zones/${alibabaPathSegment(zone.ZoneId)}/records/${alibabaPathSegment(record.RecordId)}`, token, {
+          method: "DELETE",
+          body: JSON.stringify({ confirm_record_id: String(record.RecordId) })
+        }),
+        "阿里云 HTTPDNS 解析记录已删除"
+      );
+      if (ok && isCurrentCredentialRequest(deletionCredentialId, deletionEpoch)) {
+        await Promise.allSettled([
+          loadAlibabaZoneRecords(deletionCredentialId, zone.ZoneId, deletionEpoch, true),
+          loadAlibabaResources(deletionCredentialId, deletionEpoch)
+        ]);
+      }
+    } finally {
+      finishAlibabaDelete();
+    }
   }
 
   async function createAlibabaManagedGroup(event: FormEvent) {
@@ -2186,7 +2405,7 @@ function AlibabaHttpDnsPanel({ token, credentials, groups, failoverGroups, busy,
       <div className="panel alibabaHttpDnsIntro">
         <div className="panelTitle">
           <h2>阿里云 HTTPDNS 故障切换</h2>
-          <p>cloudflare_dns 直接调用阿里云内置权威域名 API；AzPanel 只负责可选的机器换 IP，不再代理 HTTPDNS。下方故障组拥有与 Cloudflare 完全相同的检测、优先级、自动换 IP 和分时能力。</p>
+          <p>本项目直接调用阿里云内置权威域名 API 管理 Zone、记录和生效范围，这些操作与 AzPanel 无关。只有启用并配置“自动换 IP”云资源时，AzPanel 才参与云机器公网 IP 更换；它不代理任何 DNS 操作。</p>
         </div>
         <div className="rowActions">
           <button className="secondary" disabled={busy || !credentialId} onClick={() => act(() => loadAlibabaResources(Number(credentialId)), "阿里云权威域名与生效范围已刷新")}><RefreshCw size={15} />刷新资源</button>
@@ -2216,32 +2435,83 @@ function AlibabaHttpDnsPanel({ token, credentials, groups, failoverGroups, busy,
         ) : (
           <div className="alibabaHttpDnsRemoteHint" key={item.id}>
             <strong>{item.name}</strong> · {item.endpoint} · {item.last_error || "连接正常"}
-            <button type="button" className="icon secondaryIcon" onClick={() => beginCredentialEdit(item)}><Pencil size={14} /></button>
-            <button type="button" className="icon dangerBtn" disabled={groups.some((group) => group.credential_id === item.id)} onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/credentials/${item.id}`, token, { method: "DELETE" }), "凭证已删除")}><Trash2 size={14} /></button>
+            <button type="button" className="icon secondaryIcon" disabled={busy || deleteInProgress} onClick={() => beginCredentialEdit(item)}><Pencil size={14} /></button>
+            <button type="button" className="icon dangerBtn" disabled={busy || deleteInProgress || groups.some((group) => group.credential_id === item.id)} onClick={() => act(() => apiFetch(`/api/alibaba-httpdns/credentials/${alibabaPathSegment(item.id)}`, token, { method: "DELETE" }), "凭证已删除")}><Trash2 size={14} /></button>
           </div>
         ))}
         <details className="awsSetupDetails"><summary>查看新流程需要的 RAM 权限</summary><pre className="tokenBox commandBox">{ramPolicy}</pre></details>
       </form>
 
       <div className="panel">
-        <div className="panelTitle"><h2>步骤 2：创建或选择内置权威域名</h2><p>可以直接通过 API 创建 Zone。关闭递归代理时，未配置的子域名返回 NXDOMAIN；开启后会继续转发/递归查询。</p></div>
+        <div className="panelTitle"><h2>步骤 2：创建或选择内置权威域名</h2><p>创建时会立即绑定下方选中的 HTTPDNS 配置。空 Zone 生效后，关闭递归代理时未配置的子域名会立即返回 NXDOMAIN；请确认范围和记录后再让客户端使用。</p></div>
         <div className="alibabaHttpDnsCreateGrid">
-          <label>阿里云凭证<select value={credentialId} onChange={(event) => setCredentialId(event.target.value ? Number(event.target.value) : "")}><option value="">请选择凭证</option>{credentials.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+          <label>阿里云凭证<select value={credentialId} disabled={busy || deleteInProgress} onChange={(event) => changeAlibabaCredential(event.target.value ? Number(event.target.value) : "")}><option value="">请选择凭证</option>{credentials.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
           <label>新 Zone 名称<input value={zoneDraft.zone_name} onChange={(event) => setZoneDraft({ ...zoneDraft, zone_name: event.target.value })} placeholder="private.example.com" /></label>
           <label>未命中子域名<select value={zoneDraft.proxy_pattern} onChange={(event) => setZoneDraft({ ...zoneDraft, proxy_pattern: event.target.value as "zone" | "record" })}><option value="zone">直接返回 NXDOMAIN</option><option value="record">继续递归代理</option></select></label>
-          <button type="button" disabled={busy || !selectedCredential || !zoneDraft.zone_name.trim()} onClick={() => void createAlibabaZone()}><Plus size={15} />创建内置权威域名</button>
+          <button type="button" disabled={busy || !selectedCredential || !zoneDraft.zone_name.trim() || selectedScopeIds.length === 0} onClick={() => void createAlibabaZone()}><Plus size={15} />创建并设置生效范围</button>
         </div>
-        {selectedCredential && <p className="alibabaHttpDnsRemoteHint">直接连接 {selectedCredential.endpoint} · 不经过 AzPanel</p>}
+        {selectedCredential && <p className="alibabaHttpDnsRemoteHint">阿里云解析管理 API：本项目直连 {selectedCredential.endpoint}。AzPanel 不参与 Zone、记录或生效范围操作；仅由已配置的自动换 IP 资源使用。</p>}
+        {selectedCredential && renderEffectiveScopeSelector("创建后绑定到以下 HTTPDNS 配置")}
         <div className="recordTable">
           {zones.map((zone) => {
             const bound = directGroups.filter((group) => group.credential_id === Number(credentialId) && group.zone_id === zone.ZoneId).length;
+            const scopeIds = normalizedZoneScopeIds(zone);
+            const scopeState = zoneScopeState(zone);
+            const scopeStateText = scopeState === "active" ? "已生效" : scopeState === "missing" ? "未设置" : "不一致";
+            const zoneCredentialId = Number(credentialId);
+            const recordStateKey = zoneRecordStateKey(zoneCredentialId, zone.ZoneId);
+            const recordsExpanded = expandedRecordZoneKeys.includes(recordStateKey);
+            const recordsLoaded = Object.prototype.hasOwnProperty.call(zoneRecords, recordStateKey);
+            const records = zoneRecords[recordStateKey] || [];
+            const recordsLoading = Boolean(zoneRecordsLoading[recordStateKey]);
+            const recordsError = zoneRecordsError[recordStateKey] || "";
             return (
-              <div className="recordRow" key={zone.ZoneId}>
-                <div><strong>{zone.ZoneName}</strong><small>{zone.ZoneId} · {zone.RecordCount || 0} 条记录 · {zone.ProxyPattern === "record" ? "递归代理" : "权威优先"}{bound ? ` · ${bound} 个故障组` : ""}</small></div>
+              <div className="recordRow alibabaZoneRow" key={zone.ZoneId}>
+                <div className="alibabaZoneDetails">
+                  <strong>{zone.ZoneName}</strong>
+                  <small>Zone ID：{zone.ZoneId} · {zone.RecordCount || 0} 条记录 · {zone.ProxyPattern === "record" ? "递归代理" : "权威优先"}{bound ? ` · ${bound} 个故障组` : ""}</small>
+                  <div className="alibabaZoneScopeMeta">
+                    <span className={`alibabaZoneScopeStatus ${scopeState}`}>{scopeStateText}</span>
+                    <span>Zone 配置 ID：{scopeIds.length ? scopeIds.join(", ") : "未设置"}</span>
+                    <span>当前配置 ID：{availableScopeIds.length ? availableScopeIds.join(", ") : "无法读取"}</span>
+                  </div>
+                </div>
                 <div className="rowActions">
                   <button type="button" className="secondary" onClick={() => setZoneId(zone.ZoneId)}>用于新组</button>
-                  <button type="button" className="icon dangerBtn" disabled={Boolean(bound) || zone.RecordCount > 0} title={bound ? "请先删除绑定故障组" : zone.RecordCount > 0 ? "只允许删除空 Zone" : "删除空 Zone"} onClick={() => void deleteAlibabaZone(zone)}><Trash2 size={14} /></button>
+                  <button type="button" className="secondary" disabled={busy || deleteInProgress} aria-expanded={recordsExpanded} onClick={() => toggleAlibabaZoneRecords(zoneCredentialId, zone.ZoneId)}>{recordsExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}{recordsExpanded ? "收起解析" : `管理解析（${zone.RecordCount || 0}）`}</button>
+                  <button type="button" className="secondary" disabled={busy || selectedScopeIds.length === 0} title={selectedScopeIds.length ? `应用配置 ID：${selectedScopeIds.join(", ")}` : "请先选择 HTTPDNS 生效配置"} onClick={() => void updateAlibabaZoneEffectiveScope(zone)}>{scopeState === "active" ? "重新应用生效范围" : scopeState === "missing" ? "设置生效范围" : "修复生效范围"}</button>
+                  <button type="button" className="icon dangerBtn" disabled={busy || deleteInProgress || Boolean(bound) || zone.RecordCount > 0} title={bound ? "请先删除绑定故障组" : zone.RecordCount > 0 ? "只允许删除空 Zone" : "删除空 Zone"} onClick={() => void deleteAlibabaZone(zone)}><Trash2 size={14} /></button>
                 </div>
+                {recordsExpanded && (
+                  <div className="alibabaZoneRecordPanel">
+                    <div className="alibabaZoneRecordPanelHead">
+                      <div><strong>云端解析记录</strong><small>这里只删除选中的单条记录，不会级联删除故障组、Zone 或其他记录。</small></div>
+                      <button type="button" className="secondary" disabled={busy || deleteInProgress || recordsLoading || !selectedCredential} onClick={() => selectedCredential && loadAlibabaZoneRecords(selectedCredential.id, zone.ZoneId).catch(() => undefined)}><RefreshCw size={14} />刷新记录</button>
+                    </div>
+                    {recordsLoading && <div className="emptyCell">正在读取阿里云解析记录…</div>}
+                    {!recordsLoading && recordsError && <div className="alibabaZoneRecordError"><span>{recordsError}</span><button type="button" className="secondary" disabled={busy || deleteInProgress || !selectedCredential} onClick={() => selectedCredential && loadAlibabaZoneRecords(selectedCredential.id, zone.ZoneId).catch(() => undefined)}>重试</button></div>}
+                    {!recordsLoading && !recordsError && recordsLoaded && records.length === 0 && <div className="emptyCell">这个 Zone 没有解析记录，可以删除 Zone。</div>}
+                    {!recordsLoading && !recordsError && records.length > 0 && (
+                      <div className="alibabaZoneRecordList">
+                        {records.map((record) => {
+                          const bindings = recordBindings(zone, record);
+                          const enabled = ["enable", "enabled"].includes(String(record.EnableStatus || "").toLowerCase());
+                          return (
+                            <div className="alibabaZoneRecord" key={record.RecordId}>
+                              <div className="alibabaZoneRecordIdentity"><strong>{alibabaRecordHostname(zone, record)}</strong><small>RR：{record.Rr || "@"} · RecordId：{record.RecordId}</small></div>
+                              <span className="originBadge record">{record.Type || "未知类型"}</span>
+                              <code className="alibabaZoneRecordValue">{record.Value || "-"}</code>
+                              <span>TTL {record.Ttl}</span>
+                              <span className={`alibabaRecordState ${enabled ? "enabled" : "disabled"}`}>{alibabaRecordStatus(record.EnableStatus)}</span>
+                              {bindings.length > 0 && <span className="textDanger">已绑定 {bindings.length} 个故障组</span>}
+                              <button type="button" className="icon dangerBtn" disabled={busy || deleteInProgress || bindings.length > 0} title={bindings.length ? "请先删除绑定这条记录的故障组" : `删除 RecordId ${record.RecordId}`} onClick={() => void deleteAlibabaRecord(zone, record)}><Trash2 size={14} /></button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -2258,7 +2528,7 @@ function AlibabaHttpDnsPanel({ token, credentials, groups, failoverGroups, busy,
           <label>TTL<select value={managedDraft.ttl} onChange={(event) => setManagedDraft({ ...managedDraft, ttl: Number(event.target.value) })}>{[5, 30, 60, 3600, 43200, 86400].map((value) => <option value={value} key={value}>{value} 秒</option>)}</select></label>
           <label>自动回切冷却（秒）<input type="number" min={0} max={86400} value={cooldown} onChange={(event) => setCooldown(Number(event.target.value))} /></label>
         </div>
-        <div className="alibabaHttpDnsRemoteHint"><strong>域名生效范围</strong>{effectiveScopes.map((scope) => <label className="inlineCheck" key={scope.id}><input type="checkbox" checked={selectedScopeIds.includes(scope.id)} onChange={(event) => setSelectedScopeIds((current) => event.target.checked ? Array.from(new Set([...current, scope.id])) : current.filter((id) => id !== scope.id))} />{scope.name} · {scope.state || "状态未知"} · {scope.services || "服务未知"}</label>)}{effectiveScopes.length === 0 && <span>未读取到 HTTPDNS 配置，请给 RAM 用户增加 pubdns:DescribePdnsUserInfo 权限。</span>}</div>
+        {renderEffectiveScopeSelector("新故障组使用以下 HTTPDNS 生效配置")}
         <label className="inlineCheck awsAdoptConfirm"><input type="checkbox" checked={managedDraft.adopt_existing} onChange={(event) => setManagedDraft({ ...managedDraft, adopt_existing: event.target.checked })} />接管 Zone 顶点已存在的 A/AAAA/CNAME 记录</label>
         <button disabled={busy || !selectedZone || !managedDraft.primary_target.trim() || selectedScopeIds.length === 0}><Plus size={15} />创建并绑定阿里云故障组</button>
         <details className="awsSetupDetails"><summary>导入这个 Zone 中已有的全部记录</summary><p className="awsFieldHint">兼容旧流程：会为每条已启用的 A、AAAA、CNAME 记录分别创建故障组。</p><button type="button" className="secondary" disabled={busy || !zoneId} onClick={() => act(addSelectedZone, "权威域名及其解析记录已添加")}><Plus size={15} />导入已有记录</button></details>

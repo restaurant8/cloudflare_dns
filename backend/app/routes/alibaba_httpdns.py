@@ -1,12 +1,16 @@
 import ipaddress
+from contextlib import contextmanager
+from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
 
 from ..alibaba_httpdns import (
+    AlibabaEffectiveScopeVerificationError,
     AlibabaOutputConfigurationError,
     add_credential_record,
     create_credential_zone,
+    delete_credential_record,
     delete_empty_credential_zone,
     evaluate_alibaba_httpdns_groups,
     list_credential_effective_scopes,
@@ -36,6 +40,7 @@ from ..schemas import (
     AlibabaHttpDnsOriginCreate,
     AlibabaHttpDnsOriginOut,
     AlibabaHttpDnsOriginUpdate,
+    AlibabaHttpDnsRecordDelete,
     AlibabaHttpDnsRemoteAccountOut,
     AlibabaHttpDnsRemoteRecordOut,
     AlibabaHttpDnsRemoteZoneOut,
@@ -51,6 +56,47 @@ from ..security import encrypt_secret
 
 
 router = APIRouter(prefix="/alibaba-httpdns", tags=["alibaba-httpdns"])
+
+
+class _ZoneMutationLockEntry:
+    def __init__(self) -> None:
+        self.lock = Lock()
+        self.references = 0
+
+
+_zone_mutation_locks_guard = Lock()
+_zone_mutation_locks: dict[str, _ZoneMutationLockEntry] = {}
+
+
+@contextmanager
+def _alibaba_zone_mutation_lock(zone_id: str):
+    """Process-local serialization for remote mutations and bindings of one Zone."""
+    key = str(zone_id).strip().casefold()
+    with _zone_mutation_locks_guard:
+        entry = _zone_mutation_locks.get(key)
+        if entry is None:
+            entry = _ZoneMutationLockEntry()
+            _zone_mutation_locks[key] = entry
+        entry.references += 1
+    acquired = False
+    try:
+        entry.lock.acquire()
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            entry.lock.release()
+        with _zone_mutation_locks_guard:
+            entry.references -= 1
+            if entry.references == 0 and _zone_mutation_locks.get(key) is entry:
+                del _zone_mutation_locks[key]
+
+
+def _refresh_zone_mutation_session(db: Session) -> None:
+    # Authentication may already have opened a read transaction on this
+    # request-scoped Session. End that snapshot after acquiring the Zone lock
+    # so duplicate/binding checks can see the preceding lock holder's commit.
+    db.rollback()
 
 
 def _group_query(db: Session):
@@ -191,6 +237,44 @@ def _credential(db: Session, credential_id: int) -> AlibabaHttpDnsCredential:
     return credential
 
 
+def _validate_direct_credential(credential: AlibabaHttpDnsCredential) -> None:
+    list_credential_zones(credential)
+    scopes = list_credential_effective_scopes(credential)
+    if not scopes:
+        raise RuntimeError(
+            "DescribePdnsUserInfo 未返回 PdnsId；请确认 HTTPDNS 服务已开通，"
+            "并为 RAM 用户授予 pubdns:DescribePdnsUserInfo 权限"
+        )
+
+
+def _normalized_scope_ids(values: list[object]) -> list[str]:
+    return sorted({str(value).strip() for value in values if value is not None and str(value).strip()})
+
+
+def _merged_zone_scope_ids(zone: dict, requested_scope_ids: list[str]) -> list[str]:
+    existing = zone.get("EffectiveScopeIds")
+    existing_values = existing if isinstance(existing, list) else []
+    return _normalized_scope_ids([*existing_values, *requested_scope_ids])
+
+
+def _zone_create_scope_ids(
+    credential: AlibabaHttpDnsCredential,
+    requested_scope_ids: list[str] | None,
+) -> list[str]:
+    if requested_scope_ids is not None:
+        normalized = _normalized_scope_ids(requested_scope_ids)
+    else:
+        normalized = _normalized_scope_ids(
+            [item.get("id") for item in list_credential_effective_scopes(credential)]
+        )
+    if not normalized:
+        raise ValueError(
+            "请至少选择一个阿里云 HTTPDNS 生效配置；"
+            "旧客户端未传 effective_scope_ids 时，DescribePdnsUserInfo 也未返回可用 PdnsId"
+        )
+    return normalized
+
+
 @router.get("/credentials", response_model=list[AlibabaHttpDnsCredentialOut])
 def credentials(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(AlibabaHttpDnsCredential).order_by(AlibabaHttpDnsCredential.name).all()
@@ -213,7 +297,7 @@ def create_credential(
     db.add(credential)
     try:
         db.flush()
-        list_credential_zones(credential)
+        _validate_direct_credential(credential)
         credential.enabled = payload.enabled
     except Exception as exc:
         db.rollback()
@@ -245,7 +329,7 @@ def update_credential(
         setattr(credential, key, value.strip() if isinstance(value, str) else value)
     try:
         credential.enabled = True
-        list_credential_zones(credential)
+        _validate_direct_credential(credential)
         credential.enabled = requested_enabled
         credential.last_error = None
     except Exception as exc:
@@ -330,6 +414,7 @@ def create_zone(
     credential = _credential(db, credential_id)
     try:
         zone_name = normalize_hostname(payload.zone_name)
+        scope_ids = _zone_create_scope_ids(credential, payload.effective_scope_ids)
         existing = next(
             (
                 item
@@ -345,6 +430,30 @@ def create_zone(
             zone_name=zone_name,
             proxy_pattern=payload.proxy_pattern,
         )
+        try:
+            result["EffectiveScopeIds"] = update_credential_zone_effective_scope(
+                credential,
+                str(result["ZoneId"]),
+                scope_ids,
+            )
+        except AlibabaEffectiveScopeVerificationError as exc:
+            credential.last_error = str(exc)
+            db.commit()
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"内置权威域名已创建，生效范围更新已提交，但读回校验失败：{exc}。"
+                    "为避免删除可能已生效的 Zone，本项目未自动删除它；请刷新后使用生效范围修复。"
+                ),
+            ) from exc
+        except Exception as exc:
+            detail = (
+                f"内置权威域名已创建，但设置阿里云 HTTPDNS 生效范围失败：{exc}。"
+                "为避免误删已创建的 Zone，本项目已保留它；请刷新后修复生效范围。"
+            )
+            credential.last_error = detail
+            db.commit()
+            raise HTTPException(status_code=502, detail=detail) from exc
         credential.last_error = None
         db.commit()
         return result
@@ -370,9 +479,10 @@ def update_zone_effective_scope(
     db: Session = Depends(get_db),
 ):
     credential = _credential(db, credential_id)
-    _credential_zone(credential, zone_id)
+    zone = _credential_zone(credential, zone_id)
     try:
-        update_credential_zone_effective_scope(credential, zone_id, payload.scope_ids)
+        scope_ids = _merged_zone_scope_ids(zone, payload.scope_ids)
+        update_credential_zone_effective_scope(credential, zone_id, scope_ids)
         credential.last_error = None
         db.commit()
         return Message(message="阿里云 HTTPDNS 生效范围已更新")
@@ -395,7 +505,18 @@ def delete_zone(
     _: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    credential = _credential(db, credential_id)
+    with _alibaba_zone_mutation_lock(zone_id):
+        _refresh_zone_mutation_session(db)
+        credential = _credential(db, credential_id)
+        return _delete_zone_locked(credential, zone_id, payload, db)
+
+
+def _delete_zone_locked(
+    credential: AlibabaHttpDnsCredential,
+    zone_id: str,
+    payload: AlibabaHttpDnsZoneDelete,
+    db: Session,
+) -> Message:
     zone = _credential_zone(credential, zone_id)
     zone_name = str(zone.get("ZoneName") or "").rstrip(".").lower()
     if payload.confirm_name.strip().rstrip(".").lower() != zone_name:
@@ -428,15 +549,100 @@ def credential_records(
 ):
     credential = _credential(db, credential_id)
     try:
-        return [
-            item
-            for item in list_credential_records(credential, zone_id)
-            if str(item.get("Type") or "").upper() in {"A", "AAAA", "CNAME"}
-        ]
+        return list_credential_records(credential, zone_id)
     except Exception as exc:
         credential.last_error = str(exc)
         db.commit()
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.delete(
+    "/credentials/{credential_id}/zones/{zone_id}/records/{record_id}",
+    response_model=Message,
+)
+def delete_credential_record_action(
+    credential_id: int,
+    zone_id: str,
+    record_id: str,
+    payload: AlibabaHttpDnsRecordDelete,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    with _alibaba_zone_mutation_lock(zone_id):
+        _refresh_zone_mutation_session(db)
+        credential = _credential(db, credential_id)
+        return _delete_credential_record_locked(credential, zone_id, record_id, payload, db)
+
+
+def _delete_credential_record_locked(
+    credential: AlibabaHttpDnsCredential,
+    zone_id: str,
+    record_id: str,
+    payload: AlibabaHttpDnsRecordDelete,
+    db: Session,
+) -> Message:
+    normalized_record_id = record_id.strip()
+    try:
+        zone = _credential_zone(credential, zone_id)
+        record = next(
+            (
+                item
+                for item in list_credential_records(credential, zone_id)
+                if str(item.get("RecordId") or "").strip() == normalized_record_id
+            ),
+            None,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        credential.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"读取阿里云 HTTPDNS 解析记录失败：{exc}") from exc
+
+    if record is None:
+        raise HTTPException(status_code=404, detail="该 RecordId 不属于指定的阿里云 HTTPDNS Zone")
+    if payload.confirm_record_id.strip() != normalized_record_id:
+        raise HTTPException(status_code=400, detail="解析记录确认 RecordId 不匹配")
+
+    bindings = db.query(AlibabaHttpDnsGroup).filter(
+        AlibabaHttpDnsGroup.zone_id == zone_id,
+        AlibabaHttpDnsGroup.record_id == normalized_record_id,
+    ).all()
+    if bindings:
+        binding_ids = ", ".join(str(item.id) for item in bindings)
+        raise HTTPException(
+            status_code=409,
+            detail=f"该解析记录仍绑定阿里云故障组（组 ID: {binding_ids}），请先删除或解除绑定",
+        )
+
+    try:
+        delete_credential_record(credential, normalized_record_id)
+        credential.last_error = None
+        zone_name = str(zone.get("ZoneName") or zone_id).rstrip(".")
+        rr = str(record.get("Rr") or "@").strip() or "@"
+        record_name = zone_name if rr == "@" else f"{rr}.{zone_name}"
+        add_event(
+            db,
+            "alibaba_httpdns.record_deleted",
+            "info",
+            f"阿里云 HTTPDNS {record_name} {str(record.get('Type') or '未知').upper()} "
+            f"（RecordId: {normalized_record_id}）解析记录已删除",
+            {
+                "credential_id": credential.id,
+                "zone_id": zone_id,
+                "record_id": normalized_record_id,
+                "record_type": str(record.get("Type") or ""),
+                "record_value": str(record.get("Value") or ""),
+            },
+        )
+        db.commit()
+        return Message(message="阿里云 HTTPDNS 解析记录已删除")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        credential.last_error = str(exc)
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"删除阿里云 HTTPDNS 解析记录失败：{exc}") from exc
 
 
 @router.get("/remote/accounts", response_model=list[AlibabaHttpDnsRemoteAccountOut])
@@ -489,7 +695,17 @@ def create_managed_group(
     _: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    credential = _credential(db, payload.credential_id)
+    with _alibaba_zone_mutation_lock(payload.zone_id):
+        _refresh_zone_mutation_session(db)
+        credential = _credential(db, payload.credential_id)
+        return _create_managed_group_locked(payload, credential, db)
+
+
+def _create_managed_group_locked(
+    payload: AlibabaHttpDnsStandaloneGroupCreate,
+    credential: AlibabaHttpDnsCredential,
+    db: Session,
+) -> AlibabaHttpDnsGroup:
     try:
         zone = _credential_zone(credential, payload.zone_id)
         zone_name = normalize_hostname(str(zone.get("ZoneName") or ""))
@@ -543,7 +759,7 @@ def create_managed_group(
         update_credential_zone_effective_scope(
             credential,
             payload.zone_id,
-            payload.effective_scope_ids,
+            _merged_zone_scope_ids(zone, payload.effective_scope_ids),
         )
         group = _adopt_record(
             db,
@@ -584,7 +800,17 @@ def create_managed_group(
 
 @router.post("/zones", response_model=Message)
 def adopt_zone(payload: AlibabaHttpDnsZoneAdopt, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    credential = _credential(db, payload.credential_id) if payload.credential_id is not None else None
+    with _alibaba_zone_mutation_lock(payload.zone_id):
+        _refresh_zone_mutation_session(db)
+        credential = _credential(db, payload.credential_id) if payload.credential_id is not None else None
+        return _adopt_zone_locked(payload, credential, db)
+
+
+def _adopt_zone_locked(
+    payload: AlibabaHttpDnsZoneAdopt,
+    credential: AlibabaHttpDnsCredential | None,
+    db: Session,
+) -> Message:
     account_id = -credential.id if credential is not None else payload.remote_account_id
     try:
         records = (
@@ -677,7 +903,17 @@ def release_zone(remote_account_id: int, zone_id: str, _: User = Depends(get_cur
 
 @router.post("/groups", response_model=AlibabaHttpDnsGroupOut)
 def create_group(payload: AlibabaHttpDnsGroupCreate, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    credential = _credential(db, payload.credential_id) if payload.credential_id is not None else None
+    with _alibaba_zone_mutation_lock(payload.zone_id):
+        _refresh_zone_mutation_session(db)
+        credential = _credential(db, payload.credential_id) if payload.credential_id is not None else None
+        return _create_group_locked(payload, credential, db)
+
+
+def _create_group_locked(
+    payload: AlibabaHttpDnsGroupCreate,
+    credential: AlibabaHttpDnsCredential | None,
+    db: Session,
+) -> AlibabaHttpDnsGroup:
     account_id = -credential.id if credential is not None else payload.remote_account_id
     duplicate = db.query(AlibabaHttpDnsGroup).filter(
         AlibabaHttpDnsGroup.remote_account_id == account_id,

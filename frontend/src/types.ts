@@ -54,6 +54,7 @@ export type AlibabaHttpDnsRemoteZone = {
   RecordCount: number;
   ProxyPattern?: "zone" | "record" | string;
   Remark: string;
+  EffectiveScopeIds: string[];
 };
 
 export type AlibabaHttpDnsEffectiveScope = {
@@ -72,7 +73,7 @@ export type AlibabaHttpDnsRemoteRecord = {
   RequestSource: string;
   Weight: number;
   Priority: number;
-  Remark: string;
+  Remark: string | null;
   EnableStatus: string;
 };
 

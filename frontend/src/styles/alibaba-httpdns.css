@@ -37,6 +37,169 @@
   margin: 12px 0 0;
 }
 
+.legacy-ui .alibabaEffectiveScopeSelector {
+  align-items: flex-start;
+  background: color-mix(in srgb, var(--muted) 55%, var(--card));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 12px;
+}
+
+.legacy-ui .alibabaEffectiveScopeSelector > strong,
+.legacy-ui .alibabaEffectiveScopeSelector > span {
+  flex-basis: 100%;
+}
+
+.legacy-ui .alibabaZoneDetails {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.legacy-ui .alibabaZoneDetails small {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.legacy-ui .alibabaZoneScopeMeta {
+  align-items: center;
+  color: var(--muted-foreground);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 6px 10px;
+}
+
+.legacy-ui .alibabaZoneScopeStatus {
+  border-radius: 999px;
+  font-weight: 700;
+  padding: 2px 8px;
+}
+
+.legacy-ui .alibabaZoneScopeStatus.active {
+  background: color-mix(in srgb, #22c55e 16%, var(--card));
+  color: #15803d;
+}
+
+.legacy-ui .alibabaZoneScopeStatus.missing {
+  background: color-mix(in srgb, #f59e0b 18%, var(--card));
+  color: #a16207;
+}
+
+.legacy-ui .alibabaZoneScopeStatus.mismatch {
+  background: color-mix(in srgb, var(--destructive) 14%, var(--card));
+  color: var(--destructive);
+}
+
+.legacy-ui .alibabaZoneRow {
+  align-items: start;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 12px 16px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 14px 0;
+}
+
+.legacy-ui .alibabaZoneRow > .rowActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.legacy-ui .alibabaZoneRecordPanel {
+  background: color-mix(in srgb, var(--muted) 35%, var(--card));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  grid-column: 1 / -1;
+  overflow: hidden;
+}
+
+.legacy-ui .alibabaZoneRecordPanelHead {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 11px 12px;
+}
+
+.legacy-ui .alibabaZoneRecordPanelHead > div {
+  display: grid;
+  gap: 3px;
+}
+
+.legacy-ui .alibabaZoneRecordPanelHead small,
+.legacy-ui .alibabaZoneRecordIdentity small {
+  color: var(--muted-foreground);
+}
+
+.legacy-ui .alibabaZoneRecordList {
+  display: grid;
+}
+
+.legacy-ui .alibabaZoneRecord {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 11px 12px;
+}
+
+.legacy-ui .alibabaZoneRecord:last-child {
+  border-bottom: 0;
+}
+
+.legacy-ui .alibabaZoneRecordIdentity {
+  display: grid;
+  flex: 1 1 220px;
+  gap: 3px;
+  min-width: 0;
+}
+
+.legacy-ui .alibabaZoneRecordIdentity strong,
+.legacy-ui .alibabaZoneRecordIdentity small,
+.legacy-ui .alibabaZoneRecordValue {
+  overflow-wrap: anywhere;
+}
+
+.legacy-ui .alibabaZoneRecordValue {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  flex: 1 1 180px;
+  padding: 5px 7px;
+  white-space: normal;
+}
+
+.legacy-ui .alibabaRecordState {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+}
+
+.legacy-ui .alibabaRecordState.enabled {
+  background: color-mix(in srgb, #22c55e 16%, var(--card));
+  color: #15803d;
+}
+
+.legacy-ui .alibabaRecordState.disabled {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.legacy-ui .alibabaZoneRecordError {
+  align-items: center;
+  color: var(--destructive);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 14px 12px;
+}
+
 .legacy-ui .alibabaHttpDnsGrid {
   display: grid;
   gap: 16px;
@@ -182,9 +345,18 @@
 
   .legacy-ui .alibabaHttpDnsIntro,
   .legacy-ui .alibabaHttpDnsCardHead,
-  .legacy-ui .alibabaManagedZoneHead {
+  .legacy-ui .alibabaManagedZoneHead,
+  .legacy-ui .alibabaZoneRecordPanelHead {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .legacy-ui .alibabaZoneRow {
+    grid-template-columns: 1fr;
+  }
+
+  .legacy-ui .alibabaZoneRow > .rowActions {
+    justify-content: flex-start;
   }
 }
 

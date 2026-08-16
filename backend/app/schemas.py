@@ -378,10 +378,15 @@ class AlibabaHttpDnsEffectiveScopeOut(BaseModel):
 class AlibabaHttpDnsZoneCreate(BaseModel):
     zone_name: str = Field(min_length=1, max_length=255)
     proxy_pattern: Literal["zone", "record"] = "zone"
+    effective_scope_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
 
 
 class AlibabaHttpDnsZoneDelete(BaseModel):
     confirm_name: str = Field(min_length=1, max_length=255)
+
+
+class AlibabaHttpDnsRecordDelete(BaseModel):
+    confirm_record_id: str = Field(min_length=1, max_length=120)
 
 
 class AlibabaHttpDnsEffectiveScopeUpdate(BaseModel):
@@ -412,6 +417,7 @@ class AlibabaHttpDnsRemoteZoneOut(BaseModel):
     RecordCount: int = 0
     ProxyPattern: str = "zone"
     Remark: str | None = ""
+    EffectiveScopeIds: list[str] = Field(default_factory=list)
 
 
 class AlibabaHttpDnsRemoteRecordOut(BaseModel):

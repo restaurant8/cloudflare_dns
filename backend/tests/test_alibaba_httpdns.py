@@ -1,15 +1,28 @@
 import base64
 import hashlib
 import hmac
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
 import pytest
+import app.routes.alibaba_httpdns as alibaba_httpdns_routes
 from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.alibaba_httpdns import _desired_origin, call_azpanel_httpdns, create_credential_zone, evaluate_alibaba_httpdns_groups, list_credential_zones, sync_group_alibaba_outputs, update_credential_zone_effective_scope
+from app.alibaba_httpdns import (
+    AlibabaEffectiveScopeVerificationError,
+    _desired_origin,
+    call_azpanel_httpdns,
+    create_credential_zone,
+    delete_credential_record,
+    evaluate_alibaba_httpdns_groups,
+    list_credential_zones,
+    sync_group_alibaba_outputs,
+    update_credential_zone_effective_scope,
+)
 from app.database import Base
 from app.dns_utils import TcpCheckResult
 from app.failover import evaluate_failover_groups
@@ -29,9 +42,38 @@ from app.models import (
     User,
     Zone,
 )
-from app.routes.alibaba_httpdns import adopt_zone, create_managed_group, delete_origin_action, release_zone_action, router, update_group as update_alibaba_group, update_origin
+from app.routes.alibaba_httpdns import (
+    adopt_zone,
+    create_credential,
+    create_group,
+    create_managed_group,
+    create_zone,
+    credential_records,
+    delete_credential_record_action,
+    delete_zone,
+    delete_origin_action,
+    release_zone_action,
+    router,
+    update_group as update_alibaba_group,
+    update_origin,
+    update_zone_effective_scope,
+)
 from app.routes.groups import create_origin as create_failover_origin, update_origin as update_failover_origin
-from app.schemas import AlibabaHttpDnsGroupUpdate, AlibabaHttpDnsOriginUpdate, AlibabaHttpDnsStandaloneGroupCreate, AlibabaHttpDnsZoneAdopt, AlibabaHttpDnsZoneRelease, OriginCreate, OriginUpdate
+from app.schemas import (
+    AlibabaHttpDnsCredentialCreate,
+    AlibabaHttpDnsEffectiveScopeUpdate,
+    AlibabaHttpDnsGroupCreate,
+    AlibabaHttpDnsGroupUpdate,
+    AlibabaHttpDnsOriginUpdate,
+    AlibabaHttpDnsRecordDelete,
+    AlibabaHttpDnsStandaloneGroupCreate,
+    AlibabaHttpDnsZoneAdopt,
+    AlibabaHttpDnsZoneCreate,
+    AlibabaHttpDnsZoneDelete,
+    AlibabaHttpDnsZoneRelease,
+    OriginCreate,
+    OriginUpdate,
+)
 from app.security import encrypt_secret
 
 
@@ -39,6 +81,34 @@ def make_session():
     engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, future=True)()
+
+
+def add_direct_credential(db, *, name="direct-record-delete"):
+    credential = AlibabaHttpDnsCredential(
+        name=name,
+        access_key_id_encrypted=encrypt_secret("ak"),
+        access_key_secret_encrypted=encrypt_secret("secret"),
+        endpoint="alidns.aliyuncs.com",
+        enabled=True,
+    )
+    db.add(credential)
+    db.commit()
+    return credential
+
+
+def remote_alibaba_record(record_id="record-1", record_type="TXT"):
+    return {
+        "RecordId": record_id,
+        "Rr": "www",
+        "Type": record_type,
+        "Value": "record-value",
+        "Ttl": 60,
+        "RequestSource": "default",
+        "Weight": 1,
+        "Priority": 1,
+        "Remark": "",
+        "EnableStatus": "enable",
+    }
 
 
 def add_group(db, *, current_target="192.0.2.10", backup_target="192.0.2.20"):
@@ -134,26 +204,836 @@ def test_direct_credential_calls_alibaba_rpc_without_azpanel(monkeypatch):
     assert captured["params"]["Signature"] == expected
 
 
-def test_zone_creation_and_effective_scope_use_idempotent_rpc_parameters(monkeypatch):
+def test_zone_creation_uses_fresh_token_and_effective_scope_is_verified(monkeypatch):
     credential = AlibabaHttpDnsCredential(id=9, name="direct", enabled=True)
     calls = []
+    current_scopes = []
 
     def call(_credential, action, **parameters):
         calls.append((action, parameters))
-        return {"ZoneId": "zone-new"} if action == "AddRecursionZone" else {}
+        if action == "AddRecursionZone":
+            return {"ZoneId": "zone-new"}
+        if action == "UpdateRecursionZoneEffectiveScope":
+            current_scopes[:] = [
+                value
+                for key, value in parameters.items()
+                if key.startswith("EffectiveScopes.1.Scope.")
+            ]
+            return {}
+        if action == "ListRecursionZones":
+            return {
+                "TotalPages": 1,
+                "Zones": {
+                    "Zone": [
+                        {
+                            "ZoneId": "zone-new",
+                            "ZoneName": "private.example.com",
+                            "EffectiveScopes": {
+                                "EffectiveScope": [
+                                    {
+                                        "EffectiveType": "account",
+                                        "Scopes": {"Scope": list(reversed(current_scopes))},
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                },
+            }
+        return {}
 
     monkeypatch.setattr("app.alibaba_httpdns.call_alibaba_api", call)
 
     first = create_credential_zone(credential, zone_name="private.example.com", proxy_pattern="zone")
     second = create_credential_zone(credential, zone_name="private.example.com", proxy_pattern="zone")
-    update_credential_zone_effective_scope(credential, "zone-new", ["20003", "20004"])
+    verified = update_credential_zone_effective_scope(
+        credential,
+        "zone-new",
+        ["20004", "20003", "20003"],
+    )
 
     assert first["ZoneId"] == second["ZoneId"] == "zone-new"
-    assert calls[0][1]["ClientToken"] == calls[1][1]["ClientToken"]
+    assert calls[0][1]["ClientToken"] != calls[1][1]["ClientToken"]
     scope_params = calls[2][1]
     assert scope_params["EffectiveScopes.1.EffectiveType"] == "account"
     assert scope_params["EffectiveScopes.1.Scope.1"] == "20003"
     assert scope_params["EffectiveScopes.1.Scope.2"] == "20004"
+    assert calls[3][0] == "ListRecursionZones"
+    assert verified == ["20003", "20004"]
+
+
+def test_list_zones_normalizes_alibaba_effective_scope_shape(monkeypatch):
+    credential = AlibabaHttpDnsCredential(id=9, name="direct", enabled=True)
+    monkeypatch.setattr(
+        "app.alibaba_httpdns.call_alibaba_api",
+        lambda *_args, **_kwargs: {
+            "TotalPages": 1,
+            "RecursionZones": {
+                "RecursionZone": [
+                    {
+                        "ZoneId": "zone-1",
+                        "ZoneName": "private.example.com",
+                        "EffectiveScopes": {
+                            "EffectiveScope": [
+                                {
+                                    "EffectiveType": "account",
+                                    "Scopes": {"Scope": [20004, "20003", "20003"]},
+                                },
+                                {
+                                    "EffectiveType": "unsupported",
+                                    "Scopes": {"Scope": ["ignored"]},
+                                },
+                            ]
+                        },
+                    }
+                ]
+            },
+        },
+    )
+
+    zone = list_credential_zones(credential)[0]
+
+    assert zone["EffectiveScopeIds"] == ["20003", "20004"]
+    assert "EffectiveScopes" in zone
+
+
+def test_effective_scope_update_fails_when_alibaba_does_not_write_requested_ids(monkeypatch):
+    credential = AlibabaHttpDnsCredential(id=9, name="direct", enabled=True)
+    sleeps = []
+
+    def call(_credential, action, **_parameters):
+        if action == "ListRecursionZones":
+            return {
+                "TotalPages": 1,
+                "Zones": {
+                    "Zone": [
+                        {
+                            "ZoneId": "zone-1",
+                            "ZoneName": "private.example.com",
+                            "EffectiveScopes": {"EffectiveScope": []},
+                        }
+                    ]
+                },
+            }
+        return {}
+
+    monkeypatch.setattr("app.alibaba_httpdns.call_alibaba_api", call)
+    monkeypatch.setattr("app.alibaba_httpdns.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    with pytest.raises(AlibabaEffectiveScopeVerificationError) as exc_info:
+        update_credential_zone_effective_scope(credential, "zone-1", ["20003"])
+
+    assert "20003" in str(exc_info.value)
+    assert "实际: 空" in str(exc_info.value)
+    assert sleeps == [0.2, 0.4]
+
+
+def test_effective_scope_readback_retries_missing_zone_then_old_scope(monkeypatch):
+    credential = AlibabaHttpDnsCredential(id=9, name="direct", enabled=True)
+    reads = []
+    sleeps = []
+
+    def call(_credential, action, **_parameters):
+        if action != "ListRecursionZones":
+            return {}
+        reads.append(1)
+        if len(reads) == 1:
+            zones = []
+        else:
+            scopes = ["old-account"] if len(reads) == 2 else ["20003"]
+            zones = [
+                {
+                    "ZoneId": "zone-1",
+                    "ZoneName": "private.example.com",
+                    "EffectiveScopes": {
+                        "EffectiveScope": [
+                            {
+                                "EffectiveType": "account",
+                                "Scopes": {"Scope": scopes},
+                            }
+                        ]
+                    },
+                }
+            ]
+        return {"TotalPages": 1, "Zones": {"Zone": zones}}
+
+    monkeypatch.setattr("app.alibaba_httpdns.call_alibaba_api", call)
+    monkeypatch.setattr("app.alibaba_httpdns.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    assert update_credential_zone_effective_scope(credential, "zone-1", ["20003"]) == ["20003"]
+    assert len(reads) == 3
+    assert sleeps == [0.2, 0.4]
+
+
+def test_create_zone_sets_effective_scope_before_reporting_success(monkeypatch):
+    db = make_session()
+    credential = AlibabaHttpDnsCredential(
+        name="direct-create",
+        access_key_id_encrypted=encrypt_secret("ak"),
+        access_key_secret_encrypted=encrypt_secret("secret"),
+        endpoint="alidns.aliyuncs.com",
+        enabled=True,
+    )
+    db.add(credential)
+    db.commit()
+    calls = []
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_credential_zones", lambda *_args: [])
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.create_credential_zone",
+        lambda _credential, **kwargs: {
+            "ZoneId": "zone-new",
+            "ZoneName": kwargs["zone_name"],
+            "RecordCount": 0,
+            "ProxyPattern": kwargs["proxy_pattern"],
+            "Remark": "",
+        },
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.update_credential_zone_effective_scope",
+        lambda _credential, zone_id, scopes: calls.append((zone_id, scopes)) or ["20003"],
+    )
+
+    result = create_zone(
+        credential.id,
+        AlibabaHttpDnsZoneCreate(
+            zone_name="Private.Example.com.",
+            proxy_pattern="zone",
+            effective_scope_ids=["20003"],
+        ),
+        None,
+        db,
+    )
+
+    assert calls == [("zone-new", ["20003"])]
+    assert result["ZoneName"] == "private.example.com"
+    assert result["EffectiveScopeIds"] == ["20003"]
+
+
+def test_create_zone_without_scope_ids_loads_pdns_id_before_add(monkeypatch):
+    db = make_session()
+    credential = AlibabaHttpDnsCredential(
+        name="legacy-client",
+        access_key_id_encrypted=encrypt_secret("ak"),
+        access_key_secret_encrypted=encrypt_secret("secret"),
+        endpoint="alidns.aliyuncs.com",
+        enabled=True,
+    )
+    db.add(credential)
+    db.commit()
+    calls = []
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.list_credential_effective_scopes",
+        lambda *_args: calls.append("describe") or [{"id": "20003"}],
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.list_credential_zones",
+        lambda *_args: calls.append("list-zones") or [],
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.create_credential_zone",
+        lambda *_args, **_kwargs: calls.append("add-zone")
+        or {"ZoneId": "zone-new", "ZoneName": "private.example.com"},
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.update_credential_zone_effective_scope",
+        lambda _credential, _zone_id, scopes: calls.append(("scope", scopes)) or scopes,
+    )
+
+    result = create_zone(
+        credential.id,
+        AlibabaHttpDnsZoneCreate(zone_name="private.example.com"),
+        None,
+        db,
+    )
+
+    assert calls == ["describe", "list-zones", "add-zone", ("scope", ["20003"])]
+    assert result["EffectiveScopeIds"] == ["20003"]
+
+
+def test_create_zone_without_scope_ids_fails_before_add_when_pdns_id_is_unavailable(monkeypatch):
+    db = make_session()
+    credential = AlibabaHttpDnsCredential(
+        name="legacy-client",
+        access_key_id_encrypted=encrypt_secret("ak"),
+        access_key_secret_encrypted=encrypt_secret("secret"),
+        endpoint="alidns.aliyuncs.com",
+        enabled=True,
+    )
+    db.add(credential)
+    db.commit()
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_credential_effective_scopes", lambda *_args: [])
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.create_credential_zone",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("PdnsId 缺失时不应创建 Zone")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        create_zone(
+            credential.id,
+            AlibabaHttpDnsZoneCreate(zone_name="private.example.com"),
+            None,
+            db,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "PdnsId" in str(exc_info.value.detail)
+
+
+def test_create_zone_keeps_zone_when_scope_update_is_denied(monkeypatch):
+    db = make_session()
+    credential = AlibabaHttpDnsCredential(
+        name="direct-create",
+        access_key_id_encrypted=encrypt_secret("ak"),
+        access_key_secret_encrypted=encrypt_secret("secret"),
+        endpoint="alidns.aliyuncs.com",
+        enabled=True,
+    )
+    db.add(credential)
+    db.commit()
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_credential_zones", lambda *_args: [])
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.create_credential_zone",
+        lambda *_args, **_kwargs: {"ZoneId": "zone-new", "ZoneName": "private.example.com"},
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.update_credential_zone_effective_scope",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("Forbidden.RAM AccessDenied")),
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.delete_empty_credential_zone",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("生效范围失败时不应自动删除 Zone")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        create_zone(
+            credential.id,
+            AlibabaHttpDnsZoneCreate(
+                zone_name="private.example.com",
+                effective_scope_ids=["20003"],
+            ),
+            None,
+            db,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert "Forbidden.RAM AccessDenied" in str(exc_info.value.detail)
+    assert "已保留" in str(exc_info.value.detail)
+    assert "刷新后修复" in str(exc_info.value.detail)
+
+
+def test_create_zone_keeps_zone_when_scope_update_readback_is_inconsistent(monkeypatch):
+    db = make_session()
+    credential = AlibabaHttpDnsCredential(
+        name="direct-create",
+        access_key_id_encrypted=encrypt_secret("ak"),
+        access_key_secret_encrypted=encrypt_secret("secret"),
+        endpoint="alidns.aliyuncs.com",
+        enabled=True,
+    )
+    db.add(credential)
+    db.commit()
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_credential_zones", lambda *_args: [])
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.create_credential_zone",
+        lambda *_args, **_kwargs: {"ZoneId": "zone-new", "ZoneName": "private.example.com"},
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.update_credential_zone_effective_scope",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AlibabaEffectiveScopeVerificationError("期望 20003，实际为空")
+        ),
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.delete_empty_credential_zone",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("读回延迟时不应删除 Zone")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        create_zone(
+            credential.id,
+            AlibabaHttpDnsZoneCreate(
+                zone_name="private.example.com",
+                effective_scope_ids=["20003"],
+            ),
+            None,
+            db,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert "未自动删除" in str(exc_info.value.detail)
+    assert "生效范围修复" in str(exc_info.value.detail)
+
+
+def test_credential_validation_requires_pdns_user_info(monkeypatch):
+    db = make_session()
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_credential_zones", lambda *_args: [])
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_credential_effective_scopes", lambda *_args: [])
+
+    with pytest.raises(HTTPException) as exc_info:
+        create_credential(
+            AlibabaHttpDnsCredentialCreate(
+                name="missing-pdns",
+                access_key_id="ak",
+                access_key_secret="secret",
+            ),
+            None,
+            db,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "DescribePdnsUserInfo" in str(exc_info.value.detail)
+    assert "PdnsId" in str(exc_info.value.detail)
+    assert db.query(AlibabaHttpDnsCredential).count() == 0
+
+
+def test_patch_effective_scope_surfaces_readback_mismatch(monkeypatch):
+    db = make_session()
+    credential = AlibabaHttpDnsCredential(
+        name="direct-patch",
+        access_key_id_encrypted=encrypt_secret("ak"),
+        access_key_secret_encrypted=encrypt_secret("secret"),
+        endpoint="alidns.aliyuncs.com",
+        enabled=True,
+    )
+    db.add(credential)
+    db.commit()
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns._credential_zone",
+        lambda *_args: {"ZoneId": "zone-1", "ZoneName": "private.example.com"},
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.update_credential_zone_effective_scope",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AlibabaEffectiveScopeVerificationError("期望 20003，实际为空")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_zone_effective_scope(
+            credential.id,
+            "zone-1",
+            AlibabaHttpDnsEffectiveScopeUpdate(scope_ids=["20003"]),
+            None,
+            db,
+    )
+
+    assert exc_info.value.status_code == 502
+    assert "实际为空" in str(exc_info.value.detail)
+
+
+def test_patch_effective_scope_preserves_existing_account_ids(monkeypatch):
+    db = make_session()
+    credential = AlibabaHttpDnsCredential(
+        name="direct-patch",
+        access_key_id_encrypted=encrypt_secret("ak"),
+        access_key_secret_encrypted=encrypt_secret("secret"),
+        endpoint="alidns.aliyuncs.com",
+        enabled=True,
+    )
+    db.add(credential)
+    db.commit()
+    calls = []
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns._credential_zone",
+        lambda *_args: {
+            "ZoneId": "zone-1",
+            "ZoneName": "private.example.com",
+            "EffectiveScopeIds": ["20004", "20003"],
+        },
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.update_credential_zone_effective_scope",
+        lambda _credential, zone_id, scopes: calls.append((zone_id, scopes)) or scopes,
+    )
+
+    response = update_zone_effective_scope(
+        credential.id,
+        "zone-1",
+        AlibabaHttpDnsEffectiveScopeUpdate(scope_ids=["20005", "20003"]),
+        None,
+        db,
+    )
+
+    assert response.message == "阿里云 HTTPDNS 生效范围已更新"
+    assert calls == [("zone-1", ["20003", "20004", "20005"])]
+
+
+def test_delete_credential_record_uses_idempotent_rpc_parameters(monkeypatch):
+    credential = AlibabaHttpDnsCredential(id=9, name="direct", enabled=True)
+    calls = []
+    monkeypatch.setattr(
+        "app.alibaba_httpdns.call_alibaba_api",
+        lambda _credential, action, **parameters: calls.append((action, parameters)) or {},
+    )
+
+    delete_credential_record(credential, "record-1")
+    delete_credential_record(credential, "record-1")
+
+    assert [item[0] for item in calls] == ["DeleteRecursionRecord", "DeleteRecursionRecord"]
+    assert calls[0][1]["RecordId"] == "record-1"
+    assert calls[0][1]["ClientToken"] == calls[1][1]["ClientToken"]
+    assert calls[0][1]["ClientToken"].startswith("cfdns-delete-record-")
+
+
+def test_delete_credential_record_action_deletes_unbound_record_and_adds_event(monkeypatch):
+    db = make_session()
+    credential = add_direct_credential(db)
+    deleted = []
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns._credential_zone",
+        lambda *_args: {"ZoneId": "zone-1", "ZoneName": "example.com"},
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.list_credential_records",
+        lambda *_args: [remote_alibaba_record()],
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.delete_credential_record",
+        lambda _credential, record_id: deleted.append(record_id),
+    )
+
+    response = delete_credential_record_action(
+        credential.id,
+        "zone-1",
+        "record-1",
+        AlibabaHttpDnsRecordDelete(confirm_record_id="record-1"),
+        None,
+        db,
+    )
+
+    event = db.query(Event).filter(Event.type == "alibaba_httpdns.record_deleted").one()
+    assert response.message == "阿里云 HTTPDNS 解析记录已删除"
+    assert deleted == ["record-1"]
+    assert "www.example.com" in event.message
+    assert "TXT" in event.message
+    assert "RecordId: record-1" in event.message
+    assert '"record_id":"record-1"' in event.payload_json
+
+
+def test_delete_credential_record_action_rejects_wrong_confirmation(monkeypatch):
+    db = make_session()
+    credential = add_direct_credential(db)
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns._credential_zone",
+        lambda *_args: {"ZoneId": "zone-1", "ZoneName": "example.com"},
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.list_credential_records",
+        lambda *_args: [remote_alibaba_record()],
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.delete_credential_record",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("确认值错误时不应删除")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        delete_credential_record_action(
+            credential.id,
+            "zone-1",
+            "record-1",
+            AlibabaHttpDnsRecordDelete(confirm_record_id="wrong-record"),
+            None,
+            db,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "RecordId 不匹配" in str(exc_info.value.detail)
+
+
+def test_delete_credential_record_action_rejects_record_from_another_zone(monkeypatch):
+    db = make_session()
+    credential = add_direct_credential(db)
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns._credential_zone",
+        lambda *_args: {"ZoneId": "zone-1", "ZoneName": "example.com"},
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.list_credential_records",
+        lambda *_args: [remote_alibaba_record(record_id="record-in-another-zone")],
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        delete_credential_record_action(
+            credential.id,
+            "zone-1",
+            "record-1",
+            AlibabaHttpDnsRecordDelete(confirm_record_id="record-1"),
+            None,
+            db,
+        )
+
+    assert exc_info.value.status_code == 404
+    assert "不属于" in str(exc_info.value.detail)
+
+
+def test_delete_credential_record_action_blocks_any_local_group_binding(monkeypatch):
+    db = make_session()
+    credential = add_direct_credential(db)
+    legacy_binding = AlibabaHttpDnsGroup(
+        remote_account_id=7,
+        account_name="legacy",
+        credential_id=None,
+        zone_id="zone-1",
+        zone_name="example.com",
+        record_id="record-1",
+        rr="www",
+        record_type="TXT",
+        enabled=True,
+    )
+    db.add(legacy_binding)
+    db.commit()
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns._credential_zone",
+        lambda *_args: {"ZoneId": "zone-1", "ZoneName": "example.com"},
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.list_credential_records",
+        lambda *_args: [remote_alibaba_record()],
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        delete_credential_record_action(
+            credential.id,
+            "zone-1",
+            "record-1",
+            AlibabaHttpDnsRecordDelete(confirm_record_id="record-1"),
+            None,
+            db,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert f"组 ID: {legacy_binding.id}" in str(exc_info.value.detail)
+
+
+def test_delete_credential_record_action_preserves_alibaba_api_error(monkeypatch):
+    db = make_session()
+    credential = add_direct_credential(db)
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns._credential_zone",
+        lambda *_args: {"ZoneId": "zone-1", "ZoneName": "example.com"},
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.list_credential_records",
+        lambda *_args: [remote_alibaba_record()],
+    )
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.delete_credential_record",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("Forbidden.RAM AccessDenied")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        delete_credential_record_action(
+            credential.id,
+            "zone-1",
+            "record-1",
+            AlibabaHttpDnsRecordDelete(confirm_record_id="record-1"),
+            None,
+            db,
+        )
+
+    db.refresh(credential)
+    assert exc_info.value.status_code == 502
+    assert "Forbidden.RAM AccessDenied" in str(exc_info.value.detail)
+    assert credential.last_error == "Forbidden.RAM AccessDenied"
+
+
+def test_credential_records_returns_every_alibaba_record_type(monkeypatch):
+    db = make_session()
+    credential = add_direct_credential(db)
+    records = [
+        remote_alibaba_record(record_id="a", record_type="A"),
+        remote_alibaba_record(record_id="txt", record_type="TXT"),
+        remote_alibaba_record(record_id="mx", record_type="MX"),
+        remote_alibaba_record(record_id="srv", record_type="SRV"),
+    ]
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_credential_records", lambda *_args: records)
+
+    output = credential_records(credential.id, "zone-1", None, db)
+
+    assert [item["Type"] for item in output] == ["A", "TXT", "MX", "SRV"]
+
+
+def test_all_binding_entrypoints_and_remote_deletes_use_shared_zone_lock(monkeypatch):
+    locked_zone_ids = []
+
+    class SpyLock:
+        def __init__(self, zone_id):
+            self.zone_id = zone_id
+
+        def __enter__(self):
+            locked_zone_ids.append(self.zone_id)
+
+        def __exit__(self, *_args):
+            return False
+
+    credential = AlibabaHttpDnsCredential(id=1, name="direct", enabled=True)
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns._alibaba_zone_mutation_lock",
+        lambda zone_id: SpyLock(zone_id),
+    )
+    monkeypatch.setattr("app.routes.alibaba_httpdns._refresh_zone_mutation_session", lambda *_args: None)
+    monkeypatch.setattr("app.routes.alibaba_httpdns._credential", lambda *_args: credential)
+    monkeypatch.setattr("app.routes.alibaba_httpdns._create_managed_group_locked", lambda *_args: "managed")
+    monkeypatch.setattr("app.routes.alibaba_httpdns._adopt_zone_locked", lambda *_args: "adopt")
+    monkeypatch.setattr("app.routes.alibaba_httpdns._create_group_locked", lambda *_args: "group")
+    monkeypatch.setattr("app.routes.alibaba_httpdns._delete_credential_record_locked", lambda *_args: "record-delete")
+    monkeypatch.setattr("app.routes.alibaba_httpdns._delete_zone_locked", lambda *_args: "zone-delete")
+
+    create_managed_group(
+        AlibabaHttpDnsStandaloneGroupCreate(
+            credential_id=1,
+            zone_id="zone-1",
+            primary_target="192.0.2.10",
+            effective_scope_ids=["20003"],
+        ),
+        None,
+        object(),
+    )
+    adopt_zone(
+        AlibabaHttpDnsZoneAdopt(
+            credential_id=1,
+            account_name="direct",
+            zone_id="zone-1",
+            zone_name="example.com",
+        ),
+        None,
+        object(),
+    )
+    create_group(
+        AlibabaHttpDnsGroupCreate(
+            credential_id=1,
+            account_name="direct",
+            zone_id="zone-1",
+            zone_name="example.com",
+            record_id="record-1",
+        ),
+        None,
+        object(),
+    )
+    delete_credential_record_action(
+        1,
+        "zone-1",
+        "record-1",
+        AlibabaHttpDnsRecordDelete(confirm_record_id="record-1"),
+        None,
+        object(),
+    )
+    delete_zone(
+        1,
+        "zone-1",
+        AlibabaHttpDnsZoneDelete(confirm_name="example.com"),
+        None,
+        object(),
+    )
+
+    assert locked_zone_ids == ["zone-1"] * 5
+
+
+def test_zone_lock_serializes_legacy_adopt_and_direct_delete(tmp_path, monkeypatch):
+    engine = create_engine(
+        f"sqlite:///{(tmp_path / 'alibaba-zone-race.sqlite').as_posix()}",
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, future=True)
+    setup_db = session_factory()
+    credential = add_direct_credential(setup_db, name="delete-race")
+    credential_id = credential.id
+    setup_db.close()
+
+    record = remote_alibaba_record(record_type="A")
+    record["Value"] = "192.0.2.10"
+    adopt_inside_lock = threading.Event()
+    allow_adopt_to_commit = threading.Event()
+    delete_started = threading.Event()
+    delete_remote_read = threading.Event()
+    delete_rpc_calls = []
+    original_adopt_record = alibaba_httpdns_routes._adopt_record
+
+    def blocking_adopt_record(*args, **kwargs):
+        adopt_inside_lock.set()
+        assert allow_adopt_to_commit.wait(timeout=5)
+        return original_adopt_record(*args, **kwargs)
+
+    def credential_zone(*_args):
+        delete_remote_read.set()
+        return {"ZoneId": "zone-race", "ZoneName": "example.com"}
+
+    monkeypatch.setattr("app.routes.alibaba_httpdns._adopt_record", blocking_adopt_record)
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_remote_records", lambda *_args: [record])
+    monkeypatch.setattr("app.routes.alibaba_httpdns._credential_zone", credential_zone)
+    monkeypatch.setattr("app.routes.alibaba_httpdns.list_credential_records", lambda *_args: [record])
+    monkeypatch.setattr(
+        "app.routes.alibaba_httpdns.delete_credential_record",
+        lambda *_args: delete_rpc_calls.append(1),
+    )
+
+    def run_adopt():
+        db = session_factory()
+        try:
+            return adopt_zone(
+                AlibabaHttpDnsZoneAdopt(
+                    remote_account_id=7,
+                    account_name="legacy",
+                    zone_id="zone-race",
+                    zone_name="example.com",
+                ),
+                None,
+                db,
+            )
+        finally:
+            db.close()
+
+    def run_delete():
+        # Constructing a Session does not issue a query. The first DB read must
+        # remain inside the Zone lock so it can observe the adopter's commit.
+        db = session_factory()
+        delete_started.set()
+        try:
+            return delete_credential_record_action(
+                credential_id,
+                "zone-race",
+                "record-1",
+                AlibabaHttpDnsRecordDelete(confirm_record_id="record-1"),
+                None,
+                db,
+            )
+        except HTTPException as exc:
+            return exc
+        finally:
+            db.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        adopt_future = executor.submit(run_adopt)
+        assert adopt_inside_lock.wait(timeout=5)
+        delete_future = executor.submit(run_delete)
+        assert delete_started.wait(timeout=5)
+        try:
+            assert not delete_remote_read.wait(timeout=0.2)
+        finally:
+            allow_adopt_to_commit.set()
+        adopt_response = adopt_future.result(timeout=5)
+        delete_response = delete_future.result(timeout=5)
+
+    verify_db = session_factory()
+    try:
+        binding = verify_db.query(AlibabaHttpDnsGroup).filter_by(
+            zone_id="zone-race",
+            record_id="record-1",
+        ).one()
+        assert binding.credential_id is None
+    finally:
+        verify_db.close()
+        engine.dispose()
+
+    assert adopt_response.detail["created"] == 1
+    assert isinstance(delete_response, HTTPException)
+    assert delete_response.status_code == 409
+    assert "组 ID" in str(delete_response.detail)
+    assert delete_remote_read.is_set()
+    assert delete_rpc_calls == []
+    assert alibaba_httpdns_routes._zone_mutation_locks == {}
 
 
 def test_managed_group_creates_apex_record_then_scope_and_unified_group(monkeypatch):
@@ -170,7 +1050,12 @@ def test_managed_group_creates_apex_record_then_scope_and_unified_group(monkeypa
     calls = []
     monkeypatch.setattr(
         "app.routes.alibaba_httpdns._credential_zone",
-        lambda *_args: {"ZoneId": "zone-1", "ZoneName": "private.example.com", "RecordCount": 0},
+        lambda *_args: {
+            "ZoneId": "zone-1",
+            "ZoneName": "private.example.com",
+            "RecordCount": 0,
+            "EffectiveScopeIds": ["20004"],
+        },
     )
     monkeypatch.setattr("app.routes.alibaba_httpdns.list_credential_records", lambda *_args: [])
 
@@ -215,6 +1100,7 @@ def test_managed_group_creates_apex_record_then_scope_and_unified_group(monkeypa
     assert [item[0] for item in calls] == ["record", "scope"]
     assert calls[0][1]["record_type"] == "A"
     assert calls[0][1]["value"] == "203.0.113.10"
+    assert calls[1][1]["scopes"] == ["20003", "20004"]
     assert source.provider_type == "alibaba_httpdns"
     assert source.origins[0].target == "origin.example.net"
     assert source.origins[0].publish_mode == "expanded"
