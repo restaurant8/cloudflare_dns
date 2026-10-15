@@ -447,7 +447,6 @@ class FailoverGroupCreate(BaseModel):
     doh_enabled: bool = False
     doh_endpoint_id: int | None = None
     doh_hostnames: list[str] = Field(default_factory=list, max_length=100)
-    load_balance_enabled: bool = False
     load_balance_interval_seconds: int = Field(default=120, ge=30, le=86400)
 
 
@@ -460,7 +459,6 @@ class FailoverGroupUpdate(BaseModel):
     doh_enabled: bool | None = None
     doh_endpoint_id: int | None = None
     doh_hostnames: list[str] | None = Field(default=None, max_length=100)
-    load_balance_enabled: bool | None = None
     load_balance_interval_seconds: int | None = Field(default=None, ge=30, le=86400)
 
 
@@ -565,7 +563,8 @@ class OriginCreate(BaseModel):
     target: str = Field(min_length=1, max_length=255)
     port: int = Field(ge=1, le=65535)
     priority: int = Field(default=10, ge=0, le=100000)
-    # 负载均衡权重：仅在切换组开启负载均衡时，对同优先级源站的轮换次数生效
+    # 节点负载均衡：填写后作为该节点的负载地址，与节点内其它地址按权重轮流使用
+    load_parent_id: int | None = None
     weight: int = Field(default=1, ge=1, le=100)
     publish_mode: Literal["direct", "expanded"] = "direct"
     expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
@@ -640,6 +639,7 @@ class OriginOut(BaseModel):
     port: int
     priority: int
     weight: int = 1
+    load_parent_id: int | None = None
     remark: str | None
     enabled: bool
     ignore_health_check: bool
@@ -1124,7 +1124,6 @@ class FailoverGroupOut(BaseModel):
     doh_enabled: bool
     doh_endpoint_id: int | None
     doh_hostnames: list[str] = []
-    load_balance_enabled: bool = False
     load_balance_interval_seconds: int = 120
     load_balance_origin_ids: list[int] = []
     hostnames: list[FailoverHostnameOut] = []

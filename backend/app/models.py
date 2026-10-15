@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, false, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -267,9 +267,7 @@ class FailoverGroup(Base, TimestampMixin):
     doh_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     doh_endpoint_id: Mapped[int | None] = mapped_column(ForeignKey("doh_endpoints.id", ondelete="SET NULL"))
     doh_hostnames_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
-    # 负载均衡：同优先级的健康源站按权重轮流作为当前源站，每隔 interval 秒换一次。
-    # 默认关闭，关闭时与纯故障切换完全一致。
-    load_balance_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    # 节点负载均衡：节点内的多个负载地址按权重轮流作为当前源站，每隔 interval 秒换一次。
     load_balance_interval_seconds: Mapped[int] = mapped_column(Integer, default=120, server_default=text("120"), nullable=False)
     # 轮换状态：{"current_weights": {origin_id: int}, "rotated_at": iso}
     load_balance_state_json: Mapped[str | None] = mapped_column(Text)
@@ -321,14 +319,15 @@ class FailoverGroup(Base, TimestampMixin):
 
     @property
     def load_balance_origin_ids(self) -> list[int]:
-        """Origins currently taking turns (empty when not load balancing)."""
-        if not self.load_balance_enabled:
-            return []
-        from .load_balance import load_balance_tier
+        """Healthy addresses of the current node taking turns (empty for a plain origin)."""
+        from .load_balance import available_members, node_members, node_of
 
         current = next((origin for origin in self.origins if origin.id == self.current_origin_id), None)
-        tier = load_balance_tier(self, current)
-        return [origin.id for origin in tier] if len(tier) > 1 else []
+        node = node_of(self.origins, current)
+        if len(node_members(self.origins, node)) < 2:
+            return []
+        members = available_members(self.origins, node)
+        return [origin.id for origin in members] if len(members) > 1 else []
 
     @property
     def doh_hostnames(self) -> list[str]:
@@ -483,6 +482,9 @@ class Origin(Base, TimestampMixin):
     # 故意不加外键：azpanel_resources.origin_id 仍保留，双向外键会让建表互相依赖，
     # 而且 SQLite 无法用 ALTER TABLE 补外键。
     azpanel_resource_id: Mapped[int | None] = mapped_column(Integer)
+    # 节点负载地址：指向同组内的节点（顶层源站）。为空表示它本身就是一个节点。
+    # 无外键，理由同 azpanel_resource_id；删除节点时由 API 一并删除负载地址。
+    load_parent_id: Mapped[int | None] = mapped_column(Integer, index=True)
     probe_mode: Mapped[str] = mapped_column(String(20), default="default", nullable=False)
     target: Mapped[str] = mapped_column(String(255), nullable=False)
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)

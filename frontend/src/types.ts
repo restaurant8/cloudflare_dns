@@ -157,6 +157,7 @@ export type Origin = {
   port: number;
   priority: number;
   weight: number;
+  load_parent_id: number | null;
   remark: string | null;
   enabled: boolean;
   ignore_health_check: boolean;
@@ -289,7 +290,6 @@ export type FailoverGroup = {
   doh_enabled: boolean;
   doh_endpoint_id: number | null;
   doh_hostnames: string[];
-  load_balance_enabled: boolean;
   load_balance_interval_seconds: number;
   load_balance_origin_ids: number[];
   time_rule: FailoverTimeRule | null;

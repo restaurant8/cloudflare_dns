@@ -11,7 +11,7 @@ from .doh import sync_group_doh_endpoint
 from .events import add_event
 from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, PROBE_MODE_CHINA_ONLY, origin_probe_mode, run_local_checks
 from .integrations import AutoIpChangeGuard, trigger_ip_change_for_origin
-from .load_balance import choose_load_balanced_origin
+from .load_balance import choose_node_member, is_load_member, node_is_available, node_of
 from .alibaba_httpdns import AlibabaOutputConfigurationError, normalize_alibaba_provider_origin_modes, sync_group_alibaba_outputs
 from .models import AlibabaHttpDnsGroup, AwsRoute53Output, DnsRecord, FailoverGroup, FailoverHostname, Origin, Zone
 from .notifier import mute_rotation_notifications, notification_scope, send_webhooks
@@ -67,11 +67,14 @@ def _origin_is_available(origin: Origin | None) -> bool:
 
 
 def choose_desired_origin(origins: list[Origin], current_origin_id: int | None = None) -> Origin | None:
-    healthy = [origin for origin in origins if _origin_is_available(origin)]
+    """Pick the node to use. A node with load addresses is available while any
+    of them is; a plain origin is a node of one, so this is the classic choice."""
+    healthy = [origin for origin in origins if not is_load_member(origin) and node_is_available(origins, origin)]
     if not healthy:
         return None
     best_priority = min(origin.priority for origin in healthy)
-    current = next((origin for origin in healthy if origin.id == current_origin_id), None)
+    current_node = node_of(origins, next((origin for origin in origins if origin.id == current_origin_id), None))
+    current = next((origin for origin in healthy if current_node is not None and origin.id == current_node.id), None)
     if current is not None and current.priority <= best_priority:
         return current
     candidates = [origin for origin in healthy if origin.priority == best_priority]
@@ -94,8 +97,8 @@ def _choose_group_origin(group: FailoverGroup, now: datetime) -> OriginSelection
     rule_context_id = rule.id if rule_active or time_rule_boundary else None
 
     if rule_active:
-        time_rule_origin = next((origin for origin in group.origins if origin.id == rule.origin_id), None)
-        if _origin_is_available(time_rule_origin):
+        time_rule_origin = node_of(group.origins, next((origin for origin in group.origins if origin.id == rule.origin_id), None))
+        if time_rule_origin is not None and node_is_available(group.origins, time_rule_origin):
             return OriginSelection(
                 origin=time_rule_origin,
                 switch_reason="time_rule",
@@ -675,15 +678,15 @@ def _evaluate_single_group(
                 )
 
     selection = _choose_group_origin(group, now)
-    if selection.switch_reason in {"priority", "time_rule_fallback"}:
-        # Load balancing: healthy origins of the selected priority take turns.
-        # Off by default, in which case the selection is returned unchanged.
-        balanced, rotated = choose_load_balanced_origin(group, selection.origin, now)
+    if selection.origin is not None:
+        # The selection is a node; its load addresses (if any) take turns. A node
+        # without load addresses is returned unchanged.
+        member, rotated = choose_node_member(group, selection.origin, now)
         if rotated:
-            selection = replace(selection, origin=balanced, switch_reason="load_balance")
+            selection = replace(selection, origin=member, switch_reason="load_balance")
             mute_rotation_notifications()
-        elif balanced is not selection.origin:
-            selection = replace(selection, origin=balanced)
+        elif member is not selection.origin:
+            selection = replace(selection, origin=member)
     desired = selection.origin
     if desired is None:
         if _has_pending_origin_checks(group):

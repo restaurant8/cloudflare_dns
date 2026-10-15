@@ -285,7 +285,27 @@ def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreat
         external_machine_key=external_machine_key,
     )
     _apply_expanded_ip_priorities(origin, payload.expanded_ip_priorities if target_info.target_type == "hostname" else {})
+    if payload.load_parent_id is not None:
+        parent = _load_balance_node(db, group, payload.load_parent_id)
+        origin.load_parent_id = parent.id
+        # A load address belongs to its node: it shares the node's priority.
+        origin.priority = parent.priority
     return origin
+
+
+def _load_balance_node(db: Session, group: FailoverGroup, node_id: int) -> Origin:
+    node = db.get(Origin, node_id)
+    if node is None or node.group_id != group.id:
+        raise HTTPException(status_code=404, detail="要添加负载地址的节点不存在")
+    if node.load_parent_id is not None:
+        raise HTTPException(status_code=400, detail="负载地址不能再添加负载地址，请选择它所属的节点")
+    if node.global_origin_id:
+        raise HTTPException(status_code=400, detail="全局备用节点暂不支持添加负载地址")
+    return node
+
+
+def _load_members_of(db: Session, node: Origin) -> list[Origin]:
+    return db.query(Origin).filter(Origin.load_parent_id == node.id).order_by(Origin.id).all()
 
 
 def _origin_from_dns_record(group: FailoverGroup, record: dict, port: int) -> Origin:
@@ -478,7 +498,10 @@ def sync_global_origins_to_group(db: Session, group: FailoverGroup) -> bool:
                     (
                         item
                         for item in group.origins
-                        if item.global_origin_id is None and item.target == global_origin.target and item.port == global_origin.port
+                        if item.global_origin_id is None
+                        and item.load_parent_id is None
+                        and item.target == global_origin.target
+                        and item.port == global_origin.port
                     ),
                     None,
                 )
@@ -874,7 +897,6 @@ def create_group(payload: FailoverGroupCreate, _: User = Depends(get_current_use
         doh_enabled=payload.doh_enabled,
         doh_endpoint_id=payload.doh_endpoint_id,
         doh_hostnames_json=json.dumps(doh_hostnames),
-        load_balance_enabled=payload.load_balance_enabled,
         load_balance_interval_seconds=payload.load_balance_interval_seconds,
     )
     db.add(group)
@@ -1017,6 +1039,8 @@ def upsert_time_rule(
         raise HTTPException(status_code=404, detail="指定源站不存在")
     if origin.group_id != group.id:
         raise HTTPException(status_code=400, detail="指定源站不属于这个切换组")
+    if origin.load_parent_id is not None:
+        raise HTTPException(status_code=400, detail="分时入口请选择节点，节点内的负载地址会自动轮流")
 
     rule = group.time_rule
     if rule is None:
@@ -1460,8 +1484,14 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     )
     if "remark" in updates:
         origin.remark = _normalize_remark(updates.pop("remark"))
+    if origin.load_parent_id is not None:
+        # A load address always uses its node's priority.
+        updates.pop("priority", None)
     for key, value in updates.items():
         setattr(origin, key, value)
+    if origin.load_parent_id is None:
+        for member in _load_members_of(db, origin):
+            member.priority = origin.priority
 
     if endpoint_changed or probe_source_changed:
         origin.status = "unknown"
@@ -1547,15 +1577,18 @@ def delete_origin(origin_id: int, _: User = Depends(get_current_user), db: Sessi
         raise HTTPException(status_code=404, detail="源站不存在")
     if origin.global_origin_id:
         raise HTTPException(status_code=400, detail="这是业务分组的全局备用，请在全局备用里删除")
-    azpanel_resource_id = origin.azpanel_resource_id
     group = origin.group
+    # Deleting a node also deletes its load addresses.
+    removed = [origin, *_load_members_of(db, origin)]
+    azpanel_resource_ids = [item.azpanel_resource_id for item in removed]
     _delete_time_rule_for_origin(db, origin)
-    if group.current_origin_id == origin.id:
-        group.current_origin_id = None
-        group.last_switch_at = None
-    db.delete(origin)
+    for item in removed:
+        if group.current_origin_id == item.id:
+            group.current_origin_id = None
+            group.last_switch_at = None
+        db.delete(item)
     db.flush()
-    _refresh_azpanel_resource_bindings(db, [azpanel_resource_id])
+    _refresh_azpanel_resource_bindings(db, azpanel_resource_ids)
     if group.enabled:
         _evaluate_locally(db, [group.id])
     db.commit()
