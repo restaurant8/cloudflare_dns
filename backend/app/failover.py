@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session, selectinload
@@ -11,9 +11,10 @@ from .doh import sync_group_doh_endpoint
 from .events import add_event
 from .health import FINAL_ORIGIN_STATUSES, ORIGIN_AVAILABLE_STATUS, PROBE_MODE_CHINA_ONLY, origin_probe_mode, run_local_checks
 from .integrations import AutoIpChangeGuard, trigger_ip_change_for_origin
+from .load_balance import choose_load_balanced_origin
 from .alibaba_httpdns import AlibabaOutputConfigurationError, normalize_alibaba_provider_origin_modes, sync_group_alibaba_outputs
 from .models import AlibabaHttpDnsGroup, AwsRoute53Output, DnsRecord, FailoverGroup, FailoverHostname, Origin, Zone
-from .notifier import send_webhooks
+from .notifier import mute_rotation_notifications, notification_scope, send_webhooks
 from .origin_expansion import (
     DIRECT_PUBLISH_MODE,
     is_expanded_origin,
@@ -587,16 +588,17 @@ def evaluate_failover_groups(
     auto_ip_change_guard = AutoIpChangeGuard()
     for group in groups:
         try:
-            switched = _evaluate_single_group(
-                db,
-                group,
-                now,
-                settings,
-                consistency_check_interval_seconds,
-                check_dns_consistency=check_dns_consistency,
-                trigger_ip_changes=trigger_ip_changes,
-                auto_ip_change_guard=auto_ip_change_guard,
-            )
+            with notification_scope():
+                switched = _evaluate_single_group(
+                    db,
+                    group,
+                    now,
+                    settings,
+                    consistency_check_interval_seconds,
+                    check_dns_consistency=check_dns_consistency,
+                    trigger_ip_changes=trigger_ip_changes,
+                    auto_ip_change_guard=auto_ip_change_guard,
+                )
         except Exception:
             # One broken group (bad credential, unexpected API shape…) must not stop
             # failover for every other group in this tick.
@@ -673,6 +675,15 @@ def _evaluate_single_group(
                 )
 
     selection = _choose_group_origin(group, now)
+    if selection.switch_reason in {"priority", "time_rule_fallback"}:
+        # Load balancing: healthy origins of the selected priority take turns.
+        # Off by default, in which case the selection is returned unchanged.
+        balanced, rotated = choose_load_balanced_origin(group, selection.origin, now)
+        if rotated:
+            selection = replace(selection, origin=balanced, switch_reason="load_balance")
+            mute_rotation_notifications()
+        elif balanced is not selection.origin:
+            selection = replace(selection, origin=balanced)
     desired = selection.origin
     if desired is None:
         if _has_pending_origin_checks(group):
@@ -777,7 +788,14 @@ def _evaluate_single_group(
         # A previous publish error must remain immediately retryable. In particular,
         # after a failed window-exit publish ``last_active`` already reflects the new
         # window state, so the next tick is no longer a boundary by itself.
-        bypass_switch_interval = selection.time_rule_boundary or time_rule_override or current_unavailable or bool(group.last_error)
+        load_balance_rotation = selection.switch_reason == "load_balance"
+        bypass_switch_interval = (
+            selection.time_rule_boundary
+            or time_rule_override
+            or current_unavailable
+            or load_balance_rotation
+            or bool(group.last_error)
+        )
         if elapsed < group.min_switch_interval_seconds and desired.id != group.current_origin_id and not bypass_switch_interval:
             return False
     old_origin_id = group.current_origin_id

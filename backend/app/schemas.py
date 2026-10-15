@@ -447,6 +447,8 @@ class FailoverGroupCreate(BaseModel):
     doh_enabled: bool = False
     doh_endpoint_id: int | None = None
     doh_hostnames: list[str] = Field(default_factory=list, max_length=100)
+    load_balance_enabled: bool = False
+    load_balance_interval_seconds: int = Field(default=120, ge=30, le=86400)
 
 
 class FailoverGroupUpdate(BaseModel):
@@ -458,6 +460,8 @@ class FailoverGroupUpdate(BaseModel):
     doh_enabled: bool | None = None
     doh_endpoint_id: int | None = None
     doh_hostnames: list[str] | None = Field(default=None, max_length=100)
+    load_balance_enabled: bool | None = None
+    load_balance_interval_seconds: int | None = Field(default=None, ge=30, le=86400)
 
 
 class FailoverTimeRuleUpsert(BaseModel):
@@ -561,6 +565,8 @@ class OriginCreate(BaseModel):
     target: str = Field(min_length=1, max_length=255)
     port: int = Field(ge=1, le=65535)
     priority: int = Field(default=10, ge=0, le=100000)
+    # 负载均衡权重：仅在切换组开启负载均衡时，对同优先级源站的轮换次数生效
+    weight: int = Field(default=1, ge=1, le=100)
     publish_mode: Literal["direct", "expanded"] = "direct"
     expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
     preferred_agent_id: int | None = None
@@ -585,6 +591,7 @@ class OriginUpdate(BaseModel):
     target: str | None = Field(default=None, min_length=1, max_length=255)
     port: int | None = Field(default=None, ge=1, le=65535)
     priority: int | None = Field(default=None, ge=0, le=100000)
+    weight: int | None = Field(default=None, ge=1, le=100)
     publish_mode: Literal["direct", "expanded"] | None = None
     expanded_ip_priorities: dict[str, int] | None = None
     preferred_agent_id: int | None = None
@@ -632,6 +639,7 @@ class OriginOut(BaseModel):
     publish_mode: str
     port: int
     priority: int
+    weight: int = 1
     remark: str | None
     enabled: bool
     ignore_health_check: bool
@@ -677,6 +685,7 @@ class FailoverGlobalOriginOut(BaseModel):
     publish_mode: str
     port: int
     priority: int
+    weight: int = 1
     expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
     remark: str | None
     enabled: bool
@@ -1115,6 +1124,9 @@ class FailoverGroupOut(BaseModel):
     doh_enabled: bool
     doh_endpoint_id: int | None
     doh_hostnames: list[str] = []
+    load_balance_enabled: bool = False
+    load_balance_interval_seconds: int = 120
+    load_balance_origin_ids: list[int] = []
     hostnames: list[FailoverHostnameOut] = []
     origins: list[OriginOut] = []
     time_rule: FailoverTimeRuleOut | None = None

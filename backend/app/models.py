@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, false, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -267,6 +267,12 @@ class FailoverGroup(Base, TimestampMixin):
     doh_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     doh_endpoint_id: Mapped[int | None] = mapped_column(ForeignKey("doh_endpoints.id", ondelete="SET NULL"))
     doh_hostnames_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    # 负载均衡：同优先级的健康源站按权重轮流作为当前源站，每隔 interval 秒换一次。
+    # 默认关闭，关闭时与纯故障切换完全一致。
+    load_balance_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    load_balance_interval_seconds: Mapped[int] = mapped_column(Integer, default=120, server_default=text("120"), nullable=False)
+    # 轮换状态：{"current_weights": {origin_id: int}, "rotated_at": iso}
+    load_balance_state_json: Mapped[str | None] = mapped_column(Text)
 
     zone: Mapped["Zone | None"] = relationship("Zone", back_populates="groups")
     collection: Mapped["FailoverCollection | None"] = relationship("FailoverCollection", back_populates="groups")
@@ -312,6 +318,17 @@ class FailoverGroup(Base, TimestampMixin):
                 if output.enabled and output.record_type
             }
         ) > 1
+
+    @property
+    def load_balance_origin_ids(self) -> list[int]:
+        """Origins currently taking turns (empty when not load balancing)."""
+        if not self.load_balance_enabled:
+            return []
+        from .load_balance import load_balance_tier
+
+        current = next((origin for origin in self.origins if origin.id == self.current_origin_id), None)
+        tier = load_balance_tier(self, current)
+        return [origin.id for origin in tier] if len(tier) > 1 else []
 
     @property
     def doh_hostnames(self) -> list[str]:
@@ -581,6 +598,7 @@ class FailoverGlobalOrigin(Base, TimestampMixin):
     publish_mode: Mapped[str] = mapped_column(String(20), default="direct", nullable=False)
     port: Mapped[int] = mapped_column(Integer, nullable=False)
     priority: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    weight: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"), nullable=False)
     remark: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     ignore_health_check: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

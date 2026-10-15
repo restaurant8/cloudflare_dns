@@ -2,6 +2,8 @@ import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from html import escape
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -23,6 +25,33 @@ logger = logging.getLogger(__name__)
 _delivery_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")
 # Seconds to sleep before each attempt (first attempt immediate).
 _DELIVERY_BACKOFF_SECONDS = (0, 2, 5)
+
+# A routine load-balance rotation switches the published origin every few
+# minutes. Its switch/publish events are still logged, but are not pushed to
+# Telegram/webhooks; failures and real failovers are never muted.
+_ROTATION_MUTED_EVENTS = {
+    "dns.switched",
+    "doh.switched",
+    "route53.switched",
+    "route53.published",
+    "alibaba_httpdns.switched",
+    "alibaba_httpdns.records_updated",
+}
+_rotation_muted: ContextVar[bool] = ContextVar("rotation_notifications_muted", default=False)
+
+
+@contextmanager
+def notification_scope():
+    """Bound a mute_rotation_notifications() call to one evaluated group."""
+    token = _rotation_muted.set(False)
+    try:
+        yield
+    finally:
+        _rotation_muted.reset(token)
+
+
+def mute_rotation_notifications() -> None:
+    _rotation_muted.set(True)
 
 
 EVENT_NAMES = {
@@ -86,6 +115,7 @@ SWITCH_REASON_NAMES = {
     "priority": "常规优先级",
     "health_failover": "健康故障切换",
     "consistency_repair": "DNS 一致性修复",
+    "load_balance": "负载均衡轮换",
 }
 
 SHANGHAI_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
@@ -355,6 +385,8 @@ def _deliver_telegram(specs: list[tuple[int, str, str, str, str]]) -> None:
 
 
 def send_webhooks(db: Session, event_type: str, payload: dict[str, Any]) -> None:
+    if _rotation_muted.get() and event_type in _ROTATION_MUTED_EVENTS:
+        return
     send_telegram_notifications(db, event_type, payload)
     webhooks = db.query(Webhook).filter(Webhook.enabled.is_(True)).all()
     if not webhooks:

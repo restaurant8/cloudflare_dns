@@ -56,14 +56,14 @@ import { ThemeToggle } from "@/components/theme-toggle";
 type Section = "overview" | "cloudflare" | "records" | "groups" | "doh" | "awsRoute53" | "alibabaHttpDns" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
 type ProbeMode = "default" | "local_only" | "china_only" | "any";
-type OriginAddDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
-type OriginEditDraft = { target: string; port: number; priority: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; unbind_external: boolean };
+type OriginAddDraft = { target: string; port: number; priority: number; weight: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
+type OriginEditDraft = { target: string; port: number; priority: number; weight: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; unbind_external: boolean };
 type GlobalOriginDraft = OriginAddDraft;
 // Machine binding stays tri-state; azpanel_resource_id carries the exact current
 // binding so the same form can keep, change or clear it explicitly.
 type GlobalOriginEditDraft = Omit<GlobalOriginDraft, "azpanel_remote_key"> & { unbind_external: boolean };
 type CollectionDraft = { name: string };
-type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; collection_id: number | ""; cloudflare_publish_enabled: boolean; doh_enabled: boolean; doh_endpoint_id: number | ""; doh_hostnames: string };
+type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; load_balance_enabled: boolean; load_balance_interval_seconds: number; collection_id: number | ""; cloudflare_publish_enabled: boolean; doh_enabled: boolean; doh_endpoint_id: number | ""; doh_hostnames: string };
 type DohEndpointDraft = { name: string; base_url: string; sync_path: string; query_path: string; hmac_secret: string; timeout_seconds: number; sync_interval_seconds: number; verify_tls: boolean; enabled: boolean };
 type GroupTimeRuleDraft = { enabled: boolean; name: string; origin_id: number | ""; timezone: string; weekdays: number[]; start_time: string; end_time: string };
 type HostnameAddDraft = { hostname: string; adopt_record_id: string };
@@ -452,8 +452,8 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
-const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, weight: 1, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
+const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, weight: 1, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
@@ -3227,6 +3227,7 @@ function GroupsPanel({
       target: "",
       port: 22,
       priority: maxPriority + 10,
+      weight: 1,
       publish_mode: "direct",
       expanded_ip_priorities: {},
       preferred_agent_id: "",
@@ -3253,6 +3254,7 @@ function GroupsPanel({
             target: globalOriginAdd.target.trim(),
             port: globalOriginAdd.port,
             priority: globalOriginAdd.priority,
+            weight: globalOriginAdd.weight,
             publish_mode: globalAddTargetType === "hostname" ? globalOriginAdd.publish_mode : "direct",
             expanded_ip_priorities: globalAddTargetType === "hostname" ? globalOriginAdd.expanded_ip_priorities : {},
             preferred_agent_id: globalOriginAdd.preferred_agent_id === "" ? null : globalOriginAdd.preferred_agent_id,
@@ -3281,6 +3283,7 @@ function GroupsPanel({
         target: origin.target,
         port: origin.port,
         priority: origin.priority,
+        weight: origin.weight || 1,
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
         preferred_agent_id: origin.preferred_agent_id || "",
@@ -3310,6 +3313,7 @@ function GroupsPanel({
             target: draft.target.trim(),
             port: draft.port,
             priority: draft.priority,
+            weight: draft.weight,
             publish_mode: targetType === "hostname" ? draft.publish_mode : "direct",
             expanded_ip_priorities: targetType === "hostname" ? draft.expanded_ip_priorities : {},
             remark: draft.remark.trim() || null,
@@ -3338,6 +3342,7 @@ function GroupsPanel({
       target: "",
       port: 22,
       priority: maxPriority + 10,
+      weight: 1,
       publish_mode: providerRequiredHostnamePublishMode(group) || "direct",
       expanded_ip_priorities: {},
       preferred_agent_id: "",
@@ -3458,6 +3463,7 @@ function GroupsPanel({
             target: originAdd.target.trim(),
             port: originAdd.port,
             priority: originAdd.priority,
+            weight: originAdd.weight,
             publish_mode: addTargetType === "hostname" ? (addingGroupRequiredPublishMode || originAdd.publish_mode) : "direct",
             expanded_ip_priorities: addTargetType === "hostname" ? originAdd.expanded_ip_priorities : {},
             preferred_agent_id: originAdd.preferred_agent_id === "" ? null : originAdd.preferred_agent_id,
@@ -3527,6 +3533,8 @@ function GroupsPanel({
         ttl: group.ttl,
         min_switch_interval_seconds: group.min_switch_interval_seconds,
         enabled: group.enabled,
+        load_balance_enabled: group.load_balance_enabled,
+        load_balance_interval_seconds: group.load_balance_interval_seconds || 120,
         collection_id: group.collection_id || "",
         cloudflare_publish_enabled: group.cloudflare_publish_enabled,
         doh_enabled: group.doh_enabled,
@@ -3546,6 +3554,8 @@ function GroupsPanel({
       ttl: draft.ttl,
       min_switch_interval_seconds: draft.min_switch_interval_seconds,
       enabled: draft.enabled,
+      load_balance_enabled: draft.load_balance_enabled,
+      load_balance_interval_seconds: draft.load_balance_interval_seconds,
       collection_id: draft.collection_id === "" ? null : draft.collection_id
     };
     const currentDohHostnames = group.doh_hostnames?.length
@@ -3663,6 +3673,7 @@ function GroupsPanel({
         target: origin.target,
         port: origin.port,
         priority: origin.priority,
+        weight: origin.weight || 1,
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
         preferred_agent_id: origin.preferred_agent_id || "",
@@ -3828,6 +3839,7 @@ function GroupsPanel({
       target: origin.target,
       port: origin.port,
       priority: origin.priority,
+      weight: origin.weight || 1,
       publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
       expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
       preferred_agent_id: origin.preferred_agent_id || "",
@@ -3925,6 +3937,10 @@ function GroupsPanel({
           <label>
             优先级
             <input type="number" min={0} value={draft.priority} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, priority: Number(event.target.value) } }))} />
+          </label>
+          <label title="开启负载均衡后，同优先级源站按权重轮流使用（权重 3 的源站轮到 3 次，权重 1 的轮到 1 次）；未开启时不生效">
+            负载权重
+            <input type="number" min={1} max={100} value={draft.weight} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, weight: Number(event.target.value) } }))} />
           </label>
           <label>
             指定探针
@@ -4123,6 +4139,8 @@ function GroupsPanel({
             ttl: group.ttl,
             min_switch_interval_seconds: group.min_switch_interval_seconds,
             enabled: group.enabled,
+            load_balance_enabled: group.load_balance_enabled,
+            load_balance_interval_seconds: group.load_balance_interval_seconds || 120,
             collection_id: group.collection_id || "",
             cloudflare_publish_enabled: group.cloudflare_publish_enabled,
             doh_enabled: group.doh_enabled,
@@ -4166,7 +4184,7 @@ function GroupsPanel({
                     <h2 className="groupHostname">{group.hostname}</h2>
                     <span className="groupRoleBadge">{providerLabel} · 主机名 {Math.max(groupHostnames.length, 1)} 个</span>
                   </div>
-                  <span className="groupMetaLine">TTL {group.ttl} · 源站 {sortedOrigins.length} 个 · 当前 {currentTarget} · 最后检测 {fmtDate(groupLastCheckedAt)}</span>
+                  <span className="groupMetaLine">TTL {group.ttl} · 源站 {sortedOrigins.length} 个 · 当前 {currentTarget}{group.load_balance_enabled ? ` · 负载均衡 ${group.load_balance_origin_ids?.length ? `${group.load_balance_origin_ids.length} 个轮流（每 ${group.load_balance_interval_seconds} 秒）：${group.load_balance_origin_ids.map((originId) => { const member = group.origins.find((item) => item.id === originId); return member ? `${member.remark || member.target}×${member.weight || 1}` : `#${originId}`; }).join("、")}` : "已开启（同优先级当前只有 1 个可用）"}` : ""} · 最后检测 {fmtDate(groupLastCheckedAt)}</span>
                   <div className="hostnameChips">
                     {(groupHostnames.length > 0 ? groupHostnames : [{ id: 0, hostname: group.hostname, current_record_id: group.current_record_id }]).map((hostname) => (
                       <span className={`hostnameChip ${hostname.hostname === group.hostname ? "primary" : ""}`} key={hostname.id || hostname.hostname}>
@@ -4272,6 +4290,16 @@ function GroupsPanel({
                         <input type="checkbox" checked={groupEdit.enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, enabled: event.target.checked } }))} />
                         启用这个切换组
                       </label>
+                      <label className="inlineCheck" title="同一优先级的健康源站按权重轮流作为当前源站，IP 和域名都可以；更低优先级仍只做故障备用。日常轮换只记日志，不推送通知">
+                        <input type="checkbox" checked={groupEdit.load_balance_enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, load_balance_enabled: event.target.checked } }))} />
+                        负载均衡（同优先级源站轮流切换）
+                      </label>
+                      {groupEdit.load_balance_enabled && (
+                        <label>
+                          轮换间隔（秒）
+                          <input type="number" min={30} max={86400} value={groupEdit.load_balance_interval_seconds} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, load_balance_interval_seconds: Number(event.target.value) } }))} />
+                        </label>
+                      )}
                       <div className="rowActions">
                         <button className="icon" title="保存并应用" onClick={() => saveGroupEdit(group.id)}>
                           <Save size={15} />
@@ -4481,6 +4509,7 @@ function GroupsPanel({
                         target: origin.target,
                         port: origin.port,
                         priority: origin.priority,
+                        weight: origin.weight || 1,
                         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
                         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
                         preferred_agent_id: origin.preferred_agent_id || "",
@@ -4561,6 +4590,10 @@ function GroupsPanel({
                                 <label>
                                   优先级
                                   <input type="number" min={0} value={originEdit.priority} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, priority: Number(event.target.value) } }))} />
+                                </label>
+                                <label title="开启负载均衡后，同优先级源站按权重轮流使用（权重 3 的源站轮到 3 次，权重 1 的轮到 1 次）；未开启时不生效">
+                                  负载权重
+                                  <input type="number" min={1} max={100} value={originEdit.weight} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, weight: Number(event.target.value) } }))} />
                                 </label>
                                 <label>
                                   指定探针
@@ -4812,6 +4845,10 @@ function GroupsPanel({
                 优先级
                 <input type="number" min={0} value={globalOriginAdd.priority} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, priority: Number(event.target.value) }))} />
               </label>
+              <label title="开启负载均衡后，同优先级源站按权重轮流使用（权重 3 的源站轮到 3 次，权重 1 的轮到 1 次）；未开启时不生效">
+                负载权重
+                <input type="number" min={1} max={100} value={globalOriginAdd.weight} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, weight: Number(event.target.value) }))} />
+              </label>
               <label>
                 指定探针
                 <select value={globalOriginAdd.preferred_agent_id} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, preferred_agent_id: event.target.value ? Number(event.target.value) : "" }))}>
@@ -4989,6 +5026,10 @@ function GroupsPanel({
               <label>
                 优先级
                 <input type="number" min={0} value={originAdd.priority} onChange={(event) => setOriginAdd((current) => ({ ...current, priority: Number(event.target.value) }))} />
+              </label>
+              <label title="开启负载均衡后，同优先级源站按权重轮流使用（权重 3 的源站轮到 3 次，权重 1 的轮到 1 次）；未开启时不生效">
+                负载权重
+                <input type="number" min={1} max={100} value={originAdd.weight} onChange={(event) => setOriginAdd((current) => ({ ...current, weight: Number(event.target.value) }))} />
               </label>
               <label>
                 指定探针

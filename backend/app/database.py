@@ -573,6 +573,7 @@ def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
             "external_source_id": "ALTER TABLE failover_global_origins ADD COLUMN external_source_id INT NULL",
             "external_machine_key": "ALTER TABLE failover_global_origins ADD COLUMN external_machine_key VARCHAR(255) NULL",
             "azpanel_resource_id": "ALTER TABLE failover_global_origins ADD COLUMN azpanel_resource_id INT NULL",
+            "weight": "ALTER TABLE failover_global_origins ADD COLUMN weight INT NOT NULL DEFAULT 1",
         }
     return {
         "preferred_agent_id": "ALTER TABLE failover_global_origins ADD COLUMN preferred_agent_id INTEGER",
@@ -582,6 +583,7 @@ def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
         "external_source_id": "ALTER TABLE failover_global_origins ADD COLUMN external_source_id INTEGER",
         "external_machine_key": "ALTER TABLE failover_global_origins ADD COLUMN external_machine_key VARCHAR(255)",
         "azpanel_resource_id": "ALTER TABLE failover_global_origins ADD COLUMN azpanel_resource_id INTEGER",
+        "weight": "ALTER TABLE failover_global_origins ADD COLUMN weight INTEGER NOT NULL DEFAULT 1",
     }
 
 
@@ -649,6 +651,9 @@ def _failover_group_output_migration_statements(dialect: str) -> dict[str, str]:
             "doh_enabled": "ALTER TABLE failover_groups ADD COLUMN doh_enabled TINYINT(1) NOT NULL DEFAULT 0",
             "doh_endpoint_id": "ALTER TABLE failover_groups ADD COLUMN doh_endpoint_id INT NULL",
             "doh_hostnames_json": "ALTER TABLE failover_groups ADD COLUMN doh_hostnames_json TEXT NULL",
+            "load_balance_enabled": "ALTER TABLE failover_groups ADD COLUMN load_balance_enabled TINYINT(1) NOT NULL DEFAULT 0",
+            "load_balance_interval_seconds": "ALTER TABLE failover_groups ADD COLUMN load_balance_interval_seconds INT NOT NULL DEFAULT 120",
+            "load_balance_state_json": "ALTER TABLE failover_groups ADD COLUMN load_balance_state_json TEXT NULL",
         }
     return {
         "provider_type": "ALTER TABLE failover_groups ADD COLUMN provider_type VARCHAR(32) NOT NULL DEFAULT 'cloudflare'",
@@ -656,6 +661,9 @@ def _failover_group_output_migration_statements(dialect: str) -> dict[str, str]:
         "doh_enabled": "ALTER TABLE failover_groups ADD COLUMN doh_enabled BOOLEAN NOT NULL DEFAULT FALSE",
         "doh_endpoint_id": "ALTER TABLE failover_groups ADD COLUMN doh_endpoint_id INTEGER",
         "doh_hostnames_json": "ALTER TABLE failover_groups ADD COLUMN doh_hostnames_json TEXT NOT NULL DEFAULT '[]'",
+        "load_balance_enabled": "ALTER TABLE failover_groups ADD COLUMN load_balance_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+        "load_balance_interval_seconds": "ALTER TABLE failover_groups ADD COLUMN load_balance_interval_seconds INTEGER NOT NULL DEFAULT 120",
+        "load_balance_state_json": "ALTER TABLE failover_groups ADD COLUMN load_balance_state_json TEXT",
     }
 
 

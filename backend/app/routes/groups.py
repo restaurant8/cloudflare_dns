@@ -275,6 +275,7 @@ def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreat
         publish_mode=publish_mode,
         port=payload.port,
         priority=payload.priority,
+        weight=payload.weight,
         preferred_agent_id=_validate_preferred_agent_id(db, payload.preferred_agent_id),
         probe_mode=_normalize_probe_mode(payload.probe_mode),
         remark=_normalize_remark(payload.remark),
@@ -340,6 +341,7 @@ def _global_origin_from_payload(db: Session, collection: FailoverCollection, pay
         publish_mode=payload.publish_mode if target_info.target_type == "hostname" else DIRECT_PUBLISH_MODE,
         port=port,
         priority=payload.priority,
+        weight=payload.weight,
         external_source_id=external_source_id,
         external_machine_key=external_machine_key,
         azpanel_resource_id=resource.id if resource is not None else None,
@@ -389,6 +391,7 @@ def _copy_global_origin_to_origin(origin: Origin, global_origin: FailoverGlobalO
     origin.publish_mode = global_origin.publish_mode
     origin.port = global_origin.port
     origin.priority = global_origin.priority
+    origin.weight = global_origin.weight or 1
     origin.remark = global_origin.remark
     origin.enabled = global_origin.enabled
     origin.ignore_health_check = global_origin.ignore_health_check
@@ -871,6 +874,8 @@ def create_group(payload: FailoverGroupCreate, _: User = Depends(get_current_use
         doh_enabled=payload.doh_enabled,
         doh_endpoint_id=payload.doh_endpoint_id,
         doh_hostnames_json=json.dumps(doh_hostnames),
+        load_balance_enabled=payload.load_balance_enabled,
+        load_balance_interval_seconds=payload.load_balance_interval_seconds,
     )
     db.add(group)
     db.flush()
