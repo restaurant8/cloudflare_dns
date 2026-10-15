@@ -232,3 +232,33 @@ def test_api_load_address_follows_its_node(monkeypatch):
     delete_origin(a1.id, None, db)
     remaining = {origin.target for origin in db.query(Origin).filter(Origin.group_id == group.id)}
     assert remaining == {"192.0.2.20", "192.0.2.31", "192.0.2.32"}
+
+
+def test_api_load_address_shares_every_setting_but_ip_and_weight(monkeypatch):
+    db = make_session()
+    group, (a1, *_), _, _ = setup(db, monkeypatch)
+    a1.port = 8443
+    a1.probe_mode = "local_only"
+    a1.ignore_health_check = True
+    db.commit()
+
+    added = create_origin(
+        group.id,
+        OriginCreate(target="192.0.2.15", port=22, priority=99, probe_mode="china_only", weight=2, remark="x", load_parent_id=a1.id),
+        None,
+        db,
+    )
+    assert (added.port, added.priority, added.probe_mode, added.ignore_health_check) == (8443, a1.priority, "local_only", True)
+    assert added.weight == 2 and added.remark is None
+
+    # Editing the address itself only changes its IP and weight.
+    update_origin(added.id, OriginUpdate(target="192.0.2.16", port=1, probe_mode="any", weight=4), None, db)
+    db.refresh(added)
+    assert (added.target, added.port, added.probe_mode, added.weight) == ("192.0.2.16", 8443, "local_only", 4)
+
+    # Editing the node carries its settings to every address and re-probes them.
+    added.status = "healthy"
+    db.commit()
+    update_origin(a1.id, OriginUpdate(port=9443, ignore_health_check=False), None, db)
+    db.refresh(added)
+    assert (added.port, added.ignore_health_check, added.status) == (9443, False, "unknown")

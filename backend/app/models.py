@@ -267,7 +267,7 @@ class FailoverGroup(Base, TimestampMixin):
     doh_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     doh_endpoint_id: Mapped[int | None] = mapped_column(ForeignKey("doh_endpoints.id", ondelete="SET NULL"))
     doh_hostnames_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
-    # 节点负载均衡：节点内的多个负载地址按权重轮流作为当前源站，每隔 interval 秒换一次。
+    # 负载均衡：一个源站的多个负载 IP 按权重轮流作为当前源站，每隔 interval 秒换一次。
     load_balance_interval_seconds: Mapped[int] = mapped_column(Integer, default=120, server_default=text("120"), nullable=False)
     # 轮换状态：{"current_weights": {origin_id: int}, "rotated_at": iso}
     load_balance_state_json: Mapped[str | None] = mapped_column(Text)
@@ -482,8 +482,8 @@ class Origin(Base, TimestampMixin):
     # 故意不加外键：azpanel_resources.origin_id 仍保留，双向外键会让建表互相依赖，
     # 而且 SQLite 无法用 ALTER TABLE 补外键。
     azpanel_resource_id: Mapped[int | None] = mapped_column(Integer)
-    # 节点负载地址：指向同组内的节点（顶层源站）。为空表示它本身就是一个节点。
-    # 无外键，理由同 azpanel_resource_id；删除节点时由 API 一并删除负载地址。
+    # 负载 IP：指向同组内它所属的源站，端口/探针等配置都跟随该源站，只有 IP 和权重不同。
+    # 为空表示它本身是一个源站。无外键，理由同 azpanel_resource_id；删除源站时由 API 一并删除。
     load_parent_id: Mapped[int | None] = mapped_column(Integer, index=True)
     probe_mode: Mapped[str] = mapped_column(String(20), default="default", nullable=False)
     target: Mapped[str] = mapped_column(String(255), nullable=False)

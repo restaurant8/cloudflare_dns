@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   Check,
@@ -47,7 +47,8 @@ import {
   SidebarMenuItem,
   SidebarProvider,
   SidebarRail,
-  SidebarTrigger
+  SidebarTrigger,
+  useSidebar
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -56,12 +57,12 @@ import { ThemeToggle } from "@/components/theme-toggle";
 type Section = "overview" | "cloudflare" | "records" | "groups" | "doh" | "awsRoute53" | "alibabaHttpDns" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
 type ProbeMode = "default" | "local_only" | "china_only" | "any";
-type OriginAddDraft = { target: string; port: number; priority: number; weight: number; load_parent_id: number | ""; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
+type OriginAddDraft = { target: string; port: number; priority: number; weight: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
 type OriginEditDraft = { target: string; port: number; priority: number; weight: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; unbind_external: boolean };
 type GlobalOriginDraft = OriginAddDraft;
 // Machine binding stays tri-state; azpanel_resource_id carries the exact current
 // binding so the same form can keep, change or clear it explicitly.
-type GlobalOriginEditDraft = Omit<GlobalOriginDraft, "azpanel_remote_key" | "load_parent_id"> & { unbind_external: boolean };
+type GlobalOriginEditDraft = Omit<GlobalOriginDraft, "azpanel_remote_key"> & { unbind_external: boolean };
 type CollectionDraft = { name: string };
 type GroupEditDraft = { ttl: number; min_switch_interval_seconds: number; enabled: boolean; load_balance_interval_seconds: number; collection_id: number | ""; cloudflare_publish_enabled: boolean; doh_enabled: boolean; doh_endpoint_id: number | ""; doh_hostnames: string };
 type DohEndpointDraft = { name: string; base_url: string; sync_path: string; query_path: string; hmac_secret: string; timeout_seconds: number; sync_interval_seconds: number; verify_tls: boolean; enabled: boolean };
@@ -324,6 +325,24 @@ function currentProbeStates(origin: Origin) {
   });
 }
 
+// On a phone the sidebar is a drawer over the page; picking a menu item must
+// close it, otherwise the selected page stays hidden behind the menu.
+function NavMenuButton({ isActive, tooltip, onSelect, children }: { isActive: boolean; tooltip: string; onSelect: () => void; children: ReactNode }) {
+  const { isMobile, setOpenMobile } = useSidebar();
+  return (
+    <SidebarMenuButton
+      isActive={isActive}
+      tooltip={tooltip}
+      onClick={() => {
+        onSelect();
+        if (isMobile) setOpenMobile(false);
+      }}
+    >
+      {children}
+    </SidebarMenuButton>
+  );
+}
+
 function IpList({ label, values, empty = "暂无" }: { label: string; values: string[]; empty?: string }) {
   return (
     <div className="ipListRow">
@@ -452,8 +471,8 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, weight: 1, load_parent_id: "", publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
-const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, weight: 1, load_parent_id: "", publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, weight: 1, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
+const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, weight: 1, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
@@ -919,10 +938,10 @@ export default function App() {
                 const Icon = item.icon;
                 return (
                   <SidebarMenuItem key={item.id}>
-                    <SidebarMenuButton isActive={section === item.id} tooltip={item.label} onClick={() => setSection(item.id)}>
+                    <NavMenuButton isActive={section === item.id} tooltip={item.label} onSelect={() => setSection(item.id)}>
                       <Icon />
                       <span>{item.label}</span>
-                    </SidebarMenuButton>
+                    </NavMenuButton>
                   </SidebarMenuItem>
                 );
               })}
@@ -3123,6 +3142,9 @@ function GroupsPanel({
   const [hostnameAdd, setHostnameAdd] = useState<HostnameAddDraft>({ hostname: "", adopt_record_id: "" });
   const [editingOriginId, setEditingOriginId] = useState<number | null>(null);
   const [originEdits, setOriginEdits] = useState<Record<number, OriginEditDraft>>({});
+  // Load-balance IPs are edited inline inside their node's card.
+  const [loadIpAdds, setLoadIpAdds] = useState<Record<number, { target: string; weight: number }>>({});
+  const [loadIpEdit, setLoadIpEdit] = useState<{ id: number; target: string; weight: number } | null>(null);
   const [collapsedCollectionIds, setCollapsedCollectionIds] = useState<Set<string>>(new Set());
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<number>>(new Set());
   // Origins inherited from a collection are identical across every group in it, so
@@ -3228,7 +3250,6 @@ function GroupsPanel({
       port: 22,
       priority: maxPriority + 10,
       weight: 1,
-      load_parent_id: "",
       publish_mode: "direct",
       expanded_ip_priorities: {},
       preferred_agent_id: "",
@@ -3247,7 +3268,7 @@ function GroupsPanel({
     await act(
       () => {
         if (!globalOriginAdd.target.trim()) {
-          throw new Error("请填写全局备用目标");
+          throw new Error("请填写全局备用源站");
         }
         return apiFetch(`/api/groups/collections/${addingGlobalCollection.id}/global-origins`, token, {
           method: "POST",
@@ -3335,16 +3356,15 @@ function GroupsPanel({
     );
   }
 
-  function beginAddOrigin(group: FailoverGroup, node?: Origin) {
+  function beginAddOrigin(group: FailoverGroup) {
     const maxPriority = group.origins.reduce((value, origin) => Math.max(value, origin.priority), 0);
     expandGroup(group.id);
     setAddingGroupId(group.id);
     setOriginAdd({
       target: "",
-      port: node?.port || 22,
-      priority: node ? node.priority : maxPriority + 10,
+      port: 22,
+      priority: maxPriority + 10,
       weight: 1,
-      load_parent_id: node ? node.id : "",
       publish_mode: providerRequiredHostnamePublishMode(group) || "direct",
       expanded_ip_priorities: {},
       preferred_agent_id: "",
@@ -3457,7 +3477,7 @@ function GroupsPanel({
     await act(
       () => {
         if (!originAdd.target.trim()) {
-          throw new Error("请填写备用目标");
+          throw new Error("请填写备用源站");
         }
         return apiFetch(`/api/groups/${addingGroup.id}/origins`, token, {
           method: "POST",
@@ -3466,7 +3486,6 @@ function GroupsPanel({
             port: originAdd.port,
             priority: originAdd.priority,
             weight: originAdd.weight,
-            load_parent_id: originAdd.load_parent_id === "" ? null : originAdd.load_parent_id,
             publish_mode: addTargetType === "hostname" ? (addingGroupRequiredPublishMode || originAdd.publish_mode) : "direct",
             expanded_ip_priorities: addTargetType === "hostname" ? originAdd.expanded_ip_priorities : {},
             preferred_agent_id: originAdd.preferred_agent_id === "" ? null : originAdd.preferred_agent_id,
@@ -3480,7 +3499,7 @@ function GroupsPanel({
           })
         });
       },
-      "备用目标已添加",
+      "备用源站已添加",
       () => {
         setAddingGroupId(null);
         setOriginAdd(defaultOriginAddDraft);
@@ -3728,7 +3747,7 @@ function GroupsPanel({
       enabled: true,
       azpanel_resource_id: "",
       azpanel_remote_key: "",
-      // 记住选的是哪台机器：来源同步到新 IP 时这个备用目标会自动跟着更新
+      // 记住选的是哪台机器：来源同步到新 IP 时这个备用源站会自动跟着更新
       external_ip_item_id: item.machine_key ? item.id : ""
     }));
   }
@@ -3857,7 +3876,7 @@ function GroupsPanel({
       return (
         <div className="globalOriginItem globalOriginEditing" key={origin.id}>
           <label>
-            目标
+            源站 IP / 域名
             <input
               value={draft.target}
               onChange={(event) =>
@@ -4150,11 +4169,13 @@ function GroupsPanel({
           // read-only view. Keeping them out of the card list is what stops
           // 10 domains × 10 machines from becoming 100 cards.
           const ownOriginsFlat = sortedOrigins.filter((origin) => !origin.global_origin_id);
-          // A node is followed by its load addresses, so they render under it.
+          // Load-balance IPs of a node (same settings as the node, only the IP differs).
           const loadMembersOf = (nodeId: number) => ownOriginsFlat.filter((origin) => origin.load_parent_id === nodeId).sort((left, right) => left.id - right.id);
           const ownNodes = ownOriginsFlat.filter((origin) => !origin.load_parent_id);
+          // Load-balance IPs live inside their node's card; only a stray one
+          // whose node is gone still gets its own card so it can be removed.
           const ownOrigins = [
-            ...ownNodes.flatMap((node) => [node, ...loadMembersOf(node.id)]),
+            ...ownNodes,
             ...ownOriginsFlat.filter((origin) => origin.load_parent_id && !ownNodes.some((node) => node.id === origin.load_parent_id))
           ];
           const inheritedOrigins = sortedOrigins.filter((origin) => origin.global_origin_id);
@@ -4218,11 +4239,11 @@ function GroupsPanel({
                   <button className="icon secondaryIcon" title={isCollapsed ? "展开切换组" : "折叠切换组"} onClick={() => toggleGroupCollapsed(group.id)}>
                     {isCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
                   </button>
-                  <button className="secondary compactBtn" title="手动检测该组全部目标" onClick={() => act(() => apiFetch(`/api/groups/${group.id}/run`, token, { method: "POST" }), "切换组检测已完成")}>
+                  <button className="secondary compactBtn" title="手动检测该组全部源站" onClick={() => act(() => apiFetch(`/api/groups/${group.id}/run`, token, { method: "POST" }), "切换组检测已完成")}>
                     <Play size={15} />
                     <span>检测全部</span>
                   </button>
-                  <button className="secondary" title="添加备用目标" onClick={() => beginAddOrigin(group)}>
+                  <button className="secondary" title="添加备用源站" onClick={() => beginAddOrigin(group)}>
                     <Plus size={15} />
                     <span>添加备用</span>
                   </button>
@@ -4293,8 +4314,8 @@ function GroupsPanel({
                         <input type="checkbox" checked={groupEdit.enabled} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, enabled: event.target.checked } }))} />
                         启用这个切换组
                       </label>
-                      <label title="节点里添加了负载地址时，节点内的健康地址每隔这么多秒轮流切换一次；没有负载地址的节点不受影响">
-                        节点负载轮换间隔（秒）
+                      <label title="源站添加了负载 IP 时，它的健康 IP 每隔这么多秒按权重轮流切换一次；只有一个 IP 的源站不受影响">
+                        负载 IP 轮换间隔（秒）
                         <input type="number" min={30} max={86400} value={groupEdit.load_balance_interval_seconds} onChange={(event) => setGroupEdits((current) => ({ ...current, [group.id]: { ...groupEdit, load_balance_interval_seconds: Number(event.target.value) } }))} />
                       </label>
                       <div className="rowActions">
@@ -4364,7 +4385,7 @@ function GroupsPanel({
                               <option value="">{sortedOrigins.length > 0 ? "请选择入口" : "请先添加源站"}</option>
                               {sortedOrigins.filter((origin) => !origin.load_parent_id).map((origin) => (
                                 <option value={origin.id} key={origin.id}>
-                                  {displayTargetWithRemark(origin.target, origin.port, origin.remark)} · 优先级 {origin.priority}{loadMembersOf(origin.id).length ? ` · 含 ${loadMembersOf(origin.id).length} 个负载地址` : ""} · {origin.enabled ? statusText(origin.status) : "已停用"}
+                                  {displayTargetWithRemark(origin.target, origin.port, origin.remark)} · 优先级 {origin.priority}{loadMembersOf(origin.id).length ? ` · 含 ${loadMembersOf(origin.id).length} 个负载 IP` : ""} · {origin.enabled ? statusText(origin.status) : "已停用"}
                                 </option>
                               ))}
                             </select>
@@ -4485,8 +4506,8 @@ function GroupsPanel({
                                   <td>
                                     <button
                                       className="icon secondaryIcon"
-                                      title="手动检测这个目标"
-                                      onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}/run`, token, { method: "POST" }), "目标检测已完成")}
+                                      title="手动检测这个源站"
+                                      onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}/run`, token, { method: "POST" }), "源站检测已完成")}
                                     >
                                       <Play size={15} />
                                     </button>
@@ -4533,7 +4554,7 @@ function GroupsPanel({
                       const hiddenProbeCount = activeOriginProbeStates.length - visibleProbeStates.length;
                       return (
                         <div
-                          className={`origin ${editingOriginId === origin.id ? "originEditing" : ""} ${isCurrentOrigin ? "originCurrent" : ""} ${isPrimaryOrigin ? "originPrimary" : "originBackup"} ${origin.global_origin_id ? "originGlobal" : ""} ${isLoadMember ? "originLoadMember" : ""}`}
+                          className={`origin ${editingOriginId === origin.id ? "originEditing" : ""} ${isCurrentOrigin ? "originCurrent" : ""} ${isPrimaryOrigin ? "originPrimary" : "originBackup"} ${origin.global_origin_id ? "originGlobal" : ""} ${isLoadMember ? "originLoadMember" : ""} ${nodeLoadMembers.length > 0 ? "originHasLoadIps" : ""}`}
                           key={origin.id}
                         >
                           <Server size={18} />
@@ -4541,7 +4562,7 @@ function GroupsPanel({
                             <>
                               <div className="originEditGrid">
                                 <label>
-                                  目标 IP / IPv6 / 域名
+                                  源站 IP / IPv6 / 域名
                                   <input
                                     value={originEdit.target}
                                     onChange={(event) =>
@@ -4594,7 +4615,7 @@ function GroupsPanel({
                                   </label>
                                 )}
                                 {(isLoadMember || nodeLoadMembers.length > 0) && (
-                                  <label title="同一节点内的负载地址按权重轮流：权重 3 的地址轮到 3 次，权重 1 的轮到 1 次">
+                                  <label title="同一源站的多个 IP 按权重轮流：权重 3 的轮到 3 次，权重 1 的轮到 1 次">
                                     负载权重
                                     <input type="number" min={1} max={100} value={originEdit.weight} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, weight: Number(event.target.value) } }))} />
                                   </label>
@@ -4692,15 +4713,17 @@ function GroupsPanel({
                                 <div className="originTitleLine">
                                   <strong title={`${origin.target}:${origin.port}`}>{displayTargetWithRemark(origin.target, origin.port, origin.remark)}</strong>
                                   <div className="originBadges">
-                                    {isCurrentOrigin && <span className="originBadge current">当前使用</span>}
-                                    {origin.global_origin_id && <span className="originBadge global">全局备用</span>}
+                                    {/* Role first (one colour per role), then live state, then plain tags. */}
                                     {isLoadMember ? (
-                                      <span className="originBadge record" title="属于上方节点，和节点内其它地址按权重轮流">负载地址 · 权重 {origin.weight || 1}</span>
+                                      <span className="originBadge loadBalance" title="属于某个源站，和它的其它 IP 按权重轮流">负载 IP · 权重 {origin.weight || 1}</span>
+                                    ) : origin.global_origin_id ? (
+                                      <span className="originBadge global">全局备用</span>
                                     ) : (
                                       <span className={`originBadge ${isPrimaryOrigin ? "primary" : "backup"}`}>{isPrimaryOrigin ? "主用" : "备用"}</span>
                                     )}
-                                    {nodeLoadMembers.length > 0 && <span className="originBadge record" title="节点内的地址按权重轮流使用">负载节点 · {nodeLoadMembers.length + 1} 个地址 · 权重 {origin.weight || 1}</span>}
-                                    {isRotating && <span className="originBadge current">轮流中</span>}
+                                    {isCurrentOrigin && <span className="originBadge current">当前使用</span>}
+                                    {nodeLoadMembers.length > 0 && <span className="originBadge loadBalance" title="这个源站的多个 IP 按权重轮流使用">负载均衡 · {nodeLoadMembers.length + 1} 个 IP</span>}
+                                    {isRotating && !isCurrentOrigin && <span className="originBadge rotating">轮流中</span>}
                                     <span className="originBadge record">{recordTypeForTargetType(origin.target_type, origin.publish_mode)}</span>
                                     {preferredAgent && <span className="originBadge record">指定探针 {preferredAgent.name}</span>}
                                     {normalizeProbeMode(origin.probe_mode) !== "default" && <span className="originBadge record">{probeModeText(origin.probe_mode)}</span>}
@@ -4713,12 +4736,12 @@ function GroupsPanel({
                                     )}
                                   </div>
                                 </div>
-                                <span>{targetTypeText(origin.target_type)} · {isLoadMember ? "优先级跟随节点" : `优先级 ${origin.priority}`} · {origin.enabled ? "已启用" : "已停用"} · {healthMeta}</span>
+                                <span>{targetTypeText(origin.target_type)} · {isLoadMember ? "优先级跟随源站" : `优先级 ${origin.priority}`} · {origin.enabled ? "已启用" : "已停用"} · {healthMeta}</span>
                                 {origin.enabled && origin.publish_mode === "expanded" && (
                                   <div className="expandedIpList">
                                     <IpList label="解析 IP" values={origin.resolved_ips} empty="尚未解析，点击手动检测或等待下个周期" />
                                     <IpList label="健康 IP" values={origin.healthy_ips} />
-                                    <IpList label="已发布" values={origin.published_ips} empty="当前未发布该目标" />
+                                    <IpList label="已发布" values={origin.published_ips} empty="当前未发布该源站" />
                                     <ExpandedIpPrioritySummary origin={origin} />
                                   </div>
                                 )}
@@ -4737,26 +4760,122 @@ function GroupsPanel({
                                     )}
                                   </div>
                                 )}
+                                {!isLoadMember && !origin.global_origin_id && (
+                                  <div className="loadIpList">
+                                    {nodeLoadMembers.length > 0 && (
+                                      <div className="loadIpHint">
+                                        负载均衡：以下 IP 与上方 {origin.target}（权重 {origin.weight || 1}）每 {group.load_balance_interval_seconds} 秒按权重轮流，端口、探针等配置相同
+                                      </div>
+                                    )}
+                                    {nodeLoadMembers.map((member) => {
+                                      const memberStatus = member.enabled ? member.status : "disabled";
+                                      const memberRotating = (group.load_balance_origin_ids || []).includes(member.id);
+                                      if (loadIpEdit?.id === member.id) {
+                                        return (
+                                          <div className="loadIpRow loadIpEditing" key={member.id}>
+                                            <input value={loadIpEdit.target} onChange={(event) => setLoadIpEdit({ ...loadIpEdit, target: event.target.value })} placeholder="IP 或域名" />
+                                            <label title="权重越大，轮到的次数越多">
+                                              权重
+                                              <input type="number" min={1} max={100} value={loadIpEdit.weight} onChange={(event) => setLoadIpEdit({ ...loadIpEdit, weight: Number(event.target.value) })} />
+                                            </label>
+                                            <button
+                                              className="compactBtn"
+                                              onClick={() =>
+                                                act(
+                                                  () => apiFetch(`/api/groups/origins/${member.id}`, token, { method: "PATCH", body: JSON.stringify({ target: loadIpEdit.target.trim(), weight: loadIpEdit.weight }) }),
+                                                  "负载 IP 已更新",
+                                                  () => setLoadIpEdit(null)
+                                                )
+                                              }
+                                            >
+                                              <Save size={14} />
+                                              保存
+                                            </button>
+                                            <button className="secondary compactBtn" onClick={() => setLoadIpEdit(null)}>取消</button>
+                                          </div>
+                                        );
+                                      }
+                                      return (
+                                        <div className={`loadIpRow ${member.id === group.current_origin_id ? "loadIpCurrent" : ""}`} key={member.id}>
+                                          <Status value={memberStatus} />
+                                          <strong title={member.last_error || undefined}>{member.target}</strong>
+                                          <span className="loadIpWeight">权重 {member.weight || 1}</span>
+                                          {member.id === group.current_origin_id && <span className="originBadge current">当前使用</span>}
+                                          {memberRotating && member.id !== group.current_origin_id && <span className="originBadge rotating">轮流中</span>}
+                                          {member.enabled && member.last_error && <small className="danger">{member.last_error}</small>}
+                                          <span className="loadIpActions">
+                                            <button className="icon secondaryIcon" title="手动检测这个 IP" onClick={() => act(() => apiFetch(`/api/groups/origins/${member.id}/run`, token, { method: "POST" }), "检测已完成")}>
+                                              <Play size={14} />
+                                            </button>
+                                            <button className="icon secondaryIcon" title="修改 IP / 权重" onClick={() => setLoadIpEdit({ id: member.id, target: member.target, weight: member.weight || 1 })}>
+                                              <Pencil size={14} />
+                                            </button>
+                                            <button
+                                              className="icon dangerBtn"
+                                              title="删除这个负载 IP"
+                                              onClick={() => window.confirm(`确认删除负载 IP ${member.target} 吗？`) && act(() => apiFetch(`/api/groups/origins/${member.id}`, token, { method: "DELETE" }), "负载 IP 已删除")}
+                                            >
+                                              <Trash2 size={14} />
+                                            </button>
+                                          </span>
+                                        </div>
+                                      );
+                                    })}
+                                    {loadIpAdds[origin.id] ? (
+                                      <div className="loadIpRow loadIpEditing">
+                                        <input
+                                          autoFocus
+                                          value={loadIpAdds[origin.id].target}
+                                          onChange={(event) => setLoadIpAdds((current) => ({ ...current, [origin.id]: { ...current[origin.id], target: event.target.value } }))}
+                                          placeholder="再加一个 IP 或域名，端口、探针等配置与本源站相同"
+                                        />
+                                        <label title="权重越大，轮到的次数越多">
+                                          权重
+                                          <input type="number" min={1} max={100} value={loadIpAdds[origin.id].weight} onChange={(event) => setLoadIpAdds((current) => ({ ...current, [origin.id]: { ...current[origin.id], weight: Number(event.target.value) } }))} />
+                                        </label>
+                                        <button
+                                          className="compactBtn"
+                                          disabled={!loadIpAdds[origin.id].target.trim()}
+                                          onClick={() =>
+                                            act(
+                                              () =>
+                                                apiFetch(`/api/groups/${group.id}/origins`, token, {
+                                                  method: "POST",
+                                                  body: JSON.stringify({ target: loadIpAdds[origin.id].target.trim(), port: origin.port, weight: loadIpAdds[origin.id].weight, load_parent_id: origin.id })
+                                                }),
+                                              "负载 IP 已添加",
+                                              () => setLoadIpAdds((current) => { const next = { ...current }; delete next[origin.id]; return next; })
+                                            )
+                                          }
+                                        >
+                                          <Plus size={14} />
+                                          添加
+                                        </button>
+                                        <button className="secondary compactBtn" onClick={() => setLoadIpAdds((current) => { const next = { ...current }; delete next[origin.id]; return next; })}>取消</button>
+                                      </div>
+                                    ) : (
+                                      <button className="secondary compactBtn loadIpAddBtn" title="给这个源站再加一个 IP，和现有 IP 按权重轮流使用（负载均衡）" onClick={() => setLoadIpAdds((current) => ({ ...current, [origin.id]: { target: "", weight: 1 } }))}>
+                                        <Plus size={14} />
+                                        增加 IP
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                               <Status value={displayStatus} />
-                              <button className="icon secondaryIcon" title="手动检测这个目标" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}/run`, token, { method: "POST" }), "目标检测已完成")}>
+                              <button className="icon secondaryIcon" title="手动检测这个源站" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}/run`, token, { method: "POST" }), "源站检测已完成")}>
                                 <Play size={15} />
                               </button>
                               {!origin.global_origin_id && (
                                 <>
-                                  {!isLoadMember && (
-                                    <button className="icon secondaryIcon" title="给这个节点添加负载地址（节点内的地址会按权重轮流使用）" onClick={() => beginAddOrigin(group, origin)}>
-                                      <Plus size={15} />
-                                    </button>
-                                  )}
                                   <button className="icon secondaryIcon" title="修改源站" onClick={() => beginEditOrigin(origin)}>
                                     <Pencil size={15} />
                                   </button>
                                   <button
                                     className="icon dangerBtn"
-                                    title={nodeLoadMembers.length > 0 ? "删除节点（连同它的负载地址）" : "删除"}
+                                    title={nodeLoadMembers.length > 0 ? "删除源站（连同它的负载 IP）" : "删除"}
                                     onClick={() =>
-                                      (nodeLoadMembers.length === 0 || window.confirm(`删除这个节点会同时删除它的 ${nodeLoadMembers.length} 个负载地址，确认吗？`)) &&
+                                      (nodeLoadMembers.length === 0 || window.confirm(`删除这个源站会同时删除它的 ${nodeLoadMembers.length} 个负载 IP，确认吗？`)) &&
                                       act(() => apiFetch(`/api/groups/origins/${origin.id}`, token, { method: "DELETE" }), "源站已删除")
                                     }
                                   >
@@ -4952,16 +5071,8 @@ function GroupsPanel({
         <div className="modalBackdrop" role="dialog" aria-modal="true">
           <div className="modalPanel">
             <div className="panelTitle">
-              <h2>{originAdd.load_parent_id ? "添加负载地址" : "添加备用目标"}</h2>
-              <p>
-                {addingGroup.hostname}
-                {originAdd.load_parent_id
-                  ? ` · 节点 ${(() => {
-                      const node = addingGroup.origins.find((origin) => origin.id === originAdd.load_parent_id);
-                      return node ? displayTargetWithRemark(node.target, node.port, node.remark) : `#${originAdd.load_parent_id}`;
-                    })()}，与节点内其它地址按权重轮流使用`
-                  : ""}
-              </p>
+              <h2>添加备用源站</h2>
+              <p>{addingGroup.hostname}</p>
             </div>
             <label>
               从目标池选择
@@ -5027,17 +5138,17 @@ function GroupsPanel({
             </label>
             {originAdd.azpanel_remote_key !== "" && (
               <div className="originHint">
-                添加后会自动在「自动换 IP」里新增这台机器并绑定到此备用目标：源站疑似被墙时自动调用 azpanel 换 IP，新 IP 会同步回源站。
+                添加后会自动在「自动换 IP」里新增这台机器并绑定到此备用源站：源站疑似被墙时自动调用 azpanel 换 IP，新 IP 会同步回源站。
               </div>
             )}
             {originAdd.azpanel_resource_id !== "" && (
               <div className="originHint">
-                添加后会把选中的云资源绑定到这个备用目标：源站疑似被墙时自动调用 azpanel 换 IP，新 IP 会同步回所有绑定域名；已有绑定不会被解除。
+                添加后会把选中的云资源绑定到这个备用源站：源站疑似被墙时自动调用 azpanel 换 IP，新 IP 会同步回所有绑定域名；已有绑定不会被解除。
               </div>
             )}
             {originAdd.external_ip_item_id !== "" && (
               <div className="originHint">
-                添加后会绑定这台外部机器：来源同步到它的新 IP 时，这个备用目标自动跟着更新。如果该 IP 疑似被墙且「自动换 IP」里有当前 IP 相同的云资源（azpanel / SynexVM），会自动调用换 IP，换完后外部来源会立即重新同步。
+                添加后会绑定这台外部机器：来源同步到它的新 IP 时，这个备用源站自动跟着更新。如果该 IP 疑似被墙且「自动换 IP」里有当前 IP 相同的云资源（azpanel / SynexVM），会自动调用换 IP，换完后外部来源会立即重新同步。
               </div>
             )}
             <label>
@@ -5049,17 +5160,10 @@ function GroupsPanel({
                 检查端口
                 <input type="number" min={1} max={65535} value={originAdd.port} onChange={(event) => setOriginAdd((current) => ({ ...current, port: Number(event.target.value) }))} />
               </label>
-              {originAdd.load_parent_id ? (
-                <label title="同一节点内的负载地址按权重轮流：权重 3 的地址轮到 3 次，权重 1 的轮到 1 次">
-                  负载权重
-                  <input type="number" min={1} max={100} value={originAdd.weight} onChange={(event) => setOriginAdd((current) => ({ ...current, weight: Number(event.target.value) }))} />
-                </label>
-              ) : (
-                <label>
-                  优先级
-                  <input type="number" min={0} value={originAdd.priority} onChange={(event) => setOriginAdd((current) => ({ ...current, priority: Number(event.target.value) }))} />
-                </label>
-              )}
+              <label>
+                优先级
+                <input type="number" min={0} value={originAdd.priority} onChange={(event) => setOriginAdd((current) => ({ ...current, priority: Number(event.target.value) }))} />
+              </label>
               <label>
                 指定探针
                 <select value={originAdd.preferred_agent_id} onChange={(event) => setOriginAdd((current) => ({ ...current, preferred_agent_id: event.target.value ? Number(event.target.value) : "" }))}>
@@ -5084,7 +5188,7 @@ function GroupsPanel({
             </div>
             <label className="inlineCheck">
               <input type="checkbox" checked={originAdd.enabled} onChange={(event) => setOriginAdd((current) => ({ ...current, enabled: event.target.checked }))} />
-              启用这个备用目标
+              启用这个备用源站
             </label>
             <label className="inlineCheck" title="即使探测不健康也按健康状态参与选择">
               <input type="checkbox" checked={originAdd.ignore_health_check} onChange={(event) => setOriginAdd((current) => ({ ...current, ignore_health_check: event.target.checked }))} />
@@ -5114,7 +5218,7 @@ function GroupsPanel({
               <button type="button" className="secondary" onClick={() => setAddingGroupId(null)}>取消</button>
               <button type="button" onClick={createOrigin}>
                 <Plus size={16} />
-                <span>{originAdd.load_parent_id ? "添加负载地址" : "添加备用"}</span>
+                <span>添加备用</span>
               </button>
             </div>
           </div>

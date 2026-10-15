@@ -563,7 +563,7 @@ class OriginCreate(BaseModel):
     target: str = Field(min_length=1, max_length=255)
     port: int = Field(ge=1, le=65535)
     priority: int = Field(default=10, ge=0, le=100000)
-    # 节点负载均衡：填写后作为该节点的负载地址，与节点内其它地址按权重轮流使用
+    # 负载均衡：填写后作为该源站的负载 IP，其它配置跟随该源站，与它的其它 IP 按权重轮流使用
     load_parent_id: int | None = None
     weight: int = Field(default=1, ge=1, le=100)
     publish_mode: Literal["direct", "expanded"] = "direct"

@@ -288,19 +288,46 @@ def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreat
     if payload.load_parent_id is not None:
         parent = _load_balance_node(db, group, payload.load_parent_id)
         origin.load_parent_id = parent.id
-        # A load address belongs to its node: it shares the node's priority.
-        origin.priority = parent.priority
+        # A load address is just another IP of its node: every other setting
+        # comes from the node and follows it when the node is edited.
+        _copy_node_settings(parent, origin)
+        origin.enabled = True
+        origin.remark = None
+        if origin.target_type == "hostname":
+            requested_mode = parent.publish_mode if parent.target_type == "hostname" else DIRECT_PUBLISH_MODE
+            try:
+                origin.publish_mode = required_alibaba_origin_publish_mode(group, "hostname", requested_mode)
+            except AlibabaOutputConfigurationError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
     return origin
+
+
+# Settings a load address always shares with its node.
+_NODE_SHARED_SETTINGS = ("port", "priority", "probe_mode", "preferred_agent_id", "ignore_health_check")
+# What can be edited on a load address itself.
+_LOAD_ADDRESS_EDITABLE = {"target", "weight", "enabled"}
+
+
+def _copy_node_settings(node: Origin, member: Origin) -> bool:
+    """Copy the node's shared settings; return True when probing must restart."""
+    probe_changed = (
+        member.port != node.port
+        or member.probe_mode != node.probe_mode
+        or member.preferred_agent_id != node.preferred_agent_id
+    )
+    for key in _NODE_SHARED_SETTINGS:
+        setattr(member, key, getattr(node, key))
+    return probe_changed
 
 
 def _load_balance_node(db: Session, group: FailoverGroup, node_id: int) -> Origin:
     node = db.get(Origin, node_id)
     if node is None or node.group_id != group.id:
-        raise HTTPException(status_code=404, detail="要添加负载地址的节点不存在")
+        raise HTTPException(status_code=404, detail="要添加负载 IP 的源站不存在")
     if node.load_parent_id is not None:
-        raise HTTPException(status_code=400, detail="负载地址不能再添加负载地址，请选择它所属的节点")
+        raise HTTPException(status_code=400, detail="负载 IP 不能再添加负载 IP，请在它所属的源站上添加")
     if node.global_origin_id:
-        raise HTTPException(status_code=400, detail="全局备用节点暂不支持添加负载地址")
+        raise HTTPException(status_code=400, detail="全局备用源站暂不支持添加负载 IP")
     return node
 
 
@@ -1040,7 +1067,7 @@ def upsert_time_rule(
     if origin.group_id != group.id:
         raise HTTPException(status_code=400, detail="指定源站不属于这个切换组")
     if origin.load_parent_id is not None:
-        raise HTTPException(status_code=400, detail="分时入口请选择节点，节点内的负载地址会自动轮流")
+        raise HTTPException(status_code=400, detail="分时入口请选择源站，源站的负载 IP 会自动轮流")
 
     rule = group.time_rule
     if rule is None:
@@ -1379,6 +1406,9 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     if origin.global_origin_id:
         raise HTTPException(status_code=400, detail="这是业务分组的全局备用，请在全局备用里修改")
     updates = payload.model_dump(exclude_unset=True)
+    if origin.load_parent_id is not None:
+        # Everything except the IP and weight follows the node.
+        updates = {key: value for key, value in updates.items() if key in _LOAD_ADDRESS_EDITABLE}
     if "external_ip_item_id" in updates:
         item_id = updates.pop("external_ip_item_id")
         if item_id is None:
@@ -1484,14 +1514,12 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     )
     if "remark" in updates:
         origin.remark = _normalize_remark(updates.pop("remark"))
-    if origin.load_parent_id is not None:
-        # A load address always uses its node's priority.
-        updates.pop("priority", None)
     for key, value in updates.items():
         setattr(origin, key, value)
     if origin.load_parent_id is None:
         for member in _load_members_of(db, origin):
-            member.priority = origin.priority
+            if _copy_node_settings(origin, member):
+                _reset_origin_probe_state(member)
 
     if endpoint_changed or probe_source_changed:
         origin.status = "unknown"
