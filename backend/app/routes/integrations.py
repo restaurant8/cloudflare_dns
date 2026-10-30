@@ -8,6 +8,7 @@ from ..deps import get_current_user
 from ..integrations import (
     CUSTOM_IP_PROVIDER,
     azpanel_settings,
+    bind_custom_resource_backups,
     change_resource_ip,
     custom_ip_settings,
     custom_url_hint,
@@ -172,6 +173,9 @@ def create_azpanel_resource(payload: AzPanelResourceCreate, _: User = Depends(ge
     )
     db.add(resource)
     _bind_resource_to_origin(db, resource, bind_origin)
+    if custom:
+        db.flush()
+        bind_custom_resource_backups(db, resource)
     try:
         sync_resource_current_ip_to_origin(db, resource)
     except ValueError as exc:
@@ -220,6 +224,8 @@ def update_azpanel_resource(resource_id: int, payload: AzPanelResourceUpdate, _:
         db.flush()
         refresh_legacy_origin_mirror(db, resource)
     _bind_resource_to_origin(db, resource, bind_origin)
+    if resource.provider == CUSTOM_IP_PROVIDER and not unbind_all:
+        bind_custom_resource_backups(db, resource)
     try:
         sync_resource_current_ip_to_origin(db, resource)
     except ValueError as exc:

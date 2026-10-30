@@ -398,9 +398,34 @@ def _adopt_custom_ip(db: Session, resource: AzPanelResource, new_ip: str, *, tri
     return applied_ip
 
 
+def bind_custom_resource_backups(db: Session, resource: AzPanelResource) -> list[Origin]:
+    """Bind an unbound resource by its current IP, else by the IP it last changed away from.
+
+    The second case repairs backups left on the old IP by a change that happened
+    before the resource was bound to anything.
+    """
+    bound = auto_bind_resource_by_ip(db, resource, resource.current_ip)
+    if bound or resource_bound_global_origins(db, resource):
+        return bound
+    last_job = (
+        db.query(IpChangeJob)
+        .filter(IpChangeJob.azpanel_resource_id == resource.id, IpChangeJob.status == "success", IpChangeJob.old_ip.isnot(None))
+        .order_by(IpChangeJob.id.desc())
+        .first()
+    )
+    if last_job is None or last_job.old_ip == resource.current_ip:
+        return bound
+    bound = auto_bind_resource_by_ip(db, resource, last_job.old_ip)
+    if bound:
+        sync_resource_current_ip_to_origin(db, resource)
+    return bound
+
+
 def sync_custom_resource_status(db: Session, resource: AzPanelResource) -> str:
     """「查询状态」：读取机器当前 IP，变了就同步到资源和绑定源站。"""
     ip = read_stable_custom_ip(db, resource)
+    if ip == (resource.current_ip or ""):
+        bind_custom_resource_backups(db, resource)
     resource.last_status_sync_at = datetime.utcnow()
     resource.pending_candidate_ip = None
     if ip != (resource.current_ip or ""):
@@ -748,9 +773,69 @@ def _sync_resource_xboard_nodes(db: Session, resource: AzPanelResource, new_ip: 
     return results
 
 
+def resource_owns_port(resource: AzPanelResource) -> bool:
+    """azpanel 资源的检查端口就是机器端口，会同步给源站；通用接口只管 IP，
+    源站端口保持源站自己的（它可能是转发端口，和机器端口无关）。"""
+    return resource.provider != CUSTOM_IP_PROVIDER
+
+
+def auto_bind_resource_by_ip(db: Session, resource: AzPanelResource, ip: str | None) -> list[Origin]:
+    """Bind a resource that drives nothing yet to the backups sitting on its IP.
+
+    Users can rely on IP matching instead of selecting the resource on a backup.
+    Without recording that, the resource showed "drives 0 backups" and a changed
+    IP was never written to the backup. Only unambiguous, unowned backups are
+    taken: not ones following an external machine (their source owns the IP and
+    their forwarding port differs), not global-backup mirrors (the global row is
+    bound instead), and nothing when another resource claims the same IP.
+    """
+    if not ip or resource_bound_origins(db, resource) or resource_bound_global_origins(db, resource):
+        return []
+    other_claims = (
+        db.query(AzPanelResource)
+        .filter(AzPanelResource.id != resource.id, AzPanelResource.enabled.is_(True), AzPanelResource.current_ip == ip)
+        .count()
+    )
+    if other_claims:
+        return []
+    port_filter = [] if not resource_owns_port(resource) else [Origin.port == resource.port]
+    global_origins = (
+        db.query(FailoverGlobalOrigin)
+        .filter(
+            FailoverGlobalOrigin.target == ip,
+            FailoverGlobalOrigin.azpanel_resource_id.is_(None),
+            FailoverGlobalOrigin.external_machine_key.is_(None),
+            *([] if not resource_owns_port(resource) else [FailoverGlobalOrigin.port == resource.port]),
+        )
+        .all()
+    )
+    origins = (
+        db.query(Origin)
+        .filter(
+            Origin.target == ip,
+            Origin.azpanel_resource_id.is_(None),
+            Origin.global_origin_id.is_(None),
+            Origin.external_machine_key.is_(None),
+            *port_filter,
+        )
+        .all()
+    )
+    for global_origin in global_origins:
+        global_origin.azpanel_resource_id = resource.id
+    for origin in origins:
+        origin.azpanel_resource_id = resource.id
+    if global_origins or origins:
+        db.flush()
+        refresh_legacy_origin_mirror(db, resource)
+    return resource_bound_origins(db, resource)
+
+
 def _apply_changed_ip(db: Session, resource: AzPanelResource, new_ip: str, reason: str | None) -> tuple[str, list[dict[str, Any]]]:
     """新 IP 确认后统一落地：更新资源、同步源站、推 Xboard、催外部来源重新同步。"""
     target_info = parse_target(new_ip)
+    # 没绑定源站的资源（靠 IP 自动对应）：先把还在旧 IP 上的源站绑过来，新 IP 才有地方写。
+    # 第一次查到 IP（之前没记录）时，就按查到的 IP 找。
+    auto_bind_resource_by_ip(db, resource, resource.current_ip or target_info.value)
     resource.current_ip = target_info.value
     resource.last_change_at = datetime.utcnow()
     resource.last_error = None
@@ -895,21 +980,23 @@ def sync_resource_current_ip_to_origin(db: Session, resource: AzPanelResource) -
 
     # Global backups first: writing the global row and then its mirrors keeps the two
     # in step, the same ordering external_ips.py uses.
+    owns_port = resource_owns_port(resource)
     for global_origin in resource_bound_global_origins(db, resource):
         if global_origin.external_machine_key:
             # An external IP source already observes this machine and owns the target;
             # _apply_changed_ip marks that source due so it re-reads right away.
             continue
-        if global_origin.target != target_info.value or global_origin.target_type != target_info.target_type or global_origin.port != resource.port:
+        port = resource.port if owns_port else global_origin.port
+        if global_origin.target != target_info.value or global_origin.target_type != target_info.target_type or global_origin.port != port:
             global_origin.target = target_info.value
             global_origin.target_type = target_info.target_type
-            global_origin.port = resource.port
+            global_origin.port = port
             changed_any = True
 
     for origin in resource_bound_origins(db, resource):
         if origin.external_machine_key:
             continue
-        if _apply_resource_ip_to_origin(origin, target_info, resource.port):
+        if _apply_resource_ip_to_origin(origin, target_info, resource.port if owns_port else origin.port):
             changed_any = True
     return changed_any
 
@@ -918,7 +1005,8 @@ def _resource_current_ip_matches_origin(resource: AzPanelResource, origin: Origi
     if not resource.current_ip:
         return True
     target_info = parse_target(resource.current_ip)
-    return origin.target == target_info.value and origin.target_type == target_info.target_type and origin.port == resource.port
+    same_ip = origin.target == target_info.value and origin.target_type == target_info.target_type
+    return same_ip and (not resource_owns_port(resource) or origin.port == resource.port)
 
 
 def change_resource_ip(
@@ -1348,6 +1436,10 @@ def trigger_ip_change_for_origin(
     if not resources:
         return None
     resource = resources[0]
+    if not bound_ids:
+        # Matched by IP only: record the binding so the resource shows what it
+        # drives and the new IP is written back to this backup after the change.
+        auto_bind_resource_by_ip(db, resource, resource.current_ip)
     if guard is not None:
         if resource.id in guard.attempted_resource_ids:
             return None

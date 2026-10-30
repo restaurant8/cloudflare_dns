@@ -281,3 +281,151 @@ def test_api_requires_both_links_and_masks_them(monkeypatch):
         resource = db.get(AzPanelResource, out.id)
         resource.status_url = None
         update_azpanel_resource(out.id, AzPanelResourceUpdate(remark="x"), None, db)
+
+
+def setup_unbound(db, monkeypatch, *, origin_port=443, resource_port=22, current_ip="192.0.2.10", external=False):
+    """The user's case: the backup sits on the machine's IP but nothing is bound,
+    and the resource keeps the form's default port 22 while the backup uses 443."""
+    provider = FakeProvider(current_ip)
+    monkeypatch.setattr("app.integrations.httpx.get", provider)
+    monkeypatch.setattr("app.integrations.time.sleep", lambda *_: None)
+    monkeypatch.setattr("app.integrations.send_webhooks", lambda *args, **kwargs: None)
+    update_custom_ip_settings(db, {"enabled": True})
+    group = FailoverGroup(hostname="www.example.com", cloudflare_publish_enabled=False)
+    db.add(group)
+    db.flush()
+    origin = Origin(group_id=group.id, target=current_ip, target_type="ipv4", port=origin_port, status="blocked")
+    if external:
+        origin.external_source_id = None
+        origin.external_machine_key = "nyanpass-machine-1"
+    db.add(origin)
+    resource = AzPanelResource(
+        name="hk-vds",
+        provider="custom",
+        resource_id="custom-unbound",
+        current_ip=current_ip,
+        port=resource_port,
+        change_ip_url=encrypt_secret(CHANGE_URL),
+        status_url=encrypt_secret(STATUS_URL),
+    )
+    db.add(resource)
+    db.commit()
+    return provider, resource, origin
+
+
+def test_ip_matched_backup_is_bound_and_follows_the_new_ip(monkeypatch):
+    db = make_session()
+    provider, resource, origin = setup_unbound(db, monkeypatch)
+
+    job = trigger_ip_change_for_origin(db, origin, "blocked")
+    db.commit()
+
+    assert job is not None and job.status == "pending"
+    assert origin.azpanel_resource_id == resource.id  # now shows as "drives 1"
+    assert origin.port == 443  # a custom resource never rewrites the backup's port
+
+    provider.set_ips("198.51.100.70")
+    reconcile_pending_custom_changes(db)
+    reconcile_pending_custom_changes(db)
+    db.commit()
+
+    assert (origin.target, origin.port) == ("198.51.100.70", 443)
+    assert resource.current_ip == "198.51.100.70"
+
+
+def test_manual_change_on_unbound_resource_updates_backup_on_old_ip(monkeypatch):
+    db = make_session()
+    provider, resource, origin = setup_unbound(db, monkeypatch)
+
+    change_resource_ip(db, resource, trigger_type="manual", reason="test")
+    provider.set_ips("198.51.100.71")
+    reconcile_pending_custom_changes(db)
+    reconcile_pending_custom_changes(db)
+    db.commit()
+
+    assert origin.azpanel_resource_id == resource.id
+    assert (origin.target, origin.port) == ("198.51.100.71", 443)
+
+
+def test_first_status_query_binds_backups_on_the_found_ip(monkeypatch):
+    db = make_session()
+    provider, resource, origin = setup_unbound(db, monkeypatch)
+    resource.current_ip = None  # created without an IP, then "查询状态"
+    db.commit()
+
+    assert sync_custom_resource_status(db, resource) == "192.0.2.10"
+    db.commit()
+
+    assert origin.azpanel_resource_id == resource.id
+    assert (origin.target, origin.port) == ("192.0.2.10", 443)
+
+
+def test_backup_following_an_external_machine_is_not_taken_over(monkeypatch):
+    db = make_session()
+    provider, resource, origin = setup_unbound(db, monkeypatch, external=True)
+
+    trigger_ip_change_for_origin(db, origin, "blocked")
+    db.commit()
+
+    assert origin.azpanel_resource_id is None
+
+
+def test_explicit_binding_keeps_the_backup_port(monkeypatch):
+    from app.routes.groups import update_origin
+    from app.schemas import OriginUpdate
+
+    db = make_session()
+    provider, resource, origin = setup_unbound(db, monkeypatch)
+    monkeypatch.setattr("app.routes.groups._evaluate_locally", lambda *args, **kwargs: None)
+
+    update_origin(origin.id, OriginUpdate(azpanel_resource_id=resource.id), None, db)
+    db.refresh(origin)
+
+    assert origin.azpanel_resource_id == resource.id
+    assert origin.port == 443
+
+
+def test_status_query_repairs_backup_left_on_the_old_ip(monkeypatch):
+    """A change done before anything was bound left the backup on the old IP."""
+    db = make_session()
+    provider, resource, origin = setup_unbound(db, monkeypatch, current_ip="198.51.100.80")
+    origin.target = "192.0.2.10"  # still on the pre-change IP
+    db.add(
+        IpChangeJob(
+            trigger_type="manual",
+            status="success",
+            provider="custom",
+            azpanel_resource_id=resource.id,
+            old_ip="192.0.2.10",
+            new_ip="198.51.100.80",
+            started_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+    provider.set_ips("198.51.100.80")
+
+    sync_custom_resource_status(db, resource)
+    db.commit()
+
+    assert origin.azpanel_resource_id == resource.id
+    assert (origin.target, origin.port) == ("198.51.100.80", 443)
+
+
+def test_saving_a_custom_resource_binds_backups_on_its_ip(monkeypatch):
+    db = make_session()
+    group = FailoverGroup(hostname="www.example.com", cloudflare_publish_enabled=False)
+    db.add(group)
+    db.flush()
+    origin = Origin(group_id=group.id, target="192.0.2.10", target_type="ipv4", port=443)
+    db.add(origin)
+    db.commit()
+
+    out = create_azpanel_resource(
+        AzPanelResourceCreate(name="hk", provider="custom", current_ip="192.0.2.10", change_ip_url=CHANGE_URL, status_url=STATUS_URL),
+        None,
+        db,
+    )
+
+    assert out.bound_origin_ids == [origin.id]
+    db.refresh(origin)
+    assert origin.port == 443

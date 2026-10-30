@@ -19,7 +19,7 @@ from ..events import add_event
 from ..doh import sync_doh_endpoint, sync_group_doh_endpoint, validate_doh_hostname_conflicts
 from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records, zone_for_hostname
 from ..health import run_local_checks
-from ..integrations import azpanel_settings, refresh_legacy_origin_mirror, sync_resource_current_ip_to_origin
+from ..integrations import azpanel_settings, refresh_legacy_origin_mirror, resource_owns_port, sync_resource_current_ip_to_origin
 from ..models import Agent, AlibabaHttpDnsGroup, AzPanelRemoteResource, AzPanelResource, DohEndpoint, ExternalIpItem, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
 from ..origin_expansion import (
@@ -371,7 +371,8 @@ def _global_origin_from_payload(db: Session, collection: FailoverCollection, pay
     # azpanel/custom-API resource's current address is authoritative immediately.
     if payload.external_ip_item_id is None and resource is not None and resource.auto_update_origin and resource.current_ip:
         target = resource.current_ip
-        port = resource.port
+        if resource_owns_port(resource):
+            port = resource.port
     target_info = _parse_target_or_400(target)
     if target_info.record_type == "CNAME" and target_info.value in _collection_hostname_values(collection):
         raise HTTPException(status_code=400, detail="全局 CNAME 备用不能和当前业务分组内的主机名相同")
@@ -785,7 +786,8 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
         resource_target = _parse_target_or_400(azpanel_resource.current_ip)
         new_target = resource_target.value
         new_target_type = resource_target.target_type
-        new_port = azpanel_resource.port
+        if resource_owns_port(azpanel_resource):
+            new_port = azpanel_resource.port
 
     _ensure_global_origin_unique(
         db,
@@ -1448,7 +1450,8 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
         resource_target = _parse_target_or_400(azpanel_resource.current_ip)
         new_target = resource_target.value
         new_target_type = resource_target.target_type
-        new_port = azpanel_resource.port
+        if resource_owns_port(azpanel_resource):
+            new_port = azpanel_resource.port
     if "publish_mode" in updates and updates["publish_mode"] is not None:
         new_publish_mode = updates.pop("publish_mode")
     if new_target_type != "hostname" and new_publish_mode == EXPANDED_PUBLISH_MODE:

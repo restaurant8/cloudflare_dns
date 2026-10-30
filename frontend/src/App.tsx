@@ -6390,6 +6390,7 @@ function AzPanelPanel({
           {isCustomDraft && (
             <div className="originHint wideField">
               两个链接含口令，保存后加密存储，页面只显示打码后的地址。换 IP 后以查 IP 链接为准：新 IP 连续两次查到一致才采用。
+              通用接口按 IP 对应源站：源站地址和机器 IP 相同就会自动绑定，换 IP 后同步过去，源站端口保持不变。
             </div>
           )}
           {!editingId ? (
@@ -6415,10 +6416,12 @@ function AzPanelPanel({
               onChange={(event) => setResourceDraft((current) => ({ ...current, current_ip: event.target.value }))}
             />
           </label>
-          <label>
-            检查端口
-            <input type="number" min={1} max={65535} value={resourceDraft.port} onChange={(event) => setResourceDraft((current) => ({ ...current, port: Number(event.target.value) }))} />
-          </label>
+          {!isCustomDraft && (
+            <label>
+              检查端口
+              <input type="number" min={1} max={65535} value={resourceDraft.port} onChange={(event) => setResourceDraft((current) => ({ ...current, port: Number(event.target.value) }))} />
+            </label>
+          )}
           <label>
             冷却（秒）
             <input type="number" min={60} max={86400} value={resourceDraft.cooldown_seconds} onChange={(event) => setResourceDraft((current) => ({ ...current, cooldown_seconds: Number(event.target.value) }))} />
@@ -6479,7 +6482,7 @@ function AzPanelPanel({
               <div className="poolItemMain">
                 <strong>{resource.name}</strong>
                 <span>
-                  {resource.provider === "custom" ? "通用接口" : `${resource.provider} · ${resource.resource_id}`} · {resource.current_ip || "未记录 IP"}:{resource.port} · 尝试 {fmtDate(resource.last_attempt_at)} · 成功 {fmtDate(resource.last_change_at)}
+                  {resource.provider === "custom" ? `通用接口 · ${resource.current_ip || "未记录 IP"}` : `${resource.provider} · ${resource.resource_id} · ${resource.current_ip || "未记录 IP"}:${resource.port}`} · 尝试 {fmtDate(resource.last_attempt_at)} · 成功 {fmtDate(resource.last_change_at)}
                   {resource.provider === "custom" && resource.status_sync_interval_seconds > 0 && ` · 自动查 IP 每${resource.status_sync_interval_seconds}s`}
                 </span>
                 {resource.provider === "custom" && (

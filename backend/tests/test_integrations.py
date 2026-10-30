@@ -512,11 +512,11 @@ def test_trigger_ip_change_matches_resource_by_ip_when_port_differs(monkeypatch)
     db = make_session()
     origin = make_origin(db)  # target 192.0.2.10:22
     origin.port = 443  # 外部 IP 的入口端口，和云资源的检查端口不同
-    update_custom_ip_settings(db, {"enabled": True})
+    update_azpanel_settings(db, {"enabled": True, "base_url": "https://az.example.com", "api_token": "tok"})
     resource = AzPanelResource(
-        name="syn-861",
-        provider="custom",
-        resource_id="861",
+        name="az-vm",
+        provider="azure",
+        resource_id="vm-1",
         ip_version="ipv4",
         current_ip="192.0.2.10",
         port=22,
@@ -531,7 +531,7 @@ def test_trigger_ip_change_matches_resource_by_ip_when_port_differs(monkeypatch)
         called["id"] = res.id
         return {"new_ip": "198.51.100.9"}
 
-    monkeypatch.setattr("app.integrations.call_custom_change_ip", fake_change)
+    monkeypatch.setattr("app.integrations.call_azpanel_change_ip", fake_change)
 
     job = trigger_ip_change_for_origin(db, origin, "origin blocked")
     db.commit()
@@ -539,7 +539,9 @@ def test_trigger_ip_change_matches_resource_by_ip_when_port_differs(monkeypatch)
     assert job is not None
     assert job.status == "success"
     assert called["id"] == resource.id
-    # 资源没绑定源站：源站目标不直接改，等外部来源同步新 IP 后按绑定跟随
+    # azpanel 资源的端口就是机器端口：端口不同的源站不自动绑定、不直接改，
+    # 等外部来源同步新 IP 后按绑定跟随（通用接口只看 IP，见 test_custom_ip.py）
+    assert origin.azpanel_resource_id is None
     assert origin.target == "192.0.2.10"
 
 
