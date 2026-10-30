@@ -62,7 +62,7 @@ def _evaluate_locally(db: Session, group_ids: Collection[int]) -> None:
     """Re-evaluate only the groups this edit actually touched.
 
     Editing one origin used to evaluate *every* enabled group, which probed their
-    targets, could rotate their azpanel/SynexVM IPs, and cost one Cloudflare API
+    targets, could rotate their azpanel/custom-API IPs, and cost one Cloudflare API
     call per hostname for the steady-state drift check — seconds of latency and
     side effects on groups the user never touched. Scoping to the affected groups
     keeps the part that must stay synchronous (a deleted or edited *current*
@@ -368,7 +368,7 @@ def _global_origin_from_payload(db: Session, collection: FailoverCollection, pay
     target = payload.target
     port = payload.port
     # An external-machine binding owns the observed address. Otherwise a bound
-    # azpanel/SynexVM resource's current address is authoritative immediately.
+    # azpanel/custom-API resource's current address is authoritative immediately.
     if payload.external_ip_item_id is None and resource is not None and resource.auto_update_origin and resource.current_ip:
         target = resource.current_ip
         port = resource.port

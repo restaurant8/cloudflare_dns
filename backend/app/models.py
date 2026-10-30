@@ -477,7 +477,7 @@ class Origin(Base, TimestampMixin):
     # 不能按 item id 绑定）；来源同步到新 IP 时自动更新本源站的 target
     external_source_id: Mapped[int | None] = mapped_column(ForeignKey("external_ip_sources.id", ondelete="SET NULL"))
     external_machine_key: Mapped[str | None] = mapped_column(String(255))
-    # 绑定的 azpanel/SynexVM 云资源。绑定放在被写入的一方，一台机器才能同时驱动
+    # 绑定的 azpanel/通用接口 云资源。绑定放在被写入的一方，一台机器才能同时驱动
     # 多个备用；放在 AzPanelResource.origin_id 上时第二次绑定会覆盖第一次。
     # 故意不加外键：azpanel_resources.origin_id 仍保留，双向外键会让建表互相依赖，
     # 而且 SQLite 无法用 ALTER TABLE 补外键。
@@ -680,10 +680,13 @@ class AzPanelResource(Base, TimestampMixin):
     region: Mapped[str | None] = mapped_column(String(120))
     ip_version: Mapped[str] = mapped_column(String(10), default="ipv4", nullable=False)
     ip_change_method: Mapped[str] = mapped_column(String(20), default="eip", nullable=False)
-    # synexvm 这类按服务直连的接口：每个服务可以有自己的 API 地址和 Token，
-    # 留空则回退到全局 synexvm 设置
+    # 旧版 SynexVM 的按服务覆盖字段，已不再使用（保留列，避免改表）
     api_url: Mapped[str | None] = mapped_column(String(255))
     api_token: Mapped[str | None] = mapped_column(String(500))
+    # 通用接口（provider="custom"）：换 IP 链接和查 IP 链接，口令在链接里，加密保存
+    change_ip_url: Mapped[str | None] = mapped_column(Text)
+    status_url: Mapped[str | None] = mapped_column(Text)
+    verify_tls: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"), nullable=False)
     origin_id: Mapped[int | None] = mapped_column(ForeignKey("origins.id", ondelete="SET NULL"))
     current_ip: Mapped[str | None] = mapped_column(String(120))
     port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)

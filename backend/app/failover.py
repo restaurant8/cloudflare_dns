@@ -556,7 +556,7 @@ def evaluate_failover_groups(
     entirely — an already-published group that needs no switch then costs zero
     API calls. Drift repair stays the scheduler's job.
 
-    ``trigger_ip_changes=False`` suppresses the automatic azpanel/SynexVM IP
+    ``trigger_ip_changes=False`` suppresses the automatic azpanel/custom-API IP
     rotation for blocked origins. Editing a target must not rotate a VPS IP as a
     side effect; the scheduler still does it on its own tick.
 

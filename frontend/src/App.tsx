@@ -33,7 +33,7 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, AlibabaHttpDnsCredential, AlibabaHttpDnsEffectiveScope, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteRecord, AlibabaHttpDnsRemoteZone, AwsRoute53Credential, AwsRoute53Output, AwsRoute53PrivateZone, AwsVpc, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, SynexVmSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
+import type { Agent, AlibabaHttpDnsCredential, AlibabaHttpDnsEffectiveScope, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteRecord, AlibabaHttpDnsRemoteZone, AwsRoute53Credential, AwsRoute53Output, AwsRoute53PrivateZone, AwsVpc, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, CustomIpSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
 import {
   Sidebar,
   SidebarContent,
@@ -75,8 +75,8 @@ type ExternalIpSourceDraft = { name: string; base_url: string; token: string; de
 type SnippetDraft = { title: string; category: string; address: string; username: string; port: string; tags: string; content: string; code: string };
 type SshSettingsDraft = { enabled: boolean; external_url: string };
 type AzPanelSettingsDraft = { enabled: boolean; base_url: string; api_token: string; timeout_seconds: number; default_cooldown_seconds: number };
-type SynexVmSettingsDraft = { enabled: boolean; api_url: string; api_token: string; timeout_seconds: number; wait_seconds: number; default_cooldown_seconds: number };
-type AzPanelResourceDraft = { name: string; provider: string; resource_id: string; account_id: string; region: string; ip_version: string; ip_change_method: string; api_url: string; api_token: string; origin_id: number | ""; current_ip: string; port: number; enabled: boolean; auto_change_on_blocked: boolean; auto_update_origin: boolean; cooldown_seconds: number; status_sync_interval_seconds: number; remark: string };
+type CustomIpSettingsDraft = { enabled: boolean; timeout_seconds: number; wait_seconds: number; default_cooldown_seconds: number };
+type AzPanelResourceDraft = { name: string; provider: string; resource_id: string; account_id: string; region: string; ip_version: string; ip_change_method: string; change_ip_url: string; status_url: string; verify_tls: boolean; origin_id: number | ""; current_ip: string; port: number; enabled: boolean; auto_change_on_blocked: boolean; auto_update_origin: boolean; cooldown_seconds: number; status_sync_interval_seconds: number; remark: string };
 type XboardSettingsDraft = { enabled: boolean; base_url: string; api_token: string; timeout_seconds: number };
 type XboardNodeDraft = { name: string; xboard_node_id: number; node_type: string; host: string; port: number | ""; origin_id: number | ""; azpanel_resource_id: number | ""; enabled: boolean; auto_update_after_change: boolean; remark: string };
 type AgentEditDraft = { name: string };
@@ -539,7 +539,7 @@ export default function App() {
   const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
   const [sshSettings, setSshSettings] = useState<SshSettings | null>(null);
   const [azPanelSettings, setAzPanelSettings] = useState<AzPanelSettings | null>(null);
-  const [synexVmSettings, setSynexVmSettings] = useState<SynexVmSettings | null>(null);
+  const [customIpSettings, setCustomIpSettings] = useState<CustomIpSettings | null>(null);
   const [azPanelResources, setAzPanelResources] = useState<AzPanelResource[]>([]);
   const [ipChangeJobs, setIpChangeJobs] = useState<IpChangeJob[]>([]);
   const [events, setEvents] = useState<EventItem[]>([]);
@@ -550,7 +550,7 @@ export default function App() {
     section === "ssh"
       ? "Sshwifty 通过本项目临时会话访问"
       : section === "azpanel"
-        ? "源站被墙后调用 azpanel / SynexVM 更换公网 IP"
+        ? "源站被墙后调用 azpanel / 通用接口更换公网 IP"
         : section === "alibabaHttpDns"
           ? "独立管理移动解析 HTTPDNS 内置权威记录的故障切换"
         : selectedZone
@@ -565,7 +565,7 @@ export default function App() {
 
   async function loadAll(activeToken = token) {
     if (!activeToken) return;
-    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextDohEndpoints, nextAwsCredentials, nextAwsOutputs, nextAlibabaHttpDnsCredentials, nextAlibabaHttpDnsGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelSettings, nextSynexVmSettings, nextAzPanelResources, nextIpChangeJobs, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
+    const [nextOverview, nextCredentials, nextZones, nextCollections, nextGroups, nextDohEndpoints, nextAwsCredentials, nextAwsOutputs, nextAlibabaHttpDnsCredentials, nextAlibabaHttpDnsGroups, nextTargetPool, nextExternalIpSources, nextExternalIpItems, nextAzPanelSettings, nextCustomIpSettings, nextAzPanelResources, nextIpChangeJobs, nextSnippets, nextAgents, nextTelegram, nextWebhooks, nextSystemSettings, nextSshSettings, nextEvents] = await Promise.all([
       apiFetch<Overview>("/api/overview", activeToken),
       apiFetch<Credential[]>("/api/credentials", activeToken),
       apiFetch<Zone[]>("/api/zones", activeToken),
@@ -580,7 +580,7 @@ export default function App() {
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
       apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken),
       apiFetch<AzPanelSettings>("/api/integrations/azpanel/settings", activeToken),
-      apiFetch<SynexVmSettings>("/api/integrations/synexvm/settings", activeToken),
+      apiFetch<CustomIpSettings>("/api/integrations/custom-ip/settings", activeToken),
       apiFetch<AzPanelResource[]>("/api/integrations/azpanel/resources", activeToken),
       apiFetch<IpChangeJob[]>("/api/integrations/ip-change-jobs", activeToken),
       apiFetch<SavedSnippet[]>("/api/snippets", activeToken),
@@ -605,7 +605,7 @@ export default function App() {
     setExternalIpSources(nextExternalIpSources);
     setExternalIpItems(nextExternalIpItems);
     setAzPanelSettings(nextAzPanelSettings);
-    setSynexVmSettings(nextSynexVmSettings);
+    setCustomIpSettings(nextCustomIpSettings);
     setAzPanelResources(nextAzPanelResources);
     setIpChangeJobs(nextIpChangeJobs);
     setSnippets(nextSnippets);
@@ -1028,8 +1028,8 @@ export default function App() {
         {section === "externalIps" && (
           <ExternalIpsPanel token={token} externalIpSources={externalIpSources} externalIpItems={externalIpItems} act={act} />
         )}
-        {section === "azpanel" && azPanelSettings && synexVmSettings && (
-          <AzPanelPanel token={token} settings={azPanelSettings} synexSettings={synexVmSettings} resources={azPanelResources} groups={groups} jobs={ipChangeJobs} act={act} />
+        {section === "azpanel" && azPanelSettings && customIpSettings && (
+          <AzPanelPanel token={token} settings={azPanelSettings} customSettings={customIpSettings} resources={azPanelResources} groups={groups} jobs={ipChangeJobs} act={act} />
         )}
         {section === "snippets" && <SnippetsPanel token={token} snippets={snippets} act={act} />}
         {section === "ssh" && sshSettings && <SshPanel token={token} settings={sshSettings} act={act} />}
@@ -5148,7 +5148,7 @@ function GroupsPanel({
             )}
             {originAdd.external_ip_item_id !== "" && (
               <div className="originHint">
-                添加后会绑定这台外部机器：来源同步到它的新 IP 时，这个备用源站自动跟着更新。如果该 IP 疑似被墙且「自动换 IP」里有当前 IP 相同的云资源（azpanel / SynexVM），会自动调用换 IP，换完后外部来源会立即重新同步。
+                添加后会绑定这台外部机器：来源同步到它的新 IP 时，这个备用源站自动跟着更新。如果该 IP 疑似被墙且「自动换 IP」里有当前 IP 相同的云资源（azpanel / 通用接口），会自动调用换 IP，换完后外部来源会立即重新同步。
               </div>
             )}
             <label>
@@ -5949,7 +5949,7 @@ function ExternalIpsPanel({
 function AzPanelPanel({
   token,
   settings,
-  synexSettings,
+  customSettings,
   resources,
   groups,
   jobs,
@@ -5957,7 +5957,7 @@ function AzPanelPanel({
 }: {
   token: string;
   settings: AzPanelSettings;
-  synexSettings: SynexVmSettings;
+  customSettings: CustomIpSettings;
   resources: AzPanelResource[];
   groups: FailoverGroup[];
   jobs: IpChangeJob[];
@@ -5970,13 +5970,11 @@ function AzPanelPanel({
     timeout_seconds: settings.timeout_seconds,
     default_cooldown_seconds: settings.default_cooldown_seconds
   });
-  const [synexDraft, setSynexDraft] = useState<SynexVmSettingsDraft>({
-    enabled: synexSettings.enabled,
-    api_url: synexSettings.api_url,
-    api_token: "",
-    timeout_seconds: synexSettings.timeout_seconds,
-    wait_seconds: synexSettings.wait_seconds,
-    default_cooldown_seconds: synexSettings.default_cooldown_seconds
+  const [customDraft, setCustomDraft] = useState<CustomIpSettingsDraft>({
+    enabled: customSettings.enabled,
+    timeout_seconds: customSettings.timeout_seconds,
+    wait_seconds: customSettings.wait_seconds,
+    default_cooldown_seconds: customSettings.default_cooldown_seconds
   });
   const [editingId, setEditingId] = useState<number | null>(null);
   const emptyDraft = (): AzPanelResourceDraft => ({
@@ -5987,8 +5985,9 @@ function AzPanelPanel({
     region: "",
     ip_version: "ipv4",
     ip_change_method: "eip",
-    api_url: "",
-    api_token: "",
+    change_ip_url: "",
+    status_url: "",
+    verify_tls: true,
     origin_id: "",
     current_ip: "",
     port: 22,
@@ -6004,7 +6003,8 @@ function AzPanelPanel({
   const [remoteProvider, setRemoteProvider] = useState("azure");
   const [remoteResources, setRemoteResources] = useState<AzPanelRemoteResource[]>([]);
   const [selectedRemoteKey, setSelectedRemoteKey] = useState("");
-  const isSynexDraft = resourceDraft.provider === "synexvm";
+  const isCustomDraft = resourceDraft.provider === "custom";
+  const editingResource = editingId ? resources.find((item) => item.id === editingId) : undefined;
 
   useEffect(() => {
     setRemoteResources([]);
@@ -6022,44 +6022,41 @@ function AzPanelPanel({
   }, [settings]);
 
   useEffect(() => {
-    setSynexDraft({
-      enabled: synexSettings.enabled,
-      api_url: synexSettings.api_url,
-      api_token: "",
-      timeout_seconds: synexSettings.timeout_seconds,
-      wait_seconds: synexSettings.wait_seconds,
-      default_cooldown_seconds: synexSettings.default_cooldown_seconds
+    setCustomDraft({
+      enabled: customSettings.enabled,
+      timeout_seconds: customSettings.timeout_seconds,
+      wait_seconds: customSettings.wait_seconds,
+      default_cooldown_seconds: customSettings.default_cooldown_seconds
     });
-  }, [synexSettings]);
+  }, [customSettings]);
 
   function resourcePayload() {
-    const synex = resourceDraft.provider === "synexvm";
+    const custom = resourceDraft.provider === "custom";
     const payload: Record<string, unknown> = {
       name: resourceDraft.name.trim(),
       provider: resourceDraft.provider,
       resource_id: resourceDraft.resource_id.trim(),
-      account_id: synex ? null : resourceDraft.account_id.trim() || null,
-      region: synex ? null : resourceDraft.region.trim() || null,
+      account_id: custom ? null : resourceDraft.account_id.trim() || null,
+      region: custom ? null : resourceDraft.region.trim() || null,
       ip_version: resourceDraft.ip_version,
       ip_change_method: resourceDraft.ip_change_method || "eip",
-      api_url: synex ? resourceDraft.api_url.trim() || null : null,
+      verify_tls: resourceDraft.verify_tls,
       current_ip: resourceDraft.current_ip.trim() || null,
       port: resourceDraft.port,
       enabled: resourceDraft.enabled,
       auto_change_on_blocked: resourceDraft.auto_change_on_blocked,
       auto_update_origin: resourceDraft.auto_update_origin,
       cooldown_seconds: resourceDraft.cooldown_seconds,
-      status_sync_interval_seconds: synex ? resourceDraft.status_sync_interval_seconds : 0,
+      status_sync_interval_seconds: custom ? resourceDraft.status_sync_interval_seconds : 0,
       remark: resourceDraft.remark.trim() || null
     };
     // 创建时可顺手添加第一个绑定；编辑资源属性不能隐式清空或替换现有的一对多绑定。
     if (!editingId) {
       payload.origin_id = resourceDraft.origin_id === "" ? null : Number(resourceDraft.origin_id);
     }
-    // Token 留空表示不修改，避免编辑时把已保存的 Token 清掉
-    if (synex && resourceDraft.api_token.trim()) {
-      payload.api_token = resourceDraft.api_token.trim();
-    }
+    // 链接留空表示不修改，编辑时不会把已保存的链接清掉
+    if (custom && resourceDraft.change_ip_url.trim()) payload.change_ip_url = resourceDraft.change_ip_url.trim();
+    if (custom && resourceDraft.status_url.trim()) payload.status_url = resourceDraft.status_url.trim();
     return payload;
   }
 
@@ -6122,33 +6119,29 @@ function AzPanelPanel({
     );
   }
 
-  async function saveSynexSettings(event: FormEvent) {
+  async function saveCustomSettings(event: FormEvent) {
     event.preventDefault();
-    const payload: Record<string, string | number | boolean> = {
-      enabled: synexDraft.enabled,
-      api_url: synexDraft.api_url.trim(),
-      timeout_seconds: synexDraft.timeout_seconds,
-      wait_seconds: synexDraft.wait_seconds,
-      default_cooldown_seconds: synexDraft.default_cooldown_seconds
-    };
-    if (synexDraft.api_token.trim()) payload.api_token = synexDraft.api_token.trim();
     await act(
-      () => apiFetch("/api/integrations/synexvm/settings", token, { method: "PATCH", body: JSON.stringify(payload) }),
-      "SynexVM 设置已保存"
+      () => apiFetch("/api/integrations/custom-ip/settings", token, { method: "PATCH", body: JSON.stringify(customDraft) }),
+      "通用接口设置已保存"
     );
   }
 
   async function saveResource(event: FormEvent) {
     event.preventDefault();
-    if (!resourceDraft.resource_id.trim()) {
+    if (!isCustomDraft && !resourceDraft.resource_id.trim()) {
       await act(async () => {
-        throw new Error(isSynexDraft ? "请填写 SynexVM 服务 ID（service_id）" : "请先刷新并选择 azpanel 资源");
+        throw new Error("请先刷新并选择 azpanel 资源");
       });
       return;
     }
-    if (isSynexDraft && !/^\d+$/.test(resourceDraft.resource_id.trim())) {
+    const missingLink =
+      isCustomDraft &&
+      ((!resourceDraft.change_ip_url.trim() && !editingResource?.change_ip_url_hint) ||
+        (!resourceDraft.status_url.trim() && !editingResource?.status_url_hint));
+    if (missingLink) {
       await act(async () => {
-        throw new Error("SynexVM 服务 ID 必须是数字，例如 861");
+        throw new Error("通用接口需要同时填写换 IP 链接和查 IP 链接");
       });
       return;
     }
@@ -6168,7 +6161,7 @@ function AzPanelPanel({
   function editResource(resource: AzPanelResource) {
     setEditingId(resource.id);
     setSelectedRemoteKey("");
-    setRemoteProvider(resource.provider === "synexvm" ? "synexvm" : resource.provider === "aws" ? "aws" : "azure");
+    setRemoteProvider(resource.provider === "custom" ? "custom" : resource.provider === "aws" ? "aws" : "azure");
     setResourceDraft({
       name: resource.name,
       provider: resource.provider,
@@ -6177,8 +6170,9 @@ function AzPanelPanel({
       region: resource.region || "",
       ip_version: resource.ip_version,
       ip_change_method: resource.ip_change_method || "eip",
-      api_url: resource.api_url || "",
-      api_token: "",
+      change_ip_url: "",
+      status_url: "",
+      verify_tls: resource.verify_tls ?? true,
       origin_id: "",
       current_ip: resource.current_ip || "",
       port: resource.port,
@@ -6226,47 +6220,39 @@ function AzPanelPanel({
         </button>
       </form>
 
-      <form className="panel" onSubmit={saveSynexSettings}>
+      <form className="panel" onSubmit={saveCustomSettings}>
         <div className="panelTitle">
-          <h2>SynexVM 连接</h2>
-          <p>WHMCS pvewhmcs 面板的按服务接口（<code>action=change_ip / status</code>）。地址和 Token 都可修改，添加资源时还能按服务覆盖。</p>
+          <h2>通用换 IP 接口</h2>
+          <p>适用于“请求一个链接就换 IP、请求另一个链接返回当前 IP”的服务商。每台机器的两个链接在下方添加资源时填写。</p>
         </div>
         <div className="settingsGrid">
           <label className="inlineCheck">
-            <input type="checkbox" checked={synexDraft.enabled} onChange={(event) => setSynexDraft((current) => ({ ...current, enabled: event.target.checked }))} />
+            <input type="checkbox" checked={customDraft.enabled} onChange={(event) => setCustomDraft((current) => ({ ...current, enabled: event.target.checked }))} />
             启用自动换 IP
-          </label>
-          <label className="wideField">
-            API 地址
-            <input placeholder="https://www.synexvm.com/modules/servers/pvewhmcs/api.php" value={synexDraft.api_url} onChange={(event) => setSynexDraft((current) => ({ ...current, api_url: event.target.value }))} />
-          </label>
-          <label>
-            默认 API Token
-            <input type="password" placeholder={synexSettings.api_token_configured ? "已保存，留空不修改" : "服务的 API Token"} value={synexDraft.api_token} onChange={(event) => setSynexDraft((current) => ({ ...current, api_token: event.target.value }))} />
           </label>
           <label>
             请求超时（秒）
-            <input type="number" min={5} max={300} value={synexDraft.timeout_seconds} onChange={(event) => setSynexDraft((current) => ({ ...current, timeout_seconds: Number(event.target.value) }))} />
+            <input type="number" min={5} max={300} value={customDraft.timeout_seconds} onChange={(event) => setCustomDraft((current) => ({ ...current, timeout_seconds: Number(event.target.value) }))} />
           </label>
-          <label>
+          <label title="换 IP 后最多等多久查到新 IP；超时记为失败，但之后 6 小时内仍每分钟补查，查到就自动同步">
             等待新 IP（秒）
-            <input type="number" min={0} max={900} value={synexDraft.wait_seconds} onChange={(event) => setSynexDraft((current) => ({ ...current, wait_seconds: Number(event.target.value) }))} />
+            <input type="number" min={60} max={3600} value={customDraft.wait_seconds} onChange={(event) => setCustomDraft((current) => ({ ...current, wait_seconds: Number(event.target.value) }))} />
           </label>
           <label>
             默认冷却（秒）
-            <input type="number" min={60} max={86400} value={synexDraft.default_cooldown_seconds} onChange={(event) => setSynexDraft((current) => ({ ...current, default_cooldown_seconds: Number(event.target.value) }))} />
+            <input type="number" min={60} max={86400} value={customDraft.default_cooldown_seconds} onChange={(event) => setCustomDraft((current) => ({ ...current, default_cooldown_seconds: Number(event.target.value) }))} />
           </label>
         </div>
         <button>
           <Save size={16} />
-          <span>保存 SynexVM 设置</span>
+          <span>保存通用接口设置</span>
         </button>
       </form>
 
       <form className="panel" onSubmit={saveResource}>
         <div className="panelTitle">
           <h2>{editingId ? "修改云资源" : "添加云资源"}</h2>
-          <p>Azure / AWS 从 azpanel 拉取资源后选择；SynexVM 直接填服务 ID（service_id），换 IP 走面板的按服务接口。</p>
+          <p>Azure / AWS 从 azpanel 拉取资源后选择；通用接口直接填写服务商给的换 IP 链接和查 IP 链接。</p>
         </div>
         <div className="settingsGrid">
           <label>
@@ -6284,18 +6270,20 @@ function AzPanelPanel({
                   account_id: "",
                   region: "",
                   current_ip: "",
-                  api_url: "",
-                  api_token: "",
-                  cooldown_seconds: value === "synexvm" ? synexSettings.default_cooldown_seconds || 1800 : settings.default_cooldown_seconds || 1800
+                  change_ip_url: "",
+                  status_url: "",
+                  verify_tls: true,
+                  status_sync_interval_seconds: value === "custom" ? 300 : 0,
+                  cooldown_seconds: value === "custom" ? customSettings.default_cooldown_seconds || 1800 : settings.default_cooldown_seconds || 1800
                 }));
               }}
             >
               <option value="azure">Azure</option>
               <option value="aws">AWS</option>
-              <option value="synexvm">SynexVM</option>
+              <option value="custom">通用接口（换 IP / 查 IP 链接）</option>
             </select>
           </label>
-          {!isSynexDraft && (
+          {!isCustomDraft && (
             <div className="settingsGridActions">
               <button type="button" className="secondary" onClick={refreshRemoteResources}>
                 <RefreshCw size={16} />
@@ -6304,7 +6292,7 @@ function AzPanelPanel({
               <small>从 azpanel 拉取可用资源；已在 azpanel 删除的资源会自动从列表清理。</small>
             </div>
           )}
-          {!isSynexDraft && (
+          {!isCustomDraft && (
             <label className="wideField">
               azpanel 资源
               <select
@@ -6327,27 +6315,25 @@ function AzPanelPanel({
             名称
             <input value={resourceDraft.name} onChange={(event) => setResourceDraft((current) => ({ ...current, name: event.target.value }))} required />
           </label>
-          <label>
-            云厂商
-            <input value={resourceDraft.provider ? resourceDraft.provider.toUpperCase() : ""} readOnly />
-          </label>
-          <label>
-            {isSynexDraft ? "服务 ID（service_id）" : "资源 ID"}
-            <input
-              placeholder={isSynexDraft ? "例如 861" : "从 azpanel 资源自动带入"}
-              value={resourceDraft.resource_id}
-              readOnly={!isSynexDraft}
-              onChange={(event) => setResourceDraft((current) => ({ ...current, resource_id: event.target.value }))}
-              required
-            />
-          </label>
-          {!isSynexDraft && (
+          {!isCustomDraft && (
+            <label>
+              云厂商
+              <input value={resourceDraft.provider ? resourceDraft.provider.toUpperCase() : ""} readOnly />
+            </label>
+          )}
+          {!isCustomDraft && (
+            <label>
+              资源 ID
+              <input placeholder="从 azpanel 资源自动带入" value={resourceDraft.resource_id} readOnly />
+            </label>
+          )}
+          {!isCustomDraft && (
             <label>
               账户 ID
               <input value={resourceDraft.account_id || "未提供"} readOnly />
             </label>
           )}
-          {!isSynexDraft && (
+          {!isCustomDraft && (
             <label>
               区域
               <input value={resourceDraft.region || "未提供"} readOnly />
@@ -6355,7 +6341,14 @@ function AzPanelPanel({
           )}
           <label>
             IP 类型
-            <input value={resourceDraft.ip_version === "ipv6" ? "IPv6" : "IPv4"} readOnly />
+            {isCustomDraft ? (
+              <select value={resourceDraft.ip_version} onChange={(event) => setResourceDraft((current) => ({ ...current, ip_version: event.target.value }))}>
+                <option value="ipv4">IPv4</option>
+                <option value="ipv6">IPv6</option>
+              </select>
+            ) : (
+              <input value={resourceDraft.ip_version === "ipv6" ? "IPv6" : "IPv4"} readOnly />
+            )}
           </label>
           {resourceDraft.provider === "aws" && (
             <label>
@@ -6366,22 +6359,32 @@ function AzPanelPanel({
               </select>
             </label>
           )}
-          {isSynexDraft && (
+          {isCustomDraft && (
             <label className="wideField">
-              API 地址覆盖（可选）
-              <input placeholder="留空使用全局 SynexVM 设置" value={resourceDraft.api_url} onChange={(event) => setResourceDraft((current) => ({ ...current, api_url: event.target.value }))} />
-            </label>
-          )}
-          {isSynexDraft && (
-            <label>
-              API Token 覆盖（可选）
+              换 IP 链接
               <input
-                type="password"
-                placeholder={editingId && resources.find((item) => item.id === editingId)?.api_token_configured ? "已保存，留空不修改" : "留空使用全局 Token"}
-                value={resourceDraft.api_token}
-                onChange={(event) => setResourceDraft((current) => ({ ...current, api_token: event.target.value }))}
+                placeholder={editingResource?.change_ip_url_hint ? `已保存：${editingResource.change_ip_url_hint}，留空不修改` : "例如 https://example.com/changeip.php?token=…（请求一次就换 IP）"}
+                value={resourceDraft.change_ip_url}
+                onChange={(event) => setResourceDraft((current) => ({ ...current, change_ip_url: event.target.value }))}
+                autoComplete="off"
               />
             </label>
+          )}
+          {isCustomDraft && (
+            <label className="wideField">
+              查 IP 链接
+              <input
+                placeholder={editingResource?.status_url_hint ? `已保存：${editingResource.status_url_hint}，留空不修改` : "例如 https://example.com/getip.php?token=…（返回机器当前 IP）"}
+                value={resourceDraft.status_url}
+                onChange={(event) => setResourceDraft((current) => ({ ...current, status_url: event.target.value }))}
+                autoComplete="off"
+              />
+            </label>
+          )}
+          {isCustomDraft && (
+            <div className="originHint wideField">
+              两个链接含口令，保存后加密存储，页面只显示打码后的地址。换 IP 后以查 IP 链接为准：新 IP 连续两次查到一致才采用。
+            </div>
           )}
           {!editingId ? (
             <label>
@@ -6400,9 +6403,9 @@ function AzPanelPanel({
           <label>
             当前 IP
             <input
-              placeholder={isSynexDraft ? "可留空，保存后点“查询状态”自动带入" : "未记录"}
+              placeholder={isCustomDraft ? "可留空，保存后点“查询状态”自动带入" : "未记录"}
               value={resourceDraft.current_ip}
-              readOnly={!isSynexDraft}
+              readOnly={!isCustomDraft}
               onChange={(event) => setResourceDraft((current) => ({ ...current, current_ip: event.target.value }))}
             />
           </label>
@@ -6414,14 +6417,14 @@ function AzPanelPanel({
             冷却（秒）
             <input type="number" min={60} max={86400} value={resourceDraft.cooldown_seconds} onChange={(event) => setResourceDraft((current) => ({ ...current, cooldown_seconds: Number(event.target.value) }))} />
           </label>
-          {isSynexDraft && (
+          {isCustomDraft && (
             <label>
-              自动查询状态（秒，0 关闭）
+              自动查询 IP（秒，0 关闭）
               <input
                 type="number"
                 min={0}
                 max={86400}
-                title="定时调 status 接口同步最新 IP（兜底）。实际频率不会快于系统检查周期。"
+                title="定时请求查 IP 链接同步最新 IP（兜底）。换 IP 没确认时无论这里填多少都会自动补查。实际频率不会快于系统检查周期。"
                 value={resourceDraft.status_sync_interval_seconds}
                 onChange={(event) => setResourceDraft((current) => ({ ...current, status_sync_interval_seconds: Number(event.target.value) }))}
               />
@@ -6443,6 +6446,12 @@ function AzPanelPanel({
             <input type="checkbox" checked={resourceDraft.auto_update_origin} onChange={(event) => setResourceDraft((current) => ({ ...current, auto_update_origin: event.target.checked }))} />
             成功后更新源站
           </label>
+          {isCustomDraft && (
+            <label className="inlineCheck" title="服务商的 HTTPS 证书无效时取消勾选（相当于 curl -k）">
+              <input type="checkbox" checked={resourceDraft.verify_tls} onChange={(event) => setResourceDraft((current) => ({ ...current, verify_tls: event.target.checked }))} />
+              校验 HTTPS 证书
+            </label>
+          )}
         </div>
         <div className="rowActions">
           <button>
@@ -6456,7 +6465,7 @@ function AzPanelPanel({
       <div className="panel">
         <div className="panelTitle">
           <h2>云资源</h2>
-          <p>手动换 IP 会立即调用对应接口（Azure/AWS 走 azpanel，SynexVM 走面板接口）；自动换 IP 只在绑定源站疑似被墙时触发，机器宕机不会换 IP（换了也救不回来）。</p>
+          <p>手动换 IP 会立即调用对应接口（Azure/AWS 走 azpanel，通用接口请求换 IP 链接）；自动换 IP 只在绑定源站疑似被墙时触发，机器宕机不会换 IP（换了也救不回来）。</p>
         </div>
         <div className="poolList">
           {resources.map((resource) => (
@@ -6464,20 +6473,23 @@ function AzPanelPanel({
               <div className="poolItemMain">
                 <strong>{resource.name}</strong>
                 <span>
-                  {resource.provider} · {resource.resource_id} · {resource.current_ip || "未记录 IP"}:{resource.port} · 尝试 {fmtDate(resource.last_attempt_at)} · 成功 {fmtDate(resource.last_change_at)}
-                  {resource.provider === "synexvm" && resource.status_sync_interval_seconds > 0 && ` · 自动查状态 每${resource.status_sync_interval_seconds}s`}
+                  {resource.provider === "custom" ? "通用接口" : `${resource.provider} · ${resource.resource_id}`} · {resource.current_ip || "未记录 IP"}:{resource.port} · 尝试 {fmtDate(resource.last_attempt_at)} · 成功 {fmtDate(resource.last_change_at)}
+                  {resource.provider === "custom" && resource.status_sync_interval_seconds > 0 && ` · 自动查 IP 每${resource.status_sync_interval_seconds}s`}
                 </span>
+                {resource.provider === "custom" && (
+                  <small>换 IP：{resource.change_ip_url_hint || "未填写"} · 查 IP：{resource.status_url_hint || "未填写"}</small>
+                )}
                 <small>
                   驱动 {resource.bound_origin_ids?.length || (resource.origin_id ? 1 : 0)} 个域名备用
                   {(resource.bound_global_origin_ids?.length || 0) > 0 && ` · 其中 ${resource.bound_global_origin_ids.length} 条为业务分组全局备用`}
                 </small>
-                {resource.pending_change_at && <small className="successText">换 IP 已下发，后台查询状态中（新 IP 需连续两次查询一致才采纳，防过渡 IP）…</small>}
+                {resource.pending_change_at && <small className="successText">换 IP 已下发，后台查询新 IP 中（连续两次查到一致才采用，防止过渡 IP）…</small>}
                 {resource.last_error && <small className="danger">{resource.last_error}</small>}
               </div>
               <div className="rowActions">
                 <Status value={resource.enabled ? "enabled" : "disabled"} />
-                {resource.provider === "synexvm" && (
-                  <button className="icon secondaryIcon" title="查询状态（同步当前 IP）" onClick={() => act(() => apiFetch(`/api/integrations/azpanel/resources/${resource.id}/refresh-status`, token, { method: "POST" }), "状态已同步")}>
+                {resource.provider === "custom" && (
+                  <button className="icon secondaryIcon" title="查询状态（请求查 IP 链接，同步当前 IP）" onClick={() => act(() => apiFetch(`/api/integrations/azpanel/resources/${resource.id}/refresh-status`, token, { method: "POST" }), "状态已同步")}>
                     <Search size={15} />
                   </button>
                 )}

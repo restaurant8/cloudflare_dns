@@ -598,7 +598,7 @@ class OriginUpdate(BaseModel):
     remark: str | None = Field(default=None, max_length=500)
     enabled: bool | None = None
     ignore_health_check: bool | None = None
-    # 传 null 表示解除 azpanel/SynexVM 资源绑定；传资源 id 表示改绑。
+    # 传 null 表示解除 azpanel/通用接口 资源绑定；传资源 id 表示改绑。
     # 同一个资源可以绑定多个备用，绑定关系存放在备用一侧。
     azpanel_resource_id: int | None = None
     # 传 null 表示解除外部 IP 绑定；传 item id 表示改绑到那台机器
@@ -822,31 +822,31 @@ class AzPanelSettingsUpdate(BaseModel):
         return cleaned
 
 
-def _validate_optional_api_url(value: str | None, label: str) -> str | None:
-    """允许带路径的完整接口地址（例如 …/modules/servers/pvewhmcs/api.php）。"""
+def _validate_custom_link(value: str | None, label: str) -> str | None:
     if value is None:
-        return value
-    cleaned = value.strip().rstrip("/")
-    if not cleaned:
         return None
-    from urllib.parse import urlparse
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    from urllib.parse import urlsplit
 
-    parsed = urlparse(cleaned)
+    parsed = urlsplit(cleaned)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError(f"{label}必须是有效的 HTTP/HTTPS 地址")
+        raise ValueError(f"{label}必须是完整的 http:// 或 https:// 链接")
     return cleaned
 
 
 class AzPanelResourceBase(BaseModel):
     name: str = Field(min_length=1, max_length=160)
-    provider: Literal["azure", "aws", "synexvm"] = "azure"
-    resource_id: str = Field(min_length=1, max_length=255)
+    # custom = 通用接口：换 IP / 查 IP 各一个链接
+    provider: Literal["azure", "aws", "custom"] = "azure"
+    resource_id: str = Field(default="", max_length=255)
     account_id: str | None = Field(default=None, max_length=120)
     region: str | None = Field(default=None, max_length=120)
     ip_version: Literal["ipv4", "ipv6"] = "ipv4"
     ip_change_method: Literal["eip", "stop_start"] = "eip"
-    # synexvm 专用：按服务覆盖接口地址（留空用全局 SynexVM 设置）
-    api_url: str | None = Field(default=None, max_length=255)
+    # 通用接口：是否校验 HTTPS 证书（服务商证书无效时可关闭，相当于 curl -k）
+    verify_tls: bool = True
     origin_id: int | None = None
     current_ip: str | None = Field(default=None, max_length=120)
     port: int = Field(default=22, ge=1, le=65535)
@@ -854,37 +854,51 @@ class AzPanelResourceBase(BaseModel):
     auto_change_on_blocked: bool = True
     auto_update_origin: bool = True
     cooldown_seconds: int = Field(default=1800, ge=60, le=86400)
-    # synexvm 专用：>0 时调度器按该间隔自动查 status 同步最新 IP（0 = 关闭）
+    # 通用接口：>0 时调度器按该间隔自动查 IP 同步（0 = 关闭；换 IP 未确认时会自动补查）
     status_sync_interval_seconds: int = Field(default=0, ge=0, le=86400)
     remark: str | None = Field(default=None, max_length=500)
 
-    @field_validator("api_url")
-    @classmethod
-    def validate_api_url(cls, value: str | None) -> str | None:
-        return _validate_optional_api_url(value, "API 地址")
-
     @model_validator(mode="after")
-    def validate_synexvm_service_id(self):
-        if self.provider == "synexvm" and not self.resource_id.strip().isdigit():
-            raise ValueError("SynexVM 资源的服务 ID（service_id）必须是数字")
+    def validate_resource_id(self):
+        if self.provider != "custom" and not self.resource_id.strip():
+            raise ValueError("Azure / AWS 资源需要资源 ID，请先从 azpanel 选择资源")
         return self
 
 
 class AzPanelResourceCreate(AzPanelResourceBase):
-    # synexvm 专用：按服务覆盖 Token（留空用全局 SynexVM 设置），只写不读
-    api_token: str | None = Field(default=None, max_length=500)
+    # 通用接口：两个完整链接（含口令），只写不读，加密保存
+    change_ip_url: str | None = Field(default=None, max_length=2000)
+    status_url: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("change_ip_url")
+    @classmethod
+    def validate_change_ip_url(cls, value: str | None) -> str | None:
+        return _validate_custom_link(value, "换 IP 链接")
+
+    @field_validator("status_url")
+    @classmethod
+    def validate_status_url(cls, value: str | None) -> str | None:
+        return _validate_custom_link(value, "查 IP 链接")
+
+    @model_validator(mode="after")
+    def validate_custom_links(self):
+        if self.provider == "custom" and (not self.change_ip_url or not self.status_url):
+            raise ValueError("通用接口需要同时填写换 IP 链接和查 IP 链接")
+        return self
 
 
 class AzPanelResourceUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=160)
-    provider: Literal["azure", "aws", "synexvm"] | None = None
-    resource_id: str | None = Field(default=None, min_length=1, max_length=255)
+    provider: Literal["azure", "aws", "custom"] | None = None
+    resource_id: str | None = Field(default=None, max_length=255)
     account_id: str | None = Field(default=None, max_length=120)
     region: str | None = Field(default=None, max_length=120)
     ip_version: Literal["ipv4", "ipv6"] | None = None
     ip_change_method: Literal["eip", "stop_start"] | None = None
-    api_url: str | None = Field(default=None, max_length=255)
-    api_token: str | None = Field(default=None, max_length=500)
+    verify_tls: bool | None = None
+    # 留空表示不修改已保存的链接
+    change_ip_url: str | None = Field(default=None, max_length=2000)
+    status_url: str | None = Field(default=None, max_length=2000)
     origin_id: int | None = None
     current_ip: str | None = Field(default=None, max_length=120)
     port: int | None = Field(default=None, ge=1, le=65535)
@@ -895,10 +909,15 @@ class AzPanelResourceUpdate(BaseModel):
     status_sync_interval_seconds: int | None = Field(default=None, ge=0, le=86400)
     remark: str | None = Field(default=None, max_length=500)
 
-    @field_validator("api_url")
+    @field_validator("change_ip_url")
     @classmethod
-    def validate_api_url(cls, value: str | None) -> str | None:
-        return _validate_optional_api_url(value, "API 地址")
+    def validate_change_ip_url(cls, value: str | None) -> str | None:
+        return _validate_custom_link(value, "换 IP 链接")
+
+    @field_validator("status_url")
+    @classmethod
+    def validate_status_url(cls, value: str | None) -> str | None:
+        return _validate_custom_link(value, "查 IP 链接")
 
 
 class AzPanelResourceOut(AzPanelResourceBase):
@@ -906,7 +925,9 @@ class AzPanelResourceOut(AzPanelResourceBase):
     # origin_id 仅为旧客户端保留；完整的一对多绑定由下面两个列表表达。
     bound_origin_ids: list[int] = Field(default_factory=list)
     bound_global_origin_ids: list[int] = Field(default_factory=list)
-    api_token_configured: bool = False
+    # 只返回链接的域名和路径，口令部分打码
+    change_ip_url_hint: str | None = None
+    status_url_hint: str | None = None
     pending_change_at: datetime | None = None
     last_status_sync_at: datetime | None = None
     last_attempt_at: datetime | None
@@ -963,31 +984,19 @@ class XboardSettingsUpdate(BaseModel):
         return cleaned
 
 
-class SynexVmSettingsOut(BaseModel):
+class CustomIpSettingsOut(BaseModel):
     enabled: bool = False
-    api_url: str = ""
-    api_token_configured: bool = False
     timeout_seconds: int = 30
-    wait_seconds: int = 120
+    wait_seconds: int = 600
     default_cooldown_seconds: int = 1800
 
 
-class SynexVmSettingsUpdate(BaseModel):
+class CustomIpSettingsUpdate(BaseModel):
     enabled: bool | None = None
-    api_url: str | None = Field(default=None, max_length=255)
-    api_token: str | None = Field(default=None, max_length=500)
     timeout_seconds: int | None = Field(default=None, ge=5, le=300)
-    # 换 IP 下发后轮询 status 等新 IP 的最长时间；0 表示不等待
-    wait_seconds: int | None = Field(default=None, ge=0, le=900)
+    # 换 IP 下发后等新 IP 的最长时间；超时记失败，但之后仍会继续补查
+    wait_seconds: int | None = Field(default=None, ge=60, le=3600)
     default_cooldown_seconds: int | None = Field(default=None, ge=60, le=86400)
-
-    @field_validator("api_url")
-    @classmethod
-    def validate_api_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        # 清空表示回退到内置默认地址
-        return _validate_optional_api_url(value, "SynexVM API 地址") or ""
 
 
 class XboardNodeBindingBase(BaseModel):

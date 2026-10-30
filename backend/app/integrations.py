@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy.orm import Session
@@ -27,19 +28,21 @@ XBOARD_BASE_URL = "xboard.base_url"
 XBOARD_API_TOKEN = "xboard.api_token"
 XBOARD_TIMEOUT = "xboard.timeout_seconds"
 
-# SynexVM（WHMCS pvewhmcs 面板）按服务直连接口。地址和 Token 都可配置：
-# 全局设置提供默认值，AzPanelResource.api_url / api_token 可按服务覆盖。
-SYNEXVM_ENABLED = "synexvm.enabled"
-SYNEXVM_API_URL = "synexvm.api_url"
-SYNEXVM_API_TOKEN = "synexvm.api_token"
-SYNEXVM_TIMEOUT = "synexvm.timeout_seconds"
-SYNEXVM_WAIT = "synexvm.wait_seconds"
-SYNEXVM_DEFAULT_COOLDOWN = "synexvm.default_cooldown_seconds"
-
-SYNEXVM_DEFAULT_API_URL = "https://www.synexvm.com/modules/servers/pvewhmcs/api.php"
-SYNEXVM_POLL_INTERVAL_SECONDS = 5
-# 手动"查询状态"时两次读取之间的间隔：新 IP 必须两次一致才采纳，防止过渡 IP
-SYNEXVM_MANUAL_CONFIRM_DELAY_SECONDS = 3
+# 通用换 IP 接口：每台机器填两个完整链接（换 IP、查 IP），口令写在链接里，
+# 加密保存。适用于任何"请求一个链接就换 IP / 返回当前 IP"的服务商。
+CUSTOM_IP_PROVIDER = "custom"
+CUSTOM_IP_ENABLED = "custom_ip.enabled"
+CUSTOM_IP_TIMEOUT = "custom_ip.timeout_seconds"
+CUSTOM_IP_WAIT = "custom_ip.wait_seconds"
+CUSTOM_IP_DEFAULT_COOLDOWN = "custom_ip.default_cooldown_seconds"
+CUSTOM_IP_DEFAULT_WAIT_SECONDS = 600
+# 新 IP 必须连续两次读取一致才采纳（防止换 IP 过程中的过渡 IP）。
+# 手动查询 / 换 IP 前的核对在同一次请求里读两次，这是两次之间的间隔。
+CUSTOM_IP_CONFIRM_DELAY_SECONDS = 3
+# 换 IP 超过等待时长仍未查到新 IP 时记为失败，但之后这么久内继续每轮查询，
+# 机器晚些拿到新 IP 也能自动同步上（以前就是这里放弃得太早，经常拿不到新 IP）。
+CUSTOM_IP_LATE_WATCH_SECONDS = 6 * 60 * 60
+CUSTOM_IP_LATE_WATCH_INTERVAL_SECONDS = 60
 
 IP_RE = re.compile(r"(?:(?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]{2,})")
 
@@ -113,14 +116,12 @@ def xboard_settings(db: Session) -> dict[str, Any]:
     }
 
 
-def synexvm_settings(db: Session) -> dict[str, Any]:
+def custom_ip_settings(db: Session) -> dict[str, Any]:
     return {
-        "enabled": _bool_setting(db, SYNEXVM_ENABLED),
-        "api_url": get_setting(db, SYNEXVM_API_URL, "") or SYNEXVM_DEFAULT_API_URL,
-        "api_token_configured": bool(get_setting(db, SYNEXVM_API_TOKEN)),
-        "timeout_seconds": _int_setting(db, SYNEXVM_TIMEOUT, 30),
-        "wait_seconds": _int_setting(db, SYNEXVM_WAIT, 120),
-        "default_cooldown_seconds": _int_setting(db, SYNEXVM_DEFAULT_COOLDOWN, 1800),
+        "enabled": _bool_setting(db, CUSTOM_IP_ENABLED),
+        "timeout_seconds": _int_setting(db, CUSTOM_IP_TIMEOUT, 30),
+        "wait_seconds": _int_setting(db, CUSTOM_IP_WAIT, CUSTOM_IP_DEFAULT_WAIT_SECONDS),
+        "default_cooldown_seconds": _int_setting(db, CUSTOM_IP_DEFAULT_COOLDOWN, 1800),
     }
 
 
@@ -150,20 +151,16 @@ def update_xboard_settings(db: Session, updates: dict[str, Any]) -> dict[str, An
     return xboard_settings(db)
 
 
-def update_synexvm_settings(db: Session, updates: dict[str, Any]) -> dict[str, Any]:
+def update_custom_ip_settings(db: Session, updates: dict[str, Any]) -> dict[str, Any]:
     if "enabled" in updates and updates["enabled"] is not None:
-        set_setting(db, SYNEXVM_ENABLED, "1" if updates["enabled"] else "0")
-    if "api_url" in updates and updates["api_url"] is not None:
-        set_setting(db, SYNEXVM_API_URL, str(updates["api_url"]).strip().rstrip("/"))
-    if "api_token" in updates and updates["api_token"] is not None and updates["api_token"] != "":
-        set_setting(db, SYNEXVM_API_TOKEN, encrypt_secret(str(updates["api_token"]).strip()))
+        set_setting(db, CUSTOM_IP_ENABLED, "1" if updates["enabled"] else "0")
     if "timeout_seconds" in updates and updates["timeout_seconds"] is not None:
-        set_setting(db, SYNEXVM_TIMEOUT, str(int(updates["timeout_seconds"])))
+        set_setting(db, CUSTOM_IP_TIMEOUT, str(int(updates["timeout_seconds"])))
     if "wait_seconds" in updates and updates["wait_seconds"] is not None:
-        set_setting(db, SYNEXVM_WAIT, str(int(updates["wait_seconds"])))
+        set_setting(db, CUSTOM_IP_WAIT, str(int(updates["wait_seconds"])))
     if "default_cooldown_seconds" in updates and updates["default_cooldown_seconds"] is not None:
-        set_setting(db, SYNEXVM_DEFAULT_COOLDOWN, str(int(updates["default_cooldown_seconds"])))
-    return synexvm_settings(db)
+        set_setting(db, CUSTOM_IP_DEFAULT_COOLDOWN, str(int(updates["default_cooldown_seconds"])))
+    return custom_ip_settings(db)
 
 
 def _raise_for_status_with_body(response: httpx.Response, label: str) -> None:
@@ -225,10 +222,6 @@ def _xboard_token(db: Session) -> str:
     return _decrypt_setting(get_setting(db, XBOARD_API_TOKEN))
 
 
-def _synexvm_token(db: Session) -> str:
-    return _decrypt_setting(get_setting(db, SYNEXVM_API_TOKEN))
-
-
 def call_azpanel_change_ip(db: Session, resource: AzPanelResource, reason: str | None = None) -> dict[str, Any]:
     settings = azpanel_settings(db)
     if not settings["enabled"]:
@@ -266,142 +259,182 @@ def call_azpanel_change_ip(db: Session, resource: AzPanelResource, reason: str |
     return data
 
 
-def _synexvm_connection(db: Session, resource: AzPanelResource) -> tuple[dict[str, Any], str, str]:
-    """解析资源实际使用的 SynexVM 接口地址和 Token（资源覆盖 > 全局设置）。"""
-    settings = synexvm_settings(db)
-    api_url = (resource.api_url or "").strip() or settings["api_url"]
-    token = _decrypt_setting(resource.api_token or "") or _synexvm_token(db)
-    if not api_url:
-        raise RuntimeError("SynexVM API 地址未配置")
-    if not token:
-        raise RuntimeError("SynexVM API Token 未配置（资源和全局设置都为空）")
-    return settings, api_url, token
+def custom_url_hint(encrypted_url: str | None) -> str | None:
+    """Show where a stored link points without revealing its query (the tokens)."""
+    url = _decrypt_setting(encrypted_url or "")
+    if not url:
+        return None
+    parts = urlsplit(url)
+    suffix = "?••••••" if parts.query else ""
+    return f"{parts.scheme}://{parts.netloc}{parts.path}{suffix}"
 
 
-def _synexvm_request(api_url: str, action: str, service_id: str, token: str, timeout: int) -> dict[str, Any]:
-    response = httpx.get(
-        api_url,
-        params={"action": action, "service_id": service_id, "token": token},
-        timeout=timeout,
-        follow_redirects=True,
-    )
-    # 不复用 _raise_for_status_with_body：它会把带 token 的完整 URL 写进错误
-    # 信息，进而进入任务记录 / 事件 / webhook，造成泄漏。
-    if not response.is_success:
-        body = (response.text or "").strip()
-        if len(body) > 500:
-            body = body[:500] + "…"
-        detail = f": {body}" if body else ""
-        raise RuntimeError(f"SynexVM {action} (service {service_id}) 返回 HTTP {response.status_code}{detail}")
-    try:
-        payload = response.json()
-    except Exception:
-        body = (response.text or "").strip()
-        if len(body) > 200:
-            body = body[:200] + "…"
-        raise RuntimeError(f"SynexVM {action} (service {service_id}) 返回的不是 JSON: {body or '空响应'}")
-    if isinstance(payload, dict) and payload.get("success") is False:
-        message = str(payload.get("message") or payload.get("error") or payload)
-        if len(message) > 300:
-            message = message[:300] + "…"
-        raise RuntimeError(f"SynexVM {action} (service {service_id}) 调用失败: {message}")
-    return payload if isinstance(payload, dict) else {}
+def _custom_url(resource: AzPanelResource, kind: str) -> str:
+    encrypted = resource.change_ip_url if kind == "change" else resource.status_url
+    url = _decrypt_setting(encrypted or "")
+    if not url:
+        label = "换 IP 链接" if kind == "change" else "查 IP 链接"
+        raise RuntimeError(f"{resource.name} 未填写{label}")
+    return url
 
 
-def _synexvm_payload_ip(payload: dict[str, Any], ip_version: str = "ipv4") -> str | None:
-    data = _extract_payload(payload)
-    vm = data.get("vm")
-    if isinstance(vm, dict):
-        data = {**data, **vm}
-    preferred = data.get(ip_version)
-    if isinstance(preferred, str) and preferred.strip():
-        return preferred.strip()
-    return _extract_ip(data)
+def _custom_request(db: Session, resource: AzPanelResource, kind: str) -> str:
+    """GET one of the resource's links and return the response body.
 
-
-def call_synexvm_status(db: Session, resource: AzPanelResource) -> dict[str, Any]:
-    settings, api_url, token = _synexvm_connection(db, resource)
-    return _synexvm_request(api_url, "status", resource.resource_id, token, settings["timeout_seconds"])
-
-
-def sync_synexvm_resource_status(db: Session, resource: AzPanelResource) -> dict[str, Any]:
-    """查询 status 接口并把面板上的当前 IP 同步到资源和绑定源站。
-
-    发现 IP 和本地记录不一致时会隔几秒再读一次，两次一致才采纳——
-    换 IP 过程中 status 可能短暂返回过渡 IP，不能当成最终地址。
+    Errors never include the link itself: the query string carries the tokens and
+    error text ends up in job records, events and notifications.
     """
-    payload = call_synexvm_status(db, resource)
-    panel_ip = _synexvm_payload_ip(payload, resource.ip_version)
-    if panel_ip and panel_ip != resource.current_ip:
-        time.sleep(SYNEXVM_MANUAL_CONFIRM_DELAY_SECONDS)
-        second_payload = call_synexvm_status(db, resource)
-        second_ip = _synexvm_payload_ip(second_payload, resource.ip_version)
-        if second_ip != panel_ip:
-            raise RuntimeError(
-                f"面板返回的 IP 尚未稳定（{panel_ip} → {second_ip or '未知'}），换 IP 可能还在进行中，请稍后再试"
-            )
-        payload = second_payload
-        target_info = parse_target(panel_ip)
-        if target_info.target_type not in {"ipv4", "ipv6"}:
-            raise RuntimeError(f"SynexVM status 返回的 IP 无法识别: {panel_ip}")
-        resource.pending_candidate_ip = None
-        resource.last_status_sync_at = datetime.utcnow()
-        if resource.pending_change_at is not None:
-            old_ip = resource.current_ip
-            applied_ip, _ = _apply_changed_ip(db, resource, target_info.value, reason="synexvm status refresh confirmed")
-            _finish_pending_job(db, resource, applied_ip, None)
-            event_payload = ip_change_event_payload(
-                db, resource, old_ip=old_ip, new_ip=applied_ip, trigger_type="manual_status_refresh"
-            )
-            add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {applied_ip}", event_payload)
-            send_webhooks(db, "azpanel.ip_changed", event_payload)
-        else:
-            old_ip = resource.current_ip
-            try:
-                applied_ip, _ = _apply_changed_ip(db, resource, target_info.value, reason="synexvm manual status refresh")
-            except ValueError as exc:
-                resource.last_error = f"远端 IP 无法同步到源站: {exc}"
-            else:
-                resource.last_error = None
-                event_payload = ip_change_event_payload(
-                    db, resource, old_ip=old_ip, new_ip=applied_ip, trigger_type="manual_status_refresh"
-                )
-                add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {applied_ip}", event_payload)
-                send_webhooks(db, "azpanel.ip_changed", event_payload)
-        db.flush()
-    return payload
-
-
-def call_synexvm_change_ip(db: Session, resource: AzPanelResource, reason: str | None = None) -> dict[str, Any]:
-    settings, api_url, token = _synexvm_connection(db, resource)
-    if not settings["enabled"]:
-        raise RuntimeError("SynexVM integration is disabled")
-
-    old_ip = (resource.current_ip or "").strip()
-    # 本地记录的 IP 可能过期，先问面板拿准确的旧 IP；查不到不阻塞换 IP
+    url = _custom_url(resource, kind)
+    label = "换 IP 接口" if kind == "change" else "查 IP 接口"
+    host = urlsplit(url).netloc
+    timeout = custom_ip_settings(db)["timeout_seconds"]
     try:
-        status_payload = _synexvm_request(api_url, "status", resource.resource_id, token, settings["timeout_seconds"])
-        panel_ip = _synexvm_payload_ip(status_payload, resource.ip_version)
-        if panel_ip:
-            old_ip = panel_ip
+        response = httpx.get(url, timeout=timeout, follow_redirects=True, verify=bool(resource.verify_tls))
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"{label}（{host}）请求失败：{type(exc).__name__}") from None
+    if not response.is_success:
+        body = _readable_body(response.text)
+        detail = f"：{body}" if body else ""
+        raise RuntimeError(f"{label}（{host}）返回 HTTP {response.status_code}{detail}")
+    return response.text or ""
+
+
+def _readable_body(text: str | None, limit: int = 200) -> str:
+    """Response text for an error message; an HTML page is reduced to its words."""
+    body = (text or "").strip()
+    if body.startswith("<"):
+        body = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", body, flags=re.S | re.I)
+        body = re.sub(r"<[^>]+>", " ", body)
+    body = re.sub(r"\s+", " ", body).strip()
+    return body[:limit] + "…" if len(body) > limit else body
+
+
+def _ips_in_text(text: str) -> list[str]:
+    found: list[str] = []
+    for match in IP_RE.findall(text or ""):
+        try:
+            info = parse_target(match)
+        except ValueError:
+            continue
+        if info.target_type in {"ipv4", "ipv6"} and info.value not in found:
+            found.append(info.value)
+    return found
+
+
+def parse_custom_ip(body: str, ip_version: str = "ipv4") -> str | None:
+    """Read the machine's IP from a response: plain text (just the IP) or JSON.
+
+    Returns None when no IP, or more than one candidate of the wanted family, is
+    found — guessing between "old" and "new" in a message would publish the wrong one.
+    """
+    text = (body or "").strip()
+    data: Any = None
+    if text[:1] in {"{", "["}:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+    if isinstance(data, dict):
+        if data.get("success") is False or data.get("status") in {"error", "fail", "failed"}:
+            message = str(data.get("message") or data.get("msg") or data.get("error") or text)[:300]
+            raise RuntimeError(f"接口返回失败：{message}")
+        payload = _extract_payload(data)
+        vm = payload.get("vm")
+        if isinstance(vm, dict):
+            payload = {**payload, **vm}
+        preferred = payload.get(ip_version)
+        if isinstance(preferred, str) and preferred.strip():
+            return parse_target(preferred.strip()).value
+        found = _extract_ip(payload)
+        return parse_target(found).value if found else None
+    family = 6 if ip_version == "ipv6" else 4
+    candidates = [ip for ip in _ips_in_text(text) if (":" in ip) == (family == 6)]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def read_custom_ip(db: Session, resource: AzPanelResource) -> str:
+    body = _custom_request(db, resource, "status")
+    ip = parse_custom_ip(body, resource.ip_version)
+    if not ip:
+        snippet = _readable_body(body) or "空响应"
+        raise RuntimeError(f"查 IP 接口没有返回可识别的{'IPv6' if resource.ip_version == 'ipv6' else 'IPv4'} 地址：{snippet}")
+    return ip
+
+
+def read_stable_custom_ip(db: Session, resource: AzPanelResource) -> str:
+    """Read twice a few seconds apart; a changed IP must read the same both times."""
+    first = read_custom_ip(db, resource)
+    if first == (resource.current_ip or ""):
+        return first
+    time.sleep(CUSTOM_IP_CONFIRM_DELAY_SECONDS)
+    second = read_custom_ip(db, resource)
+    if second != first:
+        raise RuntimeError(f"查到的 IP 还不稳定（{first} → {second}），可能正在换 IP，请稍后再试")
+    return second
+
+
+def _adopt_custom_ip(db: Session, resource: AzPanelResource, new_ip: str, *, trigger_type: str, reason: str) -> str:
+    old_ip = resource.current_ip
+    applied_ip, _ = _apply_changed_ip(db, resource, new_ip, reason=reason)
+    resource.pending_candidate_ip = None
+    payload = ip_change_event_payload(db, resource, old_ip=old_ip, new_ip=applied_ip, trigger_type=trigger_type)
+    add_event(db, "azpanel.ip_changed", "info", f"{resource.name} 的 IP 已更新为 {applied_ip}", payload)
+    send_webhooks(db, "azpanel.ip_changed", payload)
+    return applied_ip
+
+
+def sync_custom_resource_status(db: Session, resource: AzPanelResource) -> str:
+    """「查询状态」：读取机器当前 IP，变了就同步到资源和绑定源站。"""
+    ip = read_stable_custom_ip(db, resource)
+    resource.last_status_sync_at = datetime.utcnow()
+    resource.pending_candidate_ip = None
+    if ip != (resource.current_ip or ""):
+        was_pending = resource.pending_change_at is not None
+        try:
+            applied = _adopt_custom_ip(db, resource, ip, trigger_type="manual_status_refresh", reason="manual status refresh")
+        except ValueError as exc:
+            resource.last_error = f"查到的 IP 无法同步到源站: {exc}"
+        else:
+            if was_pending:
+                _finish_pending_job(db, resource, applied, None)
+            else:
+                _finish_late_job(db, resource, applied)
+    else:
+        resource.last_error = None
+    db.flush()
+    return ip
+
+
+def call_custom_change_ip(
+    db: Session,
+    resource: AzPanelResource,
+    reason: str | None = None,
+    *,
+    adopt_if_changed: bool = False,
+) -> dict[str, Any]:
+    if not custom_ip_settings(db)["enabled"]:
+        raise RuntimeError("通用换 IP 接口未启用")
+    old_ip = (resource.current_ip or "").strip()
+    # 先查一次：本地记录可能过期，拿到机器真实的旧 IP。自动触发时如果机器的 IP
+    # 早就变了（例如上次换 IP 晚到），直接采用，不再重复换。
+    try:
+        panel_ip = read_stable_custom_ip(db, resource)
     except Exception:
-        pass
-
-    result = _synexvm_request(api_url, "change_ip", resource.resource_id, token, settings["timeout_seconds"])
-    data = _extract_payload(result)
-    # change_ip 的响应可能只是调度结果，里面的 IP 不一定是面板最终应用的 IP。
-    # 只把它保留为提示；资源 current_ip 和成功记录一律以 status 回读为准，
-    # 否则会出现资源卡片与最近换 IP 记录显示不同地址。
-    reported_ip = _synexvm_payload_ip(result, resource.ip_version)
-    data.pop("new_ip", None)
-    if reported_ip and reported_ip != old_ip:
-        data["reported_new_ip"] = reported_ip
-
-    # 刚下发时 status 可能返回一个过渡 IP（看着变了、其实不是最终地址），
-    # "立刻拿到的 IP"一律不信。统一返回 pending，由调度器双读确认后才落地：
-    # 新 IP 必须在连续两个周期的 status 查询里保持一致。
-    data["pending"] = True
-    data["old_ip"] = old_ip or None
+        panel_ip = None
+    if panel_ip and panel_ip != old_ip:
+        if adopt_if_changed:
+            return {"new_ip": panel_ip, "old_ip": old_ip or None, "adopted_without_change": True}
+        old_ip = panel_ip
+    body = _custom_request(db, resource, "change")
+    # 换 IP 接口返回的内容各家不同，里面的 IP 也不一定是最终地址，只作记录；
+    # 新 IP 一律以查 IP 接口连续两次一致为准。
+    data: dict[str, Any] = {"pending": True, "old_ip": old_ip or None, "response": _readable_body(body, 300)}
+    try:
+        hinted = parse_custom_ip(body, resource.ip_version)
+    except RuntimeError as exc:
+        raise RuntimeError(f"换 IP {exc}") from None
+    if hinted and hinted != old_ip:
+        data["reported_new_ip"] = hinted
     return data
 
 
@@ -929,13 +962,13 @@ def change_resource_ip(
     db.flush()
 
     try:
-        if resource.provider == "synexvm":
-            result = call_synexvm_change_ip(db, resource, reason=reason)
+        if resource.provider == CUSTOM_IP_PROVIDER:
+            result = call_custom_change_ip(db, resource, reason=reason, adopt_if_changed=trigger_type != "manual")
         else:
             result = call_azpanel_change_ip(db, resource, reason=reason)
 
         if result.get("pending") and not result.get("new_ip"):
-            # 换 IP 已下发但新 IP 还没确认（SynexVM 生效慢）。不判失败：标记 pending，
+            # 换 IP 已下发但新 IP 还没确认（服务商生效慢）。不判失败：标记 pending，
             # 由调度器后台查 status 补新 IP；同时催外部来源重新同步，绑定了这台机器的
             # 备用目标会通过 nyanpass 的新 IP 恢复。
             resource.pending_change_at = datetime.utcnow()
@@ -1002,123 +1035,162 @@ def _finish_pending_job(db: Session, resource: AzPanelResource, new_ip: str | No
         job.error = error
 
 
-def reconcile_pending_synexvm_changes(db: Session) -> int:
-    """调度器每个周期调用：对 pending 的 SynexVM 资源查 status 补新 IP。
+def _pending_job(db: Session, resource: AzPanelResource) -> IpChangeJob | None:
+    return (
+        db.query(IpChangeJob)
+        .filter(IpChangeJob.azpanel_resource_id == resource.id, IpChangeJob.status == "pending")
+        .order_by(IpChangeJob.id.desc())
+        .first()
+    )
 
-    change_ip 下发后新 IP 往往几分钟才在 status 生效，所以下发时只标记 pending，
-    这里非阻塞地轮询 status，拿到新 IP 就落地（更新资源/源站/Xboard/外部来源），
-    超过 wait_seconds 预算仍没结果就放弃并记失败。
+
+def _known_old_ips(db: Session, resource: AzPanelResource) -> set[str]:
+    """IPs that mean "not changed yet": the stored one and the one read before the change.
+
+    Comparing only against the stored IP was a bug: when it was stale, the machine's
+    real old IP looked "new", got confirmed at once, and the actual new IP was missed.
     """
+    known = {resource.current_ip or ""}
+    job = _pending_job(db, resource)
+    if job is not None:
+        known.add(job.old_ip or "")
+        try:
+            response = json.loads(job.response_json or "{}")
+        except ValueError:
+            response = {}
+        if isinstance(response, dict):
+            known.add(str(response.get("old_ip") or ""))
+    known.discard("")
+    return known
+
+
+def _finish_late_job(db: Session, resource: AzPanelResource, new_ip: str) -> None:
+    """A change that timed out did happen after all: mark its job as succeeded."""
+    job = (
+        db.query(IpChangeJob)
+        .filter(IpChangeJob.azpanel_resource_id == resource.id, IpChangeJob.status == "failed")
+        .order_by(IpChangeJob.id.desc())
+        .first()
+    )
+    if job is None or job.new_ip or not resource.last_attempt_at or job.started_at < resource.last_attempt_at:
+        return
+    job.status = "success"
+    job.new_ip = new_ip
+    job.error = "超过等待时长后才查到新 IP，已自动同步"
+
+
+def reconcile_pending_custom_changes(db: Session) -> int:
+    """调度器每个周期调用：对已下发换 IP 的资源查 IP，连续两次一致才落地新 IP。"""
     resources = (
         db.query(AzPanelResource)
-        .filter(AzPanelResource.provider == "synexvm", AzPanelResource.pending_change_at.isnot(None))
+        .filter(AzPanelResource.provider == CUSTOM_IP_PROVIDER, AzPanelResource.pending_change_at.isnot(None))
         .all()
     )
     if not resources:
         return 0
-    settings = synexvm_settings(db)
-    budget = max(settings["wait_seconds"], 60)
+    budget = max(custom_ip_settings(db)["wait_seconds"], 60)
     now = datetime.utcnow()
     resolved = 0
     for resource in resources:
         try:
-            payload = call_synexvm_status(db, resource)
-        except Exception:
-            payload = None
-        new_ip = _synexvm_payload_ip(payload, resource.ip_version) if payload else None
-        if new_ip and new_ip != (resource.current_ip or "") and new_ip == resource.pending_candidate_ip:
-            # 连续两个周期读到同一个新 IP，确认稳定，才真正落地。
-            # 换 IP 刚下发时 status 可能短暂返回过渡 IP，只见过一次的地址不能信。
-            resource.pending_candidate_ip = None
-            old_ip = resource.current_ip
-            applied_ip, xboard_results = _apply_changed_ip(db, resource, new_ip, reason="synexvm pending change confirmed")
-            _finish_pending_job(db, resource, applied_ip, None)
-            payload_evt = ip_change_event_payload(
-                db, resource, old_ip=old_ip, new_ip=applied_ip, trigger_type="auto_reconcile"
-            )
-            add_event(db, "azpanel.ip_changed", "info", f"{resource.name} changed IP to {applied_ip}", payload_evt)
-            send_webhooks(db, "azpanel.ip_changed", payload_evt)
+            new_ip = read_custom_ip(db, resource)
+        except Exception as exc:
+            new_ip = None
+            resource.last_error = f"换 IP 后查询中：{exc}"
+        old_ips = _known_old_ips(db, resource)
+        if new_ip and new_ip not in old_ips and new_ip == resource.pending_candidate_ip:
+            try:
+                applied = _adopt_custom_ip(db, resource, new_ip, trigger_type="auto_reconcile", reason="pending change confirmed")
+            except ValueError as exc:
+                resource.last_error = f"新 IP 无法同步到源站: {exc}"
+                continue
+            _finish_pending_job(db, resource, applied, None)
             resolved += 1
-        elif new_ip and new_ip != (resource.current_ip or ""):
+        elif new_ip and new_ip not in old_ips:
             # 第一次见到这个新 IP：先记为候选，下个周期再读一次一致才采纳
             resource.pending_candidate_ip = new_ip
-        elif resource.pending_change_at and (now - resource.pending_change_at).total_seconds() > budget:
+        elif (now - resource.pending_change_at).total_seconds() > budget:
             resource.pending_change_at = None
             resource.pending_candidate_ip = None
-            message = f"换 IP 已下发但 {int(budget)} 秒内 status 未返回新 IP，请在 SynexVM 面板确认"
+            job = _pending_job(db, resource)
+            hint = ""
+            if job is not None:
+                try:
+                    response = json.loads(job.response_json or "{}")
+                except ValueError:
+                    response = {}
+                if isinstance(response, dict) and response.get("response"):
+                    hint = f"；换 IP 接口当时返回：{response['response']}"
+            message = (
+                f"换 IP 已下发，但 {int(budget)} 秒内没查到新 IP{hint}。"
+                f"之后 {CUSTOM_IP_LATE_WATCH_SECONDS // 3600} 小时内仍会每分钟查询，查到会自动同步"
+            )
             resource.last_error = message
             _finish_pending_job(db, resource, None, message)
-            payload_evt = ip_change_event_payload(
-                db,
-                resource,
-                old_ip=resource.current_ip,
-                trigger_type="auto_reconcile",
-                error=message,
-            )
-            add_event(db, "azpanel.ip_change_failed", "warning", f"{resource.name} IP change unconfirmed: {message}", payload_evt)
-        elif new_ip:
-            # 面板又报回旧 IP：之前的候选是过渡值，作废重来
-            resource.pending_candidate_ip = None
+            payload = ip_change_event_payload(db, resource, old_ip=resource.current_ip, trigger_type="auto_reconcile", error=message)
+            add_event(db, "azpanel.ip_change_failed", "warning", f"{resource.name} 换 IP 未确认：{message}", payload)
+            send_webhooks(db, "azpanel.ip_change_failed", payload)
+        else:
+            # 还是旧 IP（或这次没读到）：之前的候选可能是过渡值，作废重来
+            if new_ip:
+                resource.pending_candidate_ip = None
     db.flush()
     return resolved
 
 
-def auto_sync_synexvm_statuses(db: Session) -> int:
-    """按资源配置的间隔自动查 status 同步最新 IP（"查询状态"按钮的自动版，兜底）。
+def _awaiting_late_ip(resource: AzPanelResource, now: datetime) -> bool:
+    attempted = resource.last_attempt_at
+    if attempted is None or resource.pending_change_at is not None:
+        return False
+    if resource.last_change_at is not None and resource.last_change_at >= attempted:
+        return False
+    return (now - attempted).total_seconds() < CUSTOM_IP_LATE_WATCH_SECONDS
 
-    pending 中的资源由 reconcile 负责（跳过避免重复请求）。发现的新 IP 同样要
-    连续两次读取一致（pending_candidate_ip）才落地，防止把过渡 IP 当真。
-    实际频率受调度检查周期限制：间隔设得比检查周期小也只会每个周期查一次。
+
+def auto_sync_custom_statuses(db: Session) -> int:
+    """定时查 IP（资源设置的间隔），以及换 IP 超时后的"迟到新 IP"补查。
+
+    发现的新 IP 同样要连续两次读取一致（pending_candidate_ip）才落地。
+    实际频率受调度检查周期限制。
     """
     resources = (
         db.query(AzPanelResource)
         .filter(
-            AzPanelResource.provider == "synexvm",
+            AzPanelResource.provider == CUSTOM_IP_PROVIDER,
             AzPanelResource.enabled.is_(True),
-            AzPanelResource.status_sync_interval_seconds > 0,
             AzPanelResource.pending_change_at.is_(None),
         )
         .all()
     )
-    if not resources:
-        return 0
     now = datetime.utcnow()
     synced = 0
     for resource in resources:
-        interval = max(resource.status_sync_interval_seconds, 10)
-        if resource.last_status_sync_at and (now - resource.last_status_sync_at).total_seconds() < interval:
+        late = _awaiting_late_ip(resource, now)
+        interval = resource.status_sync_interval_seconds or 0
+        if late:
+            interval = min(interval, CUSTOM_IP_LATE_WATCH_INTERVAL_SECONDS) if interval > 0 else CUSTOM_IP_LATE_WATCH_INTERVAL_SECONDS
+        if interval <= 0:
+            continue
+        if resource.last_status_sync_at and (now - resource.last_status_sync_at).total_seconds() < max(interval, 10):
             continue
         resource.last_status_sync_at = now
         try:
-            payload = call_synexvm_status(db, resource)
+            ip = read_custom_ip(db, resource)
         except Exception:
-            continue  # 面板暂时不可达不算失败，下个到期周期再试
-        panel_ip = _synexvm_payload_ip(payload, resource.ip_version)
-        if not panel_ip:
-            continue
-        if panel_ip == (resource.current_ip or ""):
+            continue  # 接口暂时不可达不算失败，下个到期周期再试
+        if ip == (resource.current_ip or ""):
             resource.pending_candidate_ip = None
             continue
-        if panel_ip != resource.pending_candidate_ip:
-            # 第一次见到的新 IP 先记候选，下次读取一致才采纳
-            resource.pending_candidate_ip = panel_ip
+        if ip != resource.pending_candidate_ip:
+            resource.pending_candidate_ip = ip
             continue
-        resource.pending_candidate_ip = None
-        old_ip = resource.current_ip
         try:
-            applied_ip, _ = _apply_changed_ip(db, resource, panel_ip, reason="synexvm auto status sync")
+            applied = _adopt_custom_ip(db, resource, ip, trigger_type="auto_status_sync", reason="auto status sync")
         except ValueError as exc:
-            resource.last_error = f"自动查询到的 IP 无法应用: {exc}"
+            resource.last_error = f"查到的 IP 无法同步到源站: {exc}"
             continue
-        payload_evt = ip_change_event_payload(
-            db,
-            resource,
-            old_ip=old_ip,
-            new_ip=applied_ip,
-            trigger_type="auto_status_sync",
-        )
-        add_event(db, "azpanel.ip_changed", "info", f"{resource.name} 自动查询发现 IP 变为 {applied_ip}，已同步", payload_evt)
-        send_webhooks(db, "azpanel.ip_changed", payload_evt)
+        if late:
+            _finish_late_job(db, resource, applied)
         synced += 1
     db.flush()
     return synced
@@ -1165,12 +1237,12 @@ def trigger_ip_change_for_origin(
     guard: AutoIpChangeGuard | None = None,
 ) -> IpChangeJob | None:
     azpanel_enabled = azpanel_settings(db)["enabled"]
-    synexvm_enabled = synexvm_settings(db)["enabled"]
-    if not azpanel_enabled and not synexvm_enabled:
+    custom_enabled = custom_ip_settings(db)["enabled"]
+    if not azpanel_enabled and not custom_enabled:
         return None
 
     def provider_enabled(resource: AzPanelResource) -> bool:
-        return synexvm_enabled if resource.provider == "synexvm" else azpanel_enabled
+        return custom_enabled if resource.provider == CUSTOM_IP_PROVIDER else azpanel_enabled
 
     # Resources bound to this backup directly, or to the global backup it mirrors —
     # a blocked mirror must still be able to rotate the machine behind it.

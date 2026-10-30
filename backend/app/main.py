@@ -12,7 +12,7 @@ from .database import SessionLocal, init_db
 from .external_ips import sync_due_external_ip_sources
 from .doh import sync_due_doh_endpoints
 from .failover import evaluate_failover_groups
-from .integrations import auto_sync_synexvm_statuses, reconcile_pending_synexvm_changes
+from .integrations import auto_sync_custom_statuses, reconcile_pending_custom_changes
 from .health import mark_stale_agents, run_local_checks
 from .retention import prune_old_rows
 from .route53 import reconcile_route53_outputs
@@ -38,11 +38,11 @@ def _run_scheduler_tick() -> int:
         mark_stale_agents(db)
         check_cache = {}
         run_local_checks(db, check_cache=check_cache)
-        # 先把已下发但未确认的 SynexVM 换 IP 用 status 补上新 IP（并催外部来源重同步），
+        # 先把已下发但未确认的换 IP 用查 IP 接口补上新 IP（并催外部来源重同步），
         # 再跑外部同步和故障切换评估，绑定的源站才能在本轮就跟上新 IP。
-        reconcile_pending_synexvm_changes(db)
-        # 兜底：按资源配置的间隔自动查 status，面板上 IP 变了（含手动换的）也能跟上
-        auto_sync_synexvm_statuses(db)
+        reconcile_pending_custom_changes(db)
+        # 兜底：按资源配置的间隔自动查 IP（换 IP 超时后也会继续补查），机器 IP 变了也能跟上
+        auto_sync_custom_statuses(db)
         sync_due_external_ip_sources(db)
         # commit_per_group keeps external side effects (Cloudflare writes, azpanel
         # IP changes) recorded even if a later group fails mid-tick.

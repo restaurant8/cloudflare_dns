@@ -216,6 +216,16 @@ def _migrate_existing_schema() -> None:
                 connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN status_sync_interval_seconds INTEGER NOT NULL DEFAULT 0"))
             if "last_status_sync_at" not in existing:
                 connection.execute(text(f"ALTER TABLE azpanel_resources ADD COLUMN last_status_sync_at {timestamp_type} NULL"))
+            if "change_ip_url" not in existing:
+                connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN change_ip_url TEXT NULL"))
+            if "status_url" not in existing:
+                connection.execute(text("ALTER TABLE azpanel_resources ADD COLUMN status_url TEXT NULL"))
+            if "verify_tls" not in existing:
+                verify_default = "1" if dialect == "mysql" else "TRUE"
+                verify_type = "TINYINT(1)" if dialect == "mysql" else "BOOLEAN"
+                connection.execute(text(f"ALTER TABLE azpanel_resources ADD COLUMN verify_tls {verify_type} NOT NULL DEFAULT {verify_default}"))
+            # SynexVM 已改为通用接口：旧资源转过去，补填两个链接即可继续使用
+            connection.execute(text("UPDATE azpanel_resources SET provider = 'custom' WHERE provider = 'synexvm'"))
 
         if "doh_failover_groups" in table_names and "failover_groups" in table_names and "origins" in table_names:
             _migrate_legacy_doh_failover_rules(connection, table_names)

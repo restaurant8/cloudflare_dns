@@ -453,10 +453,8 @@ export type AzPanelSettings = {
   default_cooldown_seconds: number;
 };
 
-export type SynexVmSettings = {
+export type CustomIpSettings = {
   enabled: boolean;
-  api_url: string;
-  api_token_configured: boolean;
   timeout_seconds: number;
   wait_seconds: number;
   default_cooldown_seconds: number;
@@ -471,8 +469,9 @@ export type AzPanelResource = {
   region: string | null;
   ip_version: string;
   ip_change_method: string;
-  api_url: string | null;
-  api_token_configured: boolean;
+  verify_tls: boolean;
+  change_ip_url_hint: string | null;
+  status_url_hint: string | null;
   pending_change_at: string | null;
   status_sync_interval_seconds: number;
   last_status_sync_at: string | null;
