@@ -75,7 +75,7 @@ type ExternalIpSourceDraft = { name: string; base_url: string; token: string; de
 type SnippetDraft = { title: string; category: string; address: string; username: string; port: string; tags: string; content: string; code: string };
 type SshSettingsDraft = { enabled: boolean; external_url: string };
 type AzPanelSettingsDraft = { enabled: boolean; base_url: string; api_token: string; timeout_seconds: number; default_cooldown_seconds: number };
-type CustomIpSettingsDraft = { enabled: boolean; timeout_seconds: number; wait_seconds: number; default_cooldown_seconds: number };
+type CustomIpSettingsDraft = { enabled: boolean; timeout_seconds: number; wait_seconds: number; default_cooldown_seconds: number; user_agent: string };
 type AzPanelResourceDraft = { name: string; provider: string; resource_id: string; account_id: string; region: string; ip_version: string; ip_change_method: string; change_ip_url: string; status_url: string; verify_tls: boolean; origin_id: number | ""; current_ip: string; port: number; enabled: boolean; auto_change_on_blocked: boolean; auto_update_origin: boolean; cooldown_seconds: number; status_sync_interval_seconds: number; remark: string };
 type XboardSettingsDraft = { enabled: boolean; base_url: string; api_token: string; timeout_seconds: number };
 type XboardNodeDraft = { name: string; xboard_node_id: number; node_type: string; host: string; port: number | ""; origin_id: number | ""; azpanel_resource_id: number | ""; enabled: boolean; auto_update_after_change: boolean; remark: string };
@@ -5974,7 +5974,8 @@ function AzPanelPanel({
     enabled: customSettings.enabled,
     timeout_seconds: customSettings.timeout_seconds,
     wait_seconds: customSettings.wait_seconds,
-    default_cooldown_seconds: customSettings.default_cooldown_seconds
+    default_cooldown_seconds: customSettings.default_cooldown_seconds,
+    user_agent: customSettings.user_agent
   });
   const [editingId, setEditingId] = useState<number | null>(null);
   const emptyDraft = (): AzPanelResourceDraft => ({
@@ -6026,7 +6027,8 @@ function AzPanelPanel({
       enabled: customSettings.enabled,
       timeout_seconds: customSettings.timeout_seconds,
       wait_seconds: customSettings.wait_seconds,
-      default_cooldown_seconds: customSettings.default_cooldown_seconds
+      default_cooldown_seconds: customSettings.default_cooldown_seconds,
+      user_agent: customSettings.user_agent
     });
   }, [customSettings]);
 
@@ -6241,6 +6243,10 @@ function AzPanelPanel({
           <label>
             默认冷却（秒）
             <input type="number" min={60} max={86400} value={customDraft.default_cooldown_seconds} onChange={(event) => setCustomDraft((current) => ({ ...current, default_cooldown_seconds: Number(event.target.value) }))} />
+          </label>
+          <label className="wideField" title="请求两个链接时使用的身份。有的服务商只接受终端请求，浏览器打开会提示“请在终端执行”，默认 curl 即可；留空保存会恢复默认">
+            请求身份（User-Agent）
+            <input placeholder="curl/8.7.1" value={customDraft.user_agent} onChange={(event) => setCustomDraft((current) => ({ ...current, user_agent: event.target.value }))} />
           </label>
         </div>
         <button>

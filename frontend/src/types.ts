@@ -458,6 +458,7 @@ export type CustomIpSettings = {
   timeout_seconds: number;
   wait_seconds: number;
   default_cooldown_seconds: number;
+  user_agent: string;
 };
 
 export type AzPanelResource = {

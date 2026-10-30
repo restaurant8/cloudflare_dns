@@ -50,9 +50,10 @@ class FakeProvider:
     def set_ips(self, *ips):
         self.ips = list(ips)
 
-    def __call__(self, url, timeout=None, follow_redirects=None, verify=None):
+    def __call__(self, url, headers=None, timeout=None, follow_redirects=None, verify=None):
         kind = "change" if "changeip" in url else "status"
         self.calls.append((kind, url, verify))
+        self.user_agents = getattr(self, "user_agents", []) + [(headers or {}).get("User-Agent")]
         provider = self
 
         class Response:
@@ -142,6 +143,13 @@ def test_change_requests_the_link_and_waits_for_the_query(monkeypatch):
     assert [kind for kind, _, _ in provider.calls] == ["status", "change"]
     assert provider.calls[1][1] == CHANGE_URL
     assert all(verify is False for _, _, verify in provider.calls)
+    # Some providers answer anything but a terminal client with "请在终端执行".
+    assert set(provider.user_agents) == {"curl/8.7.1"}
+
+    update_custom_ip_settings(db, {"user_agent": "Wget/1.21"})
+    call_custom_change_ip(db, resource)
+    assert provider.user_agents[-1] == "Wget/1.21"
+    assert update_custom_ip_settings(db, {"user_agent": ""})["user_agent"] == "curl/8.7.1"
 
 
 def test_auto_change_adopts_an_ip_that_already_changed(monkeypatch):

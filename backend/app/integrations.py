@@ -35,6 +35,10 @@ CUSTOM_IP_ENABLED = "custom_ip.enabled"
 CUSTOM_IP_TIMEOUT = "custom_ip.timeout_seconds"
 CUSTOM_IP_WAIT = "custom_ip.wait_seconds"
 CUSTOM_IP_DEFAULT_COOLDOWN = "custom_ip.default_cooldown_seconds"
+CUSTOM_IP_USER_AGENT = "custom_ip.user_agent"
+# 有的服务商只接受终端发出的请求（浏览器或 python-httpx 会收到"请在终端执行"，
+# 且 HTTP 状态仍是 200），所以默认以 curl 的身份请求，面板上可改。
+CUSTOM_IP_DEFAULT_USER_AGENT = "curl/8.7.1"
 CUSTOM_IP_DEFAULT_WAIT_SECONDS = 600
 # 新 IP 必须连续两次读取一致才采纳（防止换 IP 过程中的过渡 IP）。
 # 手动查询 / 换 IP 前的核对在同一次请求里读两次，这是两次之间的间隔。
@@ -122,6 +126,7 @@ def custom_ip_settings(db: Session) -> dict[str, Any]:
         "timeout_seconds": _int_setting(db, CUSTOM_IP_TIMEOUT, 30),
         "wait_seconds": _int_setting(db, CUSTOM_IP_WAIT, CUSTOM_IP_DEFAULT_WAIT_SECONDS),
         "default_cooldown_seconds": _int_setting(db, CUSTOM_IP_DEFAULT_COOLDOWN, 1800),
+        "user_agent": get_setting(db, CUSTOM_IP_USER_AGENT, "") or CUSTOM_IP_DEFAULT_USER_AGENT,
     }
 
 
@@ -160,6 +165,9 @@ def update_custom_ip_settings(db: Session, updates: dict[str, Any]) -> dict[str,
         set_setting(db, CUSTOM_IP_WAIT, str(int(updates["wait_seconds"])))
     if "default_cooldown_seconds" in updates and updates["default_cooldown_seconds"] is not None:
         set_setting(db, CUSTOM_IP_DEFAULT_COOLDOWN, str(int(updates["default_cooldown_seconds"])))
+    if "user_agent" in updates and updates["user_agent"] is not None:
+        # 清空表示恢复默认（curl）
+        set_setting(db, CUSTOM_IP_USER_AGENT, str(updates["user_agent"]).strip())
     return custom_ip_settings(db)
 
 
@@ -287,9 +295,16 @@ def _custom_request(db: Session, resource: AzPanelResource, kind: str) -> str:
     url = _custom_url(resource, kind)
     label = "换 IP 接口" if kind == "change" else "查 IP 接口"
     host = urlsplit(url).netloc
-    timeout = custom_ip_settings(db)["timeout_seconds"]
+    settings = custom_ip_settings(db)
+    headers = {"User-Agent": settings["user_agent"], "Accept": "*/*"}
     try:
-        response = httpx.get(url, timeout=timeout, follow_redirects=True, verify=bool(resource.verify_tls))
+        response = httpx.get(
+            url,
+            headers=headers,
+            timeout=settings["timeout_seconds"],
+            follow_redirects=True,
+            verify=bool(resource.verify_tls),
+        )
     except httpx.HTTPError as exc:
         raise RuntimeError(f"{label}（{host}）请求失败：{type(exc).__name__}") from None
     if not response.is_success:

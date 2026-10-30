@@ -989,6 +989,7 @@ class CustomIpSettingsOut(BaseModel):
     timeout_seconds: int = 30
     wait_seconds: int = 600
     default_cooldown_seconds: int = 1800
+    user_agent: str = "curl/8.7.1"
 
 
 class CustomIpSettingsUpdate(BaseModel):
@@ -997,6 +998,8 @@ class CustomIpSettingsUpdate(BaseModel):
     # 换 IP 下发后等新 IP 的最长时间；超时记失败，但之后仍会继续补查
     wait_seconds: int | None = Field(default=None, ge=60, le=3600)
     default_cooldown_seconds: int | None = Field(default=None, ge=60, le=86400)
+    # 请求两个链接时使用的身份标识；留空恢复默认 curl
+    user_agent: str | None = Field(default=None, max_length=200)
 
 
 class XboardNodeBindingBase(BaseModel):
