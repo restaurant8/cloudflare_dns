@@ -863,9 +863,17 @@ export default function App() {
 
   useEffect(() => {
     if (!token) return;
+    // Never start a refresh while the previous one is still waiting: when the
+    // backend is slow, overlapping polls used to pile up until it stopped answering.
+    let inFlight = false;
     const timer = window.setInterval(() => {
-      if (document.hidden) return;
-      loadLiveStatus(token).catch(() => undefined);
+      if (document.hidden || inFlight) return;
+      inFlight = true;
+      loadLiveStatus(token)
+        .catch(() => undefined)
+        .finally(() => {
+          inFlight = false;
+        });
     }, liveRefreshIntervalMs);
     return () => window.clearInterval(timer);
   }, [token]);

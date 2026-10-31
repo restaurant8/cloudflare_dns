@@ -3,10 +3,11 @@ from urllib.parse import urlparse
 import httpx
 import websockets
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from ..database import get_db
+from ..database import SessionLocal, get_db
 from ..deps import cloudflare_access_allowed, get_current_user, require_cloudflare_access
 from ..models import AppSetting, User
 from ..schemas import Message, SshSessionOut, SshSettingsOut, SshSettingsUpdate
@@ -183,17 +184,44 @@ def clear_ssh_session(_: User = Depends(get_current_user)):
     return response
 
 
+def _authorize_ssh_http(request: Request) -> SshSettingsOut:
+    """Database (and Cloudflare Access key) checks for the HTTP proxy.
+
+    Runs in a worker thread with its own short session: the proxy handlers are
+    async, and a blocking query on the event loop froze every request of the
+    whole panel while the database was busy.
+    """
+    with SessionLocal() as db:
+        settings = _ssh_settings(db)
+        if not settings.enabled:
+            raise HTTPException(status_code=404, detail="SSH 功能未启用")
+        _require_local_upstream(settings.upstream_url)
+        require_cloudflare_access(request, db)
+        _require_ssh_session(request, db)
+        return settings
+
+
+def _authorize_ssh_websocket(websocket: WebSocket) -> tuple[SshSettingsOut | None, int | None]:
+    """Same checks for the websocket proxy; returns (settings, close_code)."""
+    with SessionLocal() as db:
+        settings = _ssh_settings(db)
+        try:
+            _require_local_upstream(settings.upstream_url)
+        except HTTPException:
+            return None, 1008
+        if not cloudflare_access_allowed(websocket.headers, websocket.cookies, db):
+            return None, 4403
+        if not settings.enabled or not _require_ssh_cookie(websocket.cookies.get(SSH_COOKIE_NAME), db):
+            return None, 4401
+        return settings, None
+
+
 @router.api_route("/proxy", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 @router.api_route("/proxy/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
-async def ssh_http_proxy(path: str = "", request: Request = None, db: Session = Depends(get_db)):
+async def ssh_http_proxy(path: str = "", request: Request = None):
     if request is None:
         raise HTTPException(status_code=400, detail="请求无效")
-    settings = _ssh_settings(db)
-    if not settings.enabled:
-        raise HTTPException(status_code=404, detail="SSH 功能未启用")
-    _require_local_upstream(settings.upstream_url)
-    require_cloudflare_access(request, db)
-    _require_ssh_session(request, db)
+    settings = await run_in_threadpool(_authorize_ssh_http, request)
     target_url = _target_url(settings.upstream_url, path, request.url.query.encode("utf-8"))
     try:
         async with httpx.AsyncClient(follow_redirects=False, timeout=60.0) as client:
@@ -222,18 +250,12 @@ async def ssh_http_proxy(path: str = "", request: Request = None, db: Session = 
 
 @router.websocket("/proxy")
 @router.websocket("/proxy/{path:path}")
-async def ssh_websocket_proxy(websocket: WebSocket, path: str = "", db: Session = Depends(get_db)):
-    settings = _ssh_settings(db)
-    try:
-        _require_local_upstream(settings.upstream_url)
-    except HTTPException:
-        await websocket.close(code=1008)
-        return
-    if not cloudflare_access_allowed(websocket.headers, websocket.cookies, db):
-        await websocket.close(code=4403)
-        return
-    if not settings.enabled or not _require_ssh_cookie(websocket.cookies.get(SSH_COOKIE_NAME), db):
-        await websocket.close(code=4401)
+async def ssh_websocket_proxy(websocket: WebSocket, path: str = ""):
+    # No request-scoped session: an open SSH terminal used to hold a database
+    # connection for its whole lifetime and could starve every other request.
+    settings, close_code = await run_in_threadpool(_authorize_ssh_websocket, websocket)
+    if settings is None:
+        await websocket.close(code=close_code or 1008)
         return
 
     parsed = urlparse(settings.upstream_url)

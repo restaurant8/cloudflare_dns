@@ -3,7 +3,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import MetaData, Table, and_, create_engine, inspect, select, text
+from sqlalchemy import MetaData, Table, and_, create_engine, event, inspect, select, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import get_settings
@@ -24,7 +24,29 @@ if settings.database_url.startswith("sqlite"):
     if db_path and db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-engine = create_engine(settings.database_url, connect_args=connect_args, future=True)
+engine_options: dict = {}
+if not settings.database_url.startswith("sqlite"):
+    # MySQL closes idle connections after wait_timeout. Without a liveness check the
+    # pool hands those dead connections to requests, which then fail until the
+    # process is restarted ("the page stops opening, a restart fixes it").
+    engine_options.update(pool_pre_ping=True, pool_recycle=1800, pool_size=10, max_overflow=20, pool_timeout=15)
+
+engine = create_engine(settings.database_url, connect_args=connect_args, future=True, **engine_options)
+
+if settings.database_url.startswith("sqlite"):
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_concurrency(dbapi_connection, _record) -> None:
+        # WAL lets the page keep reading while the scheduler writes; the default
+        # rollback journal blocks readers whenever a writer commits.
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+        finally:
+            cursor.close()
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
 

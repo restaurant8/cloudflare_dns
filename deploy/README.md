@@ -61,3 +61,16 @@ systemctl status cloudflare-dns-agent
 journalctl -u cloudflare-dns-agent -f
 systemctl restart cloudflare-dns-agent
 ```
+
+## Watchdog (recommended)
+
+Supervisor only restarts the backend when the process exits. If it ever stops
+answering while still running, this cron job restarts it automatically — the same
+thing as restarting it by hand. Run `crontab -e` as root and add:
+
+```bash
+* * * * * curl -fsS -m 15 http://127.0.0.1:8000/healthz >/dev/null || (sleep 20; curl -fsS -m 15 http://127.0.0.1:8000/healthz >/dev/null || supervisorctl restart cloudflare-dns-backend)
+```
+
+It checks every minute and only restarts after two failed checks 20 seconds apart,
+so a slow moment never triggers a restart. Restarts are logged by supervisor.

@@ -7,6 +7,12 @@ export class ApiError extends Error {
   }
 }
 
+// A request the backend never answers must not wait forever: stuck requests keep
+// stacking up behind every refresh and make the whole page look dead. Reads give
+// up quickly; actions (IP changes, checks, publishing) may legitimately take longer.
+const READ_TIMEOUT_MS = 30000;
+const ACTION_TIMEOUT_MS = 120000;
+
 export async function apiFetch<T>(path: string, token?: string | null, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (!headers.has("Content-Type") && options.body) {
@@ -15,7 +21,20 @@ export async function apiFetch<T>(path: string, token?: string | null, options: 
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  const response = await fetch(path, { ...options, headers });
+  const method = (options.method || "GET").toUpperCase();
+  const controller = options.signal ? null : new AbortController();
+  const timer = controller ? window.setTimeout(() => controller.abort(), method === "GET" ? READ_TIMEOUT_MS : ACTION_TIMEOUT_MS) : undefined;
+  let response: Response;
+  try {
+    response = await fetch(path, { ...options, headers, signal: options.signal ?? controller?.signal });
+  } catch (error) {
+    if (controller?.signal.aborted) {
+      throw new ApiError("服务器响应超时，请稍后重试", 0);
+    }
+    throw error;
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer);
+  }
   if (!response.ok) {
     let message = response.statusText;
     try {

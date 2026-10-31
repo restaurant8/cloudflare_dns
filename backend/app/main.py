@@ -26,6 +26,20 @@ _PRUNE_INTERVAL_SECONDS = 3600
 _last_prune_at: datetime | None = None
 
 
+def _run_stage(db, name: str, stage) -> None:
+    """Run one scheduler stage and release its locks; a failure never stops the others.
+
+    One stage raising used to abort the whole tick, so a single unreachable
+    external source silently stopped failover evaluation on every tick.
+    """
+    try:
+        stage()
+        db.commit()
+    except Exception:
+        logger.exception("scheduler stage %s failed", name)
+        db.rollback()
+
+
 def _run_scheduler_tick() -> int:
     """Run one blocking probe/evaluation tick. Returns the next interval in seconds.
 
@@ -35,33 +49,37 @@ def _run_scheduler_tick() -> int:
     global _last_prune_at
     with SessionLocal() as db:
         runtime_settings = get_runtime_settings(db)
-        mark_stale_agents(db)
         check_cache = {}
-        run_local_checks(db, check_cache=check_cache)
+        _run_stage(db, "mark_stale_agents", lambda: mark_stale_agents(db))
+        _run_stage(db, "local_checks", lambda: run_local_checks(db, check_cache=check_cache))
         # 先把已下发但未确认的换 IP 用查 IP 接口补上新 IP（并催外部来源重同步），
         # 再跑外部同步和故障切换评估，绑定的源站才能在本轮就跟上新 IP。
-        reconcile_pending_custom_changes(db)
+        _run_stage(db, "custom_ip_reconcile", lambda: reconcile_pending_custom_changes(db))
         # 兜底：按资源配置的间隔自动查 IP（换 IP 超时后也会继续补查），机器 IP 变了也能跟上
-        auto_sync_custom_statuses(db)
-        sync_due_external_ip_sources(db)
+        _run_stage(db, "custom_ip_status_sync", lambda: auto_sync_custom_statuses(db))
+        _run_stage(db, "external_ip_sync", lambda: sync_due_external_ip_sources(db))
         # commit_per_group keeps external side effects (Cloudflare writes, azpanel
         # IP changes) recorded even if a later group fails mid-tick.
-        evaluate_failover_groups(
+        _run_stage(
             db,
-            commit_per_group=True,
-            consistency_check_interval_seconds=get_settings().dns_consistency_check_interval_seconds,
+            "failover",
+            lambda: evaluate_failover_groups(
+                db,
+                commit_per_group=True,
+                consistency_check_interval_seconds=get_settings().dns_consistency_check_interval_seconds,
+            ),
         )
-        reconcile_route53_outputs(
+        _run_stage(
             db,
-            interval_seconds=get_settings().dns_consistency_check_interval_seconds,
+            "route53_reconcile",
+            lambda: reconcile_route53_outputs(db, interval_seconds=get_settings().dns_consistency_check_interval_seconds),
         )
-        evaluate_alibaba_httpdns_groups(db, commit_per_group=True, check_cache=check_cache)
-        sync_due_doh_endpoints(db)
+        _run_stage(db, "alibaba_httpdns", lambda: evaluate_alibaba_httpdns_groups(db, commit_per_group=True, check_cache=check_cache))
+        _run_stage(db, "doh_sync", lambda: sync_due_doh_endpoints(db))
         now = datetime.utcnow()
         if _last_prune_at is None or (now - _last_prune_at).total_seconds() >= _PRUNE_INTERVAL_SECONDS:
             _last_prune_at = now
-            prune_old_rows(db)
-        db.commit()
+            _run_stage(db, "prune", lambda: prune_old_rows(db))
         return runtime_settings.check_interval_seconds
 
 
