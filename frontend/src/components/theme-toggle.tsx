@@ -1,4 +1,4 @@
-import { Moon, Sun } from "lucide-react";
+import { Check, Monitor, Moon, Sun } from "lucide-react";
 import { useTheme } from "@/context/theme-provider";
 import { Button } from "@/components/ui/button";
 import {
@@ -8,21 +8,33 @@ import {
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu";
 
+const options = [
+  { value: "light", label: "浅色", icon: Sun },
+  { value: "dark", label: "深色", icon: Moon },
+  { value: "system", label: "跟随系统", icon: Monitor }
+] as const;
+
 export function ThemeToggle() {
-  const { setTheme } = useTheme();
+  const { theme, resolvedTheme, setTheme } = useTheme();
+  const current = options.find((option) => option.value === theme) ?? options[2];
+  const CurrentIcon = theme === "system" ? Monitor : resolvedTheme === "dark" ? Moon : Sun;
+  const title = theme === "system" ? `主题：跟随系统（当前${resolvedTheme === "dark" ? "深色" : "浅色"}）` : `主题：${current.label}（固定，不跟随系统）`;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label="切换主题">
-          <Sun className="size-[1.2rem] scale-100 rotate-0 transition-all dark:scale-0 dark:-rotate-90" />
-          <Moon className="absolute size-[1.2rem] scale-0 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
-          <span className="sr-only">切换主题</span>
+        <Button variant="ghost" size="icon" aria-label={title} title={title}>
+          <CurrentIcon className="size-[1.2rem]" />
+          <span className="sr-only">{title}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={() => setTheme("light")}>浅色</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setTheme("dark")}>深色</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setTheme("system")}>跟随系统</DropdownMenuItem>
+        {options.map(({ value, label, icon: Icon }) => (
+          <DropdownMenuItem key={value} onClick={() => setTheme(value)}>
+            <Icon className="size-4" />
+            {label}
+            {theme === value && <Check className="ml-auto size-4" />}
+          </DropdownMenuItem>
+        ))}
       </DropdownMenuContent>
     </DropdownMenu>
   );

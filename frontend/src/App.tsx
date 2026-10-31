@@ -195,6 +195,25 @@ function relayChipClass(relay: RelayStatus): string {
   return relay.status === "healthy" ? "up" : relay.status === "unhealthy" ? "down" : "unknown";
 }
 
+// 源站自己（A）的健康：中转不通时 A 本身其实是通的，徽章仍显示 A 自己的健康，B 另起一个徽章。
+function OriginHealth({ origin }: { origin: Origin }) {
+  if (!origin.enabled) return <Status value="disabled" />;
+  const relays = origin.relays || [];
+  const ownStatus = origin.status === "relay_down" ? "healthy" : origin.status;
+  const up = relays.filter((relay) => relay.status === "healthy").length;
+  const relayClass = origin.status === "relay_down" ? "down" : up > 0 ? "up" : "unknown";
+  return (
+    <>
+      <Status value={ownStatus} />
+      {relays.length > 0 && (
+        <span className={`relayBadge ${relayClass}`} title={origin.status === "relay_down" ? "中转后端全部不通，已不参与解析" : "中转后端（B）可用数 / 总数"}>
+          {origin.status === "relay_down" ? "中转不通" : `中转 ${up}/${relays.length}`}
+        </span>
+      )}
+    </>
+  );
+}
+
 // 中转后端：选择 IP 池子（池子里的地址就是 B）。选多个时所有池子的地址合起来算。
 function RelayPoolPicker({ pools, value, onChange }: { pools: TargetPool[]; value: number[]; onChange: (next: number[]) => void }) {
   return (
@@ -4452,7 +4471,7 @@ function GroupsPanel({
                                     {origin.target}:{origin.port}
                                   </td>
                                   <td>{origin.priority}</td>
-                                  <td><Status value={origin.enabled ? origin.status : "disabled"} /></td>
+                                  <td><OriginHealth origin={origin} /></td>
                                   <td className="inheritedChecked">{origin.enabled ? fmtTime(origin.last_checked_at) : "已停用"}</td>
                                   <td>
                                     <button
@@ -4499,7 +4518,6 @@ function GroupsPanel({
                       const nodeLoadMembers = isLoadMember ? [] : loadMembersOf(origin.id);
                       const isRotating = (group.load_balance_origin_ids || []).includes(origin.id);
                       const preferredAgent = origin.preferred_agent_id ? agents.find((agent) => agent.id === origin.preferred_agent_id) : null;
-                      const displayStatus = origin.enabled ? origin.status : "disabled";
                       const healthMeta = !origin.enabled ? "已停用，不参与检查" : `最后检测 ${fmtDate(origin.last_checked_at)}`;
                       const activeOriginProbeStates = activeProbeStates(origin.probe_states);
                       const visibleProbeStates = currentProbeStates(origin);
@@ -4733,7 +4751,6 @@ function GroupsPanel({
                                       </div>
                                     )}
                                     {nodeLoadMembers.map((member) => {
-                                      const memberStatus = member.enabled ? member.status : "disabled";
                                       const memberRotating = (group.load_balance_origin_ids || []).includes(member.id);
                                       if (loadIpEdit?.id === member.id) {
                                         return (
@@ -4762,7 +4779,7 @@ function GroupsPanel({
                                       }
                                       return (
                                         <div className={`loadIpRow ${member.id === group.current_origin_id ? "loadIpCurrent" : ""}`} key={member.id}>
-                                          <Status value={memberStatus} />
+                                          <OriginHealth origin={member} />
                                           <strong title={member.last_error || undefined}>{member.target}</strong>
                                           <span className="loadIpWeight">权重 {member.weight || 1}</span>
                                           {member.id === group.current_origin_id && <span className="originBadge current">当前使用</span>}
@@ -4827,7 +4844,7 @@ function GroupsPanel({
                                   </div>
                                 )}
                               </div>
-                              <Status value={displayStatus} />
+                              <OriginHealth origin={origin} />
                               <button className="icon secondaryIcon" title="手动检测这个源站" onClick={() => act(() => apiFetch(`/api/groups/origins/${origin.id}/run`, token, { method: "POST" }), "源站检测已完成")}>
                                 <Play size={15} />
                               </button>

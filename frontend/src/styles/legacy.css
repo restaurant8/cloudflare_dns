@@ -2921,6 +2921,27 @@ form.panel {
   color: #9a3412;
 }
 
+/* Relay summary badge next to the origin's own health badge. */
+.relayBadge {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 8px;
+  white-space: nowrap;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.relayBadge.up {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.relayBadge.down {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
 /* Relay backends (B) of an origin, with their own check status. */
 .relayList {
   align-items: center;
