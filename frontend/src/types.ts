@@ -142,6 +142,15 @@ export type ProbeState = {
   last_rtt_ms: number | null;
 };
 
+export type RelayTarget = { target: string; port: number };
+
+export type RelayStatus = RelayTarget & {
+  status: "up" | "down" | "unknown" | string;
+  last_checked_at: string | null;
+  last_error: string | null;
+  last_rtt_ms: number | null;
+};
+
 export type Origin = {
   external_source_id: number | null;
   external_machine_key: string | null;
@@ -158,6 +167,7 @@ export type Origin = {
   priority: number;
   weight: number;
   load_parent_id: number | null;
+  relays: RelayStatus[];
   remark: string | null;
   enabled: boolean;
   ignore_health_check: boolean;
@@ -224,6 +234,7 @@ export type FailoverGlobalOrigin = {
   port: number;
   priority: number;
   weight: number;
+  relay_targets: RelayTarget[];
   expanded_ip_priorities: Record<string, number>;
   remark: string | null;
   enabled: boolean;

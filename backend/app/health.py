@@ -19,6 +19,7 @@ from .origin_expansion import (
     set_resolved_ips,
     split_expanded_source_key,
 )
+from .relay import RELAY_DOWN_STATUS, apply_relay_verdict, record_relay_result, relay_targets
 from .runtime_settings import get_runtime_settings
 
 
@@ -31,7 +32,7 @@ PROBE_MODE_CHINA_ONLY = "china_only"
 PROBE_MODE_ANY = "any"
 PROBE_MODES = {PROBE_MODE_DEFAULT, PROBE_MODE_LOCAL_ONLY, PROBE_MODE_CHINA_ONLY, PROBE_MODE_ANY}
 ORIGIN_AVAILABLE_STATUS = "healthy"
-ORIGIN_UNAVAILABLE_STATUSES = {"unhealthy", "blocked", "machine_down", "regional_issue"}
+ORIGIN_UNAVAILABLE_STATUSES = {"unhealthy", "blocked", "machine_down", "regional_issue", RELAY_DOWN_STATUS}
 FINAL_ORIGIN_STATUSES = {ORIGIN_AVAILABLE_STATUS, *ORIGIN_UNAVAILABLE_STATUSES}
 
 
@@ -439,6 +440,21 @@ def apply_target_pool_probe_result(
     recalculate_target_pool_status(db, item)
 
 
+def _finish_origin_status(db: Session, origin: Origin, old_status: str, label: str) -> None:
+    """Apply the relay-backend verdict, then report a final status change."""
+    apply_relay_verdict(origin)
+    if old_status != origin.status and origin.status in FINAL_ORIGIN_STATUSES:
+        payload = {"origin_id": origin.id, "target": origin.target, "port": origin.port, "status": origin.status}
+        add_event(
+            db,
+            "origin.status_changed",
+            "info" if origin.status == "healthy" else "warning",
+            f"{label} {origin.target}:{origin.port} 状态变为 {origin.status}",
+            payload,
+        )
+        send_webhooks(db, "origin.status_changed", payload)
+
+
 def recalculate_origin_status(db: Session, origin: Origin) -> None:
     if is_expanded_origin(origin):
         recalculate_expanded_origin_status(db, origin)
@@ -476,16 +492,7 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
             if origin.status == "healthy":
                 origin.last_error = None
 
-        if old_status != origin.status and origin.status in FINAL_ORIGIN_STATUSES:
-            payload = {"origin_id": origin.id, "target": origin.target, "port": origin.port, "status": origin.status}
-            add_event(
-                db,
-                "origin.status_changed",
-                "info" if origin.status == "healthy" else "warning",
-                f"源站 {origin.target}:{origin.port} 状态变为 {origin.status}",
-                payload,
-            )
-            send_webhooks(db, "origin.status_changed", payload)
+        _finish_origin_status(db, origin, old_status, "源站")
         return
 
     remote_source_keys = _origin_remote_agent_source_keys(db, origin, states, stale_before)
@@ -551,16 +558,7 @@ def recalculate_origin_status(db: Session, origin: Origin) -> None:
         if origin.status == "healthy":
             origin.last_error = None
 
-    if old_status != origin.status and origin.status in FINAL_ORIGIN_STATUSES:
-        payload = {"origin_id": origin.id, "target": origin.target, "port": origin.port, "status": origin.status}
-        add_event(
-            db,
-            "origin.status_changed",
-            "info" if origin.status == "healthy" else "warning",
-            f"源站 {origin.target}:{origin.port} 状态变为 {origin.status}",
-            payload,
-        )
-        send_webhooks(db, "origin.status_changed", payload)
+    _finish_origin_status(db, origin, old_status, "源站")
 
 
 def copy_target_pool_status_from_matching_origin(db: Session, item: TargetPoolItem) -> bool:
@@ -717,16 +715,7 @@ def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
             origin.last_checked_at = newest.last_checked_at
             origin.last_rtt_ms = newest.last_rtt_ms
 
-        if old_status != origin.status and origin.status in FINAL_ORIGIN_STATUSES:
-            payload = {"origin_id": origin.id, "target": origin.target, "port": origin.port, "status": origin.status}
-            add_event(
-                db,
-                "origin.status_changed",
-                "info" if origin.status == "healthy" else "warning",
-                f"展开源站 {origin.target}:{origin.port} 状态变为 {origin.status}",
-                payload,
-            )
-            send_webhooks(db, "origin.status_changed", payload)
+        _finish_origin_status(db, origin, old_status, "展开源站")
         return
 
     remote_mode = _origin_remote_agent_source_keys(db, origin, states, stale_before) is not None
@@ -808,16 +797,7 @@ def recalculate_expanded_origin_status(db: Session, origin: Origin) -> None:
         origin.last_checked_at = newest.last_checked_at
         origin.last_rtt_ms = newest.last_rtt_ms
 
-    if old_status != origin.status and origin.status in FINAL_ORIGIN_STATUSES:
-        payload = {"origin_id": origin.id, "target": origin.target, "port": origin.port, "status": origin.status}
-        add_event(
-            db,
-            "origin.status_changed",
-            "info" if origin.status == "healthy" else "warning",
-            f"展开源站 {origin.target}:{origin.port} 状态变为 {origin.status}",
-            payload,
-        )
-        send_webhooks(db, "origin.status_changed", payload)
+    _finish_origin_status(db, origin, old_status, "展开源站")
 
 
 def refresh_expanded_origin_ips(origin: Origin) -> list[str]:
@@ -827,6 +807,38 @@ def refresh_expanded_origin_ips(origin: Origin) -> list[str]:
     ips = sorted(set(ips + published_ips(origin)))
     set_resolved_ips(origin, ips)
     return ips
+
+
+def _check_relay_backends(origins: list[Origin], check_once, check_cache: dict, settings) -> None:
+    """Check every origin's relay backends (B) from the panel and record the results.
+
+    Runs regardless of the origin's probe mode: B is usually reachable only from
+    outside China, and the domestic agents only ever check A.
+    """
+    keys: dict[tuple[str, int], tuple[str, int]] = {}
+    for origin in origins:
+        for item in relay_targets(origin):
+            key = (item["target"].strip().rstrip(".").lower(), int(item["port"]))
+            if key not in check_cache:
+                keys[key] = (item["target"], int(item["port"]))
+    if keys:
+        with ThreadPoolExecutor(max_workers=min(len(keys), 16)) as executor:
+            futures = {key: executor.submit(tcp_check, target, port, settings.check_timeout_seconds) for key, (target, port) in keys.items()}
+            for key, future in futures.items():
+                check_cache[key] = future.result()
+    for origin in origins:
+        for item in relay_targets(origin):
+            result = check_once(item["target"], item["port"])
+            record_relay_result(
+                origin,
+                item["target"],
+                item["port"],
+                result.success,
+                result.rtt_ms,
+                result.error,
+                fail_threshold=settings.fail_threshold,
+                recovery_threshold=settings.recovery_threshold,
+            )
 
 
 def run_local_checks(
@@ -892,6 +904,13 @@ def run_local_checks(
             for key, future in futures.items():
                 check_cache[key] = future.result()
                 checked += 1
+
+    _check_relay_backends(
+        [origin for origin in origins if origin.group.enabled],
+        check_once,
+        check_cache,
+        settings,
+    )
 
     for origin in origins_to_probe:
         if is_expanded_origin(origin):

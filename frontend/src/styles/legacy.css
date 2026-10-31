@@ -655,7 +655,8 @@ button.zonePill.active {
   grid-template-columns: repeat(2, minmax(220px, 1fr));
 }
 
-.settingsGrid .wideField {
+.settingsGrid .wideField,
+.originEditGrid .wideField {
   grid-column: 1 / -1;
 }
 
@@ -2913,4 +2914,41 @@ form.panel {
 .dark .loadIpWeight,
 .dark .originBadge.rotating {
   color: #a5b4fc;
+}
+
+.status.relay_down {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+/* Relay backends (B) of an origin, with their own check status. */
+.relayList {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.relayListLabel {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.relayChip {
+  border-radius: 999px;
+  font-size: 12px;
+  padding: 2px 8px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.relayChip.up {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.relayChip.down {
+  background: #fee2e2;
+  color: #b91c1c;
 }

@@ -95,6 +95,7 @@ STATUS_NAMES = {
     "unhealthy": "不可用",
     "blocked": "疑似被墙",
     "machine_down": "机器疑似挂了",
+    "relay_down": "中转后端全部不通",
     "regional_issue": "本地探测异常",
     "unknown": "未知",
     "disabled": "已禁用",
@@ -279,7 +280,7 @@ def telegram_event_priority(event_type: str, payload: dict[str, Any]) -> int:
     if event_type == "agent.status_changed":
         return 30 if payload.get("status") in {"offline", "disabled"} else 10
     if event_type in {"origin.status_changed", "alibaba_httpdns.origin_status_changed"}:
-        return 30 if payload.get("status") in {"unhealthy", "blocked", "machine_down"} else 10
+        return 30 if payload.get("status") in {"unhealthy", "blocked", "machine_down", "relay_down"} else 10
     return TELEGRAM_EVENT_PRIORITIES.get(event_type, 10)
 
 

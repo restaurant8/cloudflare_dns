@@ -18,7 +18,8 @@ from ..dns_utils import normalize_hostname, parse_target
 from ..events import add_event
 from ..doh import sync_doh_endpoint, sync_group_doh_endpoint, validate_doh_hostname_conflicts
 from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records, zone_for_hostname
-from ..health import run_local_checks
+from ..health import recalculate_origin_status, run_local_checks
+from ..relay import relay_targets, set_relay_targets
 from ..integrations import azpanel_settings, refresh_legacy_origin_mirror, resource_owns_port, sync_resource_current_ip_to_origin
 from ..models import Agent, AlibabaHttpDnsGroup, AzPanelRemoteResource, AzPanelResource, DohEndpoint, ExternalIpItem, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, User, Zone
 from ..notifier import send_webhooks
@@ -285,6 +286,7 @@ def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreat
         external_machine_key=external_machine_key,
     )
     _apply_expanded_ip_priorities(origin, payload.expanded_ip_priorities if target_info.target_type == "hostname" else {})
+    _apply_relay_targets(origin, payload.relay_targets)
     if payload.load_parent_id is not None:
         parent = _load_balance_node(db, group, payload.load_parent_id)
         origin.load_parent_id = parent.id
@@ -317,7 +319,16 @@ def _copy_node_settings(node: Origin, member: Origin) -> bool:
     )
     for key in _NODE_SHARED_SETTINGS:
         setattr(member, key, getattr(node, key))
+    # Load IPs forward to the same relay backends as their origin.
+    set_relay_targets(member, relay_targets(node))
     return probe_changed
+
+
+def _apply_relay_targets(owner, values) -> bool:
+    try:
+        return set_relay_targets(owner, values)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"中转后端格式不正确：{exc}") from exc
 
 
 def _load_balance_node(db: Session, group: FailoverGroup, node_id: int) -> Origin:
@@ -400,6 +411,7 @@ def _global_origin_from_payload(db: Session, collection: FailoverCollection, pay
         ignore_health_check=payload.ignore_health_check,
     )
     _apply_expanded_ip_priorities(global_origin, payload.expanded_ip_priorities if target_info.target_type == "hostname" else {})
+    _apply_relay_targets(global_origin, payload.relay_targets)
     return global_origin
 
 
@@ -444,6 +456,7 @@ def _copy_global_origin_to_origin(origin: Origin, global_origin: FailoverGlobalO
     origin.enabled = global_origin.enabled
     origin.ignore_health_check = global_origin.ignore_health_check
     origin.expanded_ip_priorities_json = global_origin.expanded_ip_priorities_json
+    set_relay_targets(origin, relay_targets(global_origin))
     if endpoint_changed or probe_source_changed:
         _reset_origin_probe_state(origin)
     return endpoint_changed
@@ -815,6 +828,10 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
         _apply_expanded_ip_priorities(global_origin, {})
     if "remark" in updates:
         global_origin.remark = _normalize_remark(updates.pop("remark"))
+    if "relay_targets" in updates:
+        relay_update = updates.pop("relay_targets")
+        if relay_update is not None:
+            _apply_relay_targets(global_origin, relay_update)
     for key, value in updates.items():
         setattr(global_origin, key, value)
     current_endpoint_changed_groups = sync_global_origins_to_collection(db, global_origin.collection)
@@ -1517,12 +1534,22 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     )
     if "remark" in updates:
         origin.remark = _normalize_remark(updates.pop("remark"))
+    relay_changed = False
+    if "relay_targets" in updates:
+        relay_update = updates.pop("relay_targets")
+        if relay_update is not None:
+            relay_changed = _apply_relay_targets(origin, relay_update)
     for key, value in updates.items():
         setattr(origin, key, value)
     if origin.load_parent_id is None:
         for member in _load_members_of(db, origin):
             if _copy_node_settings(origin, member):
                 _reset_origin_probe_state(member)
+            elif relay_changed:
+                recalculate_origin_status(db, member)
+    if relay_changed:
+        # Removing or replacing backends must lift a stale "relay_down" right away.
+        recalculate_origin_status(db, origin)
 
     if endpoint_changed or probe_source_changed:
         origin.status = "unknown"

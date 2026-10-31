@@ -559,6 +559,18 @@ class FailoverHostnameOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RelayTarget(BaseModel):
+    target: str = Field(min_length=1, max_length=255)
+    port: int = Field(ge=1, le=65535)
+
+
+class RelayStatusOut(RelayTarget):
+    status: str = "unknown"
+    last_checked_at: str | None = None
+    last_error: str | None = None
+    last_rtt_ms: float | None = None
+
+
 class OriginCreate(BaseModel):
     target: str = Field(min_length=1, max_length=255)
     port: int = Field(ge=1, le=65535)
@@ -566,6 +578,8 @@ class OriginCreate(BaseModel):
     # 负载均衡：填写后作为该源站的负载 IP，其它配置跟随该源站，与它的其它 IP 按权重轮流使用
     load_parent_id: int | None = None
     weight: int = Field(default=1, ge=1, le=100)
+    # 中转后端 B：本源站正常且至少一个 B 正常才算可用
+    relay_targets: list[RelayTarget] = Field(default_factory=list, max_length=20)
     publish_mode: Literal["direct", "expanded"] = "direct"
     expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
     preferred_agent_id: int | None = None
@@ -591,6 +605,7 @@ class OriginUpdate(BaseModel):
     port: int | None = Field(default=None, ge=1, le=65535)
     priority: int | None = Field(default=None, ge=0, le=100000)
     weight: int | None = Field(default=None, ge=1, le=100)
+    relay_targets: list[RelayTarget] | None = Field(default=None, max_length=20)
     publish_mode: Literal["direct", "expanded"] | None = None
     expanded_ip_priorities: dict[str, int] | None = None
     preferred_agent_id: int | None = None
@@ -640,6 +655,7 @@ class OriginOut(BaseModel):
     priority: int
     weight: int = 1
     load_parent_id: int | None = None
+    relays: list[RelayStatusOut] = Field(default_factory=list)
     remark: str | None
     enabled: bool
     ignore_health_check: bool
@@ -686,6 +702,7 @@ class FailoverGlobalOriginOut(BaseModel):
     port: int
     priority: int
     weight: int = 1
+    relay_targets: list[RelayTarget] = Field(default_factory=list)
     expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
     remark: str | None
     enabled: bool

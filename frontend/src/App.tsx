@@ -33,7 +33,7 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, AlibabaHttpDnsCredential, AlibabaHttpDnsEffectiveScope, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteRecord, AlibabaHttpDnsRemoteZone, AwsRoute53Credential, AwsRoute53Output, AwsRoute53PrivateZone, AwsVpc, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, SshSettings, CustomIpSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
+import type { Agent, AlibabaHttpDnsCredential, AlibabaHttpDnsEffectiveScope, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteRecord, AlibabaHttpDnsRemoteZone, AwsRoute53Credential, AwsRoute53Output, AwsRoute53PrivateZone, AwsVpc, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, RelayStatus, RelayTarget, SshSettings, CustomIpSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
 import {
   Sidebar,
   SidebarContent,
@@ -57,8 +57,8 @@ import { ThemeToggle } from "@/components/theme-toggle";
 type Section = "overview" | "cloudflare" | "records" | "groups" | "doh" | "awsRoute53" | "alibabaHttpDns" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
 type ProbeMode = "default" | "local_only" | "china_only" | "any";
-type OriginAddDraft = { target: string; port: number; priority: number; weight: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
-type OriginEditDraft = { target: string; port: number; priority: number; weight: number; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; unbind_external: boolean };
+type OriginAddDraft = { target: string; port: number; priority: number; weight: number; relay_text: string; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
+type OriginEditDraft = { target: string; port: number; priority: number; weight: number; relay_text: string; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; unbind_external: boolean };
 type GlobalOriginDraft = OriginAddDraft;
 // Machine binding stays tri-state; azpanel_resource_id carries the exact current
 // binding so the same form can keep, change or clear it explicitly.
@@ -131,6 +131,7 @@ const statusLabels: Record<string, string> = {
   unhealthy: "不可用",
   blocked: "疑似被墙",
   machine_down: "机器疑似挂了",
+  relay_down: "中转不通",
   regional_issue: "本地探测异常",
   disabled: "已禁用",
   enabled: "已启用",
@@ -186,6 +187,29 @@ const telegramNotifyLevelLabels: Record<string, string> = {
   critical: "故障和切换",
   all: "全部通知"
 };
+
+// 中转后端：每行一个 "IP:端口"（IPv6 写成 [2001:db8::1]:443 或 "2001:db8::1 443"）
+function formatRelayText(items: RelayTarget[] | undefined): string {
+  return (items || []).map((item) => (item.target.includes(":") ? `[${item.target}]:${item.port}` : `${item.target}:${item.port}`)).join("\n");
+}
+
+function parseRelayText(text: string): RelayTarget[] {
+  const items: RelayTarget[] = [];
+  for (const raw of text.split(/[\n,;，；]+/)) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    const match = entry.match(/^\[(.+)\]:(\d+)$/) || entry.match(/^(.+?)[\s:](\d+)$/);
+    if (!match) throw new Error(`中转后端「${entry}」缺少端口，请写成 IP:端口，例如 203.0.113.5:8443`);
+    const port = Number(match[2]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`中转后端「${entry}」的端口无效`);
+    items.push({ target: match[1].trim(), port });
+  }
+  return items;
+}
+
+function relayStatusText(relay: RelayStatus): string {
+  return relay.status === "up" ? "正常" : relay.status === "down" ? "不通" : "检测中";
+}
 
 function statusText(value: string): string {
   return statusLabels[value] || value;
@@ -471,8 +495,8 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, weight: 1, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
-const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, weight: 1, publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, weight: 1, relay_text: "", publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
+const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, weight: 1, relay_text: "", publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
 const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
@@ -3250,6 +3274,7 @@ function GroupsPanel({
       port: 22,
       priority: maxPriority + 10,
       weight: 1,
+      relay_text: "",
       publish_mode: "direct",
       expanded_ip_priorities: {},
       preferred_agent_id: "",
@@ -3277,6 +3302,7 @@ function GroupsPanel({
             port: globalOriginAdd.port,
             priority: globalOriginAdd.priority,
             weight: globalOriginAdd.weight,
+            relay_targets: parseRelayText(globalOriginAdd.relay_text),
             publish_mode: globalAddTargetType === "hostname" ? globalOriginAdd.publish_mode : "direct",
             expanded_ip_priorities: globalAddTargetType === "hostname" ? globalOriginAdd.expanded_ip_priorities : {},
             preferred_agent_id: globalOriginAdd.preferred_agent_id === "" ? null : globalOriginAdd.preferred_agent_id,
@@ -3306,6 +3332,7 @@ function GroupsPanel({
         port: origin.port,
         priority: origin.priority,
         weight: origin.weight || 1,
+        relay_text: formatRelayText(origin.relay_targets),
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
         preferred_agent_id: origin.preferred_agent_id || "",
@@ -3336,6 +3363,7 @@ function GroupsPanel({
             port: draft.port,
             priority: draft.priority,
             weight: draft.weight,
+            relay_targets: parseRelayText(draft.relay_text),
             publish_mode: targetType === "hostname" ? draft.publish_mode : "direct",
             expanded_ip_priorities: targetType === "hostname" ? draft.expanded_ip_priorities : {},
             remark: draft.remark.trim() || null,
@@ -3365,6 +3393,7 @@ function GroupsPanel({
       port: 22,
       priority: maxPriority + 10,
       weight: 1,
+      relay_text: "",
       publish_mode: providerRequiredHostnamePublishMode(group) || "direct",
       expanded_ip_priorities: {},
       preferred_agent_id: "",
@@ -3486,6 +3515,7 @@ function GroupsPanel({
             port: originAdd.port,
             priority: originAdd.priority,
             weight: originAdd.weight,
+            relay_targets: parseRelayText(originAdd.relay_text),
             publish_mode: addTargetType === "hostname" ? (addingGroupRequiredPublishMode || originAdd.publish_mode) : "direct",
             expanded_ip_priorities: addTargetType === "hostname" ? originAdd.expanded_ip_priorities : {},
             preferred_agent_id: originAdd.preferred_agent_id === "" ? null : originAdd.preferred_agent_id,
@@ -3694,6 +3724,7 @@ function GroupsPanel({
         port: origin.port,
         priority: origin.priority,
         weight: origin.weight || 1,
+        relay_text: formatRelayText(origin.relays),
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
         preferred_agent_id: origin.preferred_agent_id || "",
@@ -3713,20 +3744,20 @@ function GroupsPanel({
     const targetType = inferDraftTargetType(draft.target);
     const originGroup = groups.find((group) => group.origins.some((origin) => origin.id === originId));
     const requiredPublishMode = providerRequiredHostnamePublishMode(originGroup);
-    const { unbind_external, ...rest } = draft;
-    const payload = {
-      ...rest,
-      publish_mode: targetType === "hostname" ? (requiredPublishMode || draft.publish_mode) : "direct",
-      preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id,
-      probe_mode: draft.probe_mode,
-      azpanel_resource_id: draft.azpanel_resource_id === "" ? null : draft.azpanel_resource_id,
-      ...(unbind_external ? { external_ip_item_id: null } : {})
-    };
+    const { unbind_external, relay_text, ...rest } = draft;
     await act(
       () =>
         apiFetch(`/api/groups/origins/${originId}`, token, {
           method: "PATCH",
-          body: JSON.stringify(payload)
+          body: JSON.stringify({
+            ...rest,
+            relay_targets: parseRelayText(relay_text),
+            publish_mode: targetType === "hostname" ? (requiredPublishMode || draft.publish_mode) : "direct",
+            preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id,
+            probe_mode: draft.probe_mode,
+            azpanel_resource_id: draft.azpanel_resource_id === "" ? null : draft.azpanel_resource_id,
+            ...(unbind_external ? { external_ip_item_id: null } : {})
+          })
         }),
       "源站已更新并应用",
       () => setEditingOriginId(null)
@@ -3860,6 +3891,7 @@ function GroupsPanel({
       port: origin.port,
       priority: origin.priority,
       weight: origin.weight || 1,
+      relay_text: formatRelayText(origin.relay_targets),
       publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
       expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
       preferred_agent_id: origin.preferred_agent_id || "",
@@ -3999,6 +4031,10 @@ function GroupsPanel({
             备注
             <input value={draft.remark} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, remark: event.target.value } }))} />
           </label>
+          <label className="wideField" title="每行一个中转后端（B）的 IP:端口。填多个时，只要还有一个能连通就算正常；全部不通时，即使本机正常也会判定为中转不通并切走。留空表示不检测">
+            中转后端（可选）
+            <textarea rows={2} placeholder="例如\n203.0.113.5:8443\n203.0.113.6:8443" value={draft.relay_text} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, relay_text: event.target.value } }))} />
+          </label>
           <label className="inlineCheck">
             <input
               type="checkbox"
@@ -4046,6 +4082,7 @@ function GroupsPanel({
           <span>
             {origin.external_machine_key ? `当前 ${origin.target}:${origin.port} · ` : ""}
             {targetTypeText(origin.target_type)} · 优先级 {origin.priority} · 发布为 {recordTypeForTargetType(origin.target_type, origin.publish_mode)} · {origin.enabled ? "已启用" : "已停用"}
+            {(origin.relay_targets || []).length > 0 && ` · 中转后端 ${origin.relay_targets.map((relay) => `${relay.target}:${relay.port}`).join("、")}`}
             {preferredAgent ? ` · 指定探针 ${preferredAgent.name}` : ""}
             {normalizeProbeMode(origin.probe_mode) !== "default" ? ` · ${probeModeText(origin.probe_mode)}` : ""}
             {origin.ignore_health_check ? " · 无视健康检查" : ""}
@@ -4528,6 +4565,7 @@ function GroupsPanel({
                         port: origin.port,
                         priority: origin.priority,
                         weight: origin.weight || 1,
+                        relay_text: formatRelayText(origin.relays),
                         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
                         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
                         preferred_agent_id: origin.preferred_agent_id || "",
@@ -4661,6 +4699,12 @@ function GroupsPanel({
                                   备注
                                   <input placeholder="有备注时卡片优先显示备注" value={originEdit.remark} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, remark: event.target.value } }))} />
                                 </label>
+                                {!isLoadMember && (
+                                  <label className="wideField" title="每行一个中转后端（B）的 IP:端口。填多个时，只要还有一个能连通就算正常；全部不通时，即使本机正常也会判定为中转不通并切走。留空表示不检测">
+                                    中转后端（可选，A → B → C 里的 B）
+                                    <textarea rows={2} placeholder="例如\n203.0.113.5:8443\n203.0.113.6:8443" value={originEdit.relay_text} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, relay_text: event.target.value } }))} />
+                                  </label>
+                                )}
                                 <label className="inlineCheck">
                                   <input
                                     type="checkbox"
@@ -4758,6 +4802,16 @@ function GroupsPanel({
                                         已隐藏历史 IP {hiddenProbeCount} 条
                                       </span>
                                     )}
+                                  </div>
+                                )}
+                                {(origin.relays || []).length > 0 && (
+                                  <div className="relayList" title="中转后端（B）由面板直接检测；全部不通时本源站判为中转不通">
+                                    <span className="relayListLabel">中转后端</span>
+                                    {origin.relays.map((relay) => (
+                                      <span className={`relayChip ${relay.status}`} key={`${relay.target}:${relay.port}`} title={relay.last_error || (relay.last_checked_at ? `最后检测 ${fmtDate(relay.last_checked_at)}` : "等待检测")}>
+                                        {relay.target}:{relay.port} · {relayStatusText(relay)}
+                                      </span>
+                                    ))}
                                   </div>
                                 )}
                                 {!isLoadMember && !origin.global_origin_id && (
@@ -4977,6 +5031,10 @@ function GroupsPanel({
               备注
               <input placeholder="例如 全局香港备用、通用回源" value={globalOriginAdd.remark} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, remark: event.target.value }))} />
             </label>
+            <label title="每行一个中转后端（B）的 IP:端口。填多个时，只要还有一个能连通就算正常；全部不通时，即使本机正常也会判定为中转不通并切走。留空表示不检测">
+              中转后端（可选，A → B → C 里的 B）
+              <textarea rows={2} placeholder="例如\n203.0.113.5:8443\n203.0.113.6:8443" value={globalOriginAdd.relay_text} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, relay_text: event.target.value }))} />
+            </label>
             <div className="modalFormGrid">
               <label>
                 检查端口
@@ -5154,6 +5212,10 @@ function GroupsPanel({
             <label>
               备注
               <input placeholder="例如 香港备用、线路 1" value={originAdd.remark} onChange={(event) => setOriginAdd((current) => ({ ...current, remark: event.target.value }))} />
+            </label>
+            <label title="每行一个中转后端（B）的 IP:端口。填多个时，只要还有一个能连通就算正常；全部不通时，即使本机正常也会判定为中转不通并切走。留空表示不检测">
+              中转后端（可选，A → B → C 里的 B）
+              <textarea rows={2} placeholder="例如\n203.0.113.5:8443\n203.0.113.6:8443" value={originAdd.relay_text} onChange={(event) => setOriginAdd((current) => ({ ...current, relay_text: event.target.value }))} />
             </label>
             <div className="modalFormGrid">
               <label>

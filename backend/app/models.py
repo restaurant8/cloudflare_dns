@@ -503,6 +503,10 @@ class Origin(Base, TimestampMixin):
     healthy_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     published_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     expanded_ip_priorities_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    # 中转后端（A → B → C 里的 B）：[{"target", "port"}]。全部不通时本源站判为中转不通。
+    relay_targets_json: Mapped[str | None] = mapped_column(Text, default="[]")
+    # 各中转后端的检测状态：{"target|port": {"status": up/down/unknown, ...}}
+    relay_status_json: Mapped[str | None] = mapped_column(Text, default="{}")
 
     group: Mapped["FailoverGroup"] = relationship("FailoverGroup", back_populates="origins")
     global_origin: Mapped["FailoverGlobalOrigin | None"] = relationship("FailoverGlobalOrigin", back_populates="mirrored_origins")
@@ -524,6 +528,12 @@ class Origin(Base, TimestampMixin):
     @property
     def expanded_ip_priorities(self) -> dict[str, int]:
         return expanded_ip_priorities(self)
+
+    @property
+    def relays(self) -> list[dict]:
+        from .relay import relay_overview
+
+        return relay_overview(self)
 
 
 class FailoverTimeRule(Base, TimestampMixin):
@@ -605,10 +615,18 @@ class FailoverGlobalOrigin(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     ignore_health_check: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     expanded_ip_priorities_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    # 中转后端，同步到业务分组下每个域名的镜像源站
+    relay_targets_json: Mapped[str | None] = mapped_column(Text, default="[]")
 
     @property
     def expanded_ip_priorities(self) -> dict[str, int]:
         return expanded_ip_priorities(self)
+
+    @property
+    def relay_targets(self) -> list[dict]:
+        from .relay import relay_targets
+
+        return relay_targets(self)
 
     collection: Mapped["FailoverCollection"] = relationship("FailoverCollection", back_populates="global_origins")
     preferred_agent: Mapped["Agent | None"] = relationship("Agent", foreign_keys=[preferred_agent_id])

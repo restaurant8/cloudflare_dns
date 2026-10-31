@@ -504,6 +504,8 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
             "external_machine_key": "ALTER TABLE origins ADD COLUMN external_machine_key VARCHAR(255) NULL",
             "azpanel_resource_id": "ALTER TABLE origins ADD COLUMN azpanel_resource_id INT NULL",
             "load_parent_id": "ALTER TABLE origins ADD COLUMN load_parent_id INT NULL",
+            "relay_targets_json": "ALTER TABLE origins ADD COLUMN relay_targets_json TEXT NULL",
+            "relay_status_json": "ALTER TABLE origins ADD COLUMN relay_status_json TEXT NULL",
             "ignore_health_check": "ALTER TABLE origins ADD COLUMN ignore_health_check TINYINT(1) NOT NULL DEFAULT 0",
         }
     return {
@@ -520,6 +522,8 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
         "external_machine_key": "ALTER TABLE origins ADD COLUMN external_machine_key VARCHAR(255)",
         "azpanel_resource_id": "ALTER TABLE origins ADD COLUMN azpanel_resource_id INTEGER",
         "load_parent_id": "ALTER TABLE origins ADD COLUMN load_parent_id INTEGER",
+        "relay_targets_json": "ALTER TABLE origins ADD COLUMN relay_targets_json TEXT",
+        "relay_status_json": "ALTER TABLE origins ADD COLUMN relay_status_json TEXT",
         "ignore_health_check": "ALTER TABLE origins ADD COLUMN ignore_health_check BOOLEAN NOT NULL DEFAULT FALSE",
     }
 
@@ -586,6 +590,7 @@ def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
             "external_machine_key": "ALTER TABLE failover_global_origins ADD COLUMN external_machine_key VARCHAR(255) NULL",
             "azpanel_resource_id": "ALTER TABLE failover_global_origins ADD COLUMN azpanel_resource_id INT NULL",
             "weight": "ALTER TABLE failover_global_origins ADD COLUMN weight INT NOT NULL DEFAULT 1",
+            "relay_targets_json": "ALTER TABLE failover_global_origins ADD COLUMN relay_targets_json TEXT NULL",
         }
     return {
         "preferred_agent_id": "ALTER TABLE failover_global_origins ADD COLUMN preferred_agent_id INTEGER",
@@ -596,6 +601,7 @@ def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
         "external_machine_key": "ALTER TABLE failover_global_origins ADD COLUMN external_machine_key VARCHAR(255)",
         "azpanel_resource_id": "ALTER TABLE failover_global_origins ADD COLUMN azpanel_resource_id INTEGER",
         "weight": "ALTER TABLE failover_global_origins ADD COLUMN weight INTEGER NOT NULL DEFAULT 1",
+        "relay_targets_json": "ALTER TABLE failover_global_origins ADD COLUMN relay_targets_json TEXT",
     }
 
 
