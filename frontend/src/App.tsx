@@ -33,7 +33,7 @@ import {
   Webhook as WebhookIcon
 } from "lucide-react";
 import { apiFetch, fmtDate, fmtTime } from "./api";
-import type { Agent, AlibabaHttpDnsCredential, AlibabaHttpDnsEffectiveScope, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteRecord, AlibabaHttpDnsRemoteZone, AwsRoute53Credential, AwsRoute53Output, AwsRoute53PrivateZone, AwsVpc, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, RelayStatus, RelayTarget, SshSettings, CustomIpSettings, SystemSettings, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
+import type { Agent, AlibabaHttpDnsCredential, AlibabaHttpDnsEffectiveScope, AlibabaHttpDnsGroup, AlibabaHttpDnsRemoteRecord, AlibabaHttpDnsRemoteZone, AwsRoute53Credential, AwsRoute53Output, AwsRoute53PrivateZone, AwsVpc, AzPanelRemoteResource, AzPanelResource, AzPanelSettings, Credential, DnsRecord, DohEndpoint, EventItem, ExternalIpItem, ExternalIpSource, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, IpChangeJob, Origin, Overview, ProbeState, SavedSnippet, RelayStatus, SshSettings, CustomIpSettings, SystemSettings, TargetPool, TargetPoolItem, TelegramNotification, UserProfile, Webhook, XboardNodeBinding, XboardSettings, Zone } from "./types";
 import {
   Sidebar,
   SidebarContent,
@@ -57,8 +57,8 @@ import { ThemeToggle } from "@/components/theme-toggle";
 type Section = "overview" | "cloudflare" | "records" | "groups" | "doh" | "awsRoute53" | "alibabaHttpDns" | "targetPool" | "externalIps" | "azpanel" | "snippets" | "ssh" | "agents" | "webhooks" | "settings" | "account" | "events";
 type ExpandedIpPriorityMap = Record<string, number>;
 type ProbeMode = "default" | "local_only" | "china_only" | "any";
-type OriginAddDraft = { target: string; port: number; priority: number; weight: number; relay_text: string; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
-type OriginEditDraft = { target: string; port: number; priority: number; weight: number; relay_text: string; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; unbind_external: boolean };
+type OriginAddDraft = { target: string; port: number; priority: number; weight: number; relay_pool_ids: number[]; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; azpanel_remote_key: string; external_ip_item_id: number | "" };
+type OriginEditDraft = { target: string; port: number; priority: number; weight: number; relay_pool_ids: number[]; publish_mode: string; expanded_ip_priorities: ExpandedIpPriorityMap; preferred_agent_id: number | ""; probe_mode: ProbeMode; remark: string; enabled: boolean; ignore_health_check: boolean; azpanel_resource_id: number | ""; unbind_external: boolean };
 type GlobalOriginDraft = OriginAddDraft;
 // Machine binding stays tri-state; azpanel_resource_id carries the exact current
 // binding so the same form can keep, change or clear it explicitly.
@@ -70,7 +70,6 @@ type GroupTimeRuleDraft = { enabled: boolean; name: string; origin_id: number | 
 type HostnameAddDraft = { hostname: string; adopt_record_id: string };
 type DnsRecordType = "A" | "AAAA" | "CNAME";
 type DnsRecordEditDraft = { name: string; type: DnsRecordType; content: string; ttl: number; proxied: boolean };
-type TargetPoolDraft = { target: string; port: number; remark: string; check_interval_seconds: number; enabled: boolean };
 type ExternalIpSourceDraft = { name: string; base_url: string; token: string; default_port: number; sync_interval_seconds: number; enabled: boolean };
 type SnippetDraft = { title: string; category: string; address: string; username: string; port: string; tags: string; content: string; code: string };
 type SshSettingsDraft = { enabled: boolean; external_url: string };
@@ -188,27 +187,34 @@ const telegramNotifyLevelLabels: Record<string, string> = {
   all: "全部通知"
 };
 
-// 中转后端：每行一个 "IP:端口"（IPv6 写成 [2001:db8::1]:443 或 "2001:db8::1 443"）
-function formatRelayText(items: RelayTarget[] | undefined): string {
-  return (items || []).map((item) => (item.target.includes(":") ? `[${item.target}]:${item.port}` : `${item.target}:${item.port}`)).join("\n");
-}
-
-function parseRelayText(text: string): RelayTarget[] {
-  const items: RelayTarget[] = [];
-  for (const raw of text.split(/[\n,;，；]+/)) {
-    const entry = raw.trim();
-    if (!entry) continue;
-    const match = entry.match(/^\[(.+)\]:(\d+)$/) || entry.match(/^(.+?)[\s:](\d+)$/);
-    if (!match) throw new Error(`中转后端「${entry}」缺少端口，请写成 IP:端口，例如 203.0.113.5:8443`);
-    const port = Number(match[2]);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`中转后端「${entry}」的端口无效`);
-    items.push({ target: match[1].trim(), port });
-  }
-  return items;
-}
-
 function relayStatusText(relay: RelayStatus): string {
-  return relay.status === "up" ? "正常" : relay.status === "down" ? "不通" : "检测中";
+  return relay.status === "healthy" ? "正常" : relay.status === "unhealthy" ? "不通" : "检测中";
+}
+
+function relayChipClass(relay: RelayStatus): string {
+  return relay.status === "healthy" ? "up" : relay.status === "unhealthy" ? "down" : "unknown";
+}
+
+// 中转后端：选择 IP 池子（池子里的地址就是 B）。选多个时所有池子的地址合起来算。
+function RelayPoolPicker({ pools, value, onChange }: { pools: TargetPool[]; value: number[]; onChange: (next: number[]) => void }) {
+  return (
+    <div className="relayPoolPicker" title="选择 IP 池子作为中转后端（A → B → C 里的 B）。只要选中池子里还有一个地址能连通就算正常；全部不通时，即使本机正常也会判定为中转不通并切走。都不选表示不检测">
+      <span className="relayPoolLabel">中转后端（可选，A → B → C 里的 B）</span>
+      {pools.length === 0 ? (
+        <small>还没有 IP 池子，先到「IP 池子」里新建一个，把 B 的地址放进去</small>
+      ) : (
+        <div className="relayPoolOptions">
+          {pools.map((pool) => (
+            <label className="inlineCheck" key={pool.id}>
+              <input type="checkbox" checked={value.includes(pool.id)} onChange={(event) => onChange(event.target.checked ? [...value, pool.id] : value.filter((id) => id !== pool.id))} />
+              {pool.name}
+              <small>{pool.items.filter((item) => item.enabled).length} 个地址</small>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function statusText(value: string): string {
@@ -495,10 +501,9 @@ const emptyOverview: Overview = {
   recent_events: []
 };
 
-const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, weight: 1, relay_text: "", publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
-const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, weight: 1, relay_text: "", publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
+const defaultOriginAddDraft: OriginAddDraft = { target: "", port: 22, priority: 10, weight: 1, relay_pool_ids: [], publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
+const defaultGlobalOriginDraft: GlobalOriginDraft = { target: "", port: 22, priority: 10, weight: 1, relay_pool_ids: [], publish_mode: "direct", expanded_ip_priorities: {}, preferred_agent_id: "", probe_mode: "default", remark: "", enabled: true, ignore_health_check: false, azpanel_resource_id: "", azpanel_remote_key: "", external_ip_item_id: "" };
 const dnsRecordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME"];
-const defaultTargetPoolDraft: TargetPoolDraft = { target: "", port: 22, remark: "", check_interval_seconds: 600, enabled: true };
 const defaultExternalIpSourceDraft: ExternalIpSourceDraft = { name: "", base_url: "", token: "", default_port: 22, sync_interval_seconds: 600, enabled: true };
 const defaultSnippetDraft: SnippetDraft = { title: "", category: "command", address: "", username: "", port: "22", tags: "", content: "", code: "" };
 const liveRefreshIntervalMs = 10000;
@@ -553,7 +558,7 @@ export default function App() {
   const [awsRoute53Outputs, setAwsRoute53Outputs] = useState<AwsRoute53Output[]>([]);
   const [alibabaHttpDnsCredentials, setAlibabaHttpDnsCredentials] = useState<AlibabaHttpDnsCredential[]>([]);
   const [alibabaHttpDnsGroups, setAlibabaHttpDnsGroups] = useState<AlibabaHttpDnsGroup[]>([]);
-  const [targetPool, setTargetPool] = useState<TargetPoolItem[]>([]);
+  const [targetPools, setTargetPools] = useState<TargetPool[]>([]);
   const [externalIpSources, setExternalIpSources] = useState<ExternalIpSource[]>([]);
   const [externalIpItems, setExternalIpItems] = useState<ExternalIpItem[]>([]);
   const [snippets, setSnippets] = useState<SavedSnippet[]>([]);
@@ -600,7 +605,7 @@ export default function App() {
       apiFetch<AwsRoute53Output[]>("/api/route53/outputs", activeToken),
       apiFetch<AlibabaHttpDnsCredential[]>("/api/alibaba-httpdns/credentials", activeToken),
       apiFetch<AlibabaHttpDnsGroup[]>("/api/alibaba-httpdns/groups", activeToken),
-      apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken),
+      apiFetch<TargetPool[]>("/api/target-pool/pools", activeToken),
       apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
       apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken),
       apiFetch<AzPanelSettings>("/api/integrations/azpanel/settings", activeToken),
@@ -625,7 +630,7 @@ export default function App() {
     setAwsRoute53Outputs(nextAwsOutputs);
     setAlibabaHttpDnsCredentials(nextAlibabaHttpDnsCredentials);
     setAlibabaHttpDnsGroups(nextAlibabaHttpDnsGroups);
-    setTargetPool(nextTargetPool);
+    setTargetPools(nextTargetPool);
     setExternalIpSources(nextExternalIpSources);
     setExternalIpItems(nextExternalIpItems);
     setAzPanelSettings(nextAzPanelSettings);
@@ -724,7 +729,12 @@ export default function App() {
       setGroups(nextGroups);
       setDohEndpoints(nextEndpoints);
     } else if (current === "targetPool") {
-      setTargetPool(await apiFetch<TargetPoolItem[]>("/api/target-pool", activeToken));
+      const [nextPools, nextExternalItems] = await Promise.all([
+        apiFetch<TargetPool[]>("/api/target-pool/pools", activeToken),
+        apiFetch<ExternalIpItem[]>("/api/external-ips/items", activeToken)
+      ]);
+      setTargetPools(nextPools);
+      setExternalIpItems(nextExternalItems);
     } else if (current === "externalIps") {
       const [nextExternalIpSources, nextExternalIpItems] = await Promise.all([
         apiFetch<ExternalIpSource[]>("/api/external-ips/sources", activeToken),
@@ -1039,26 +1049,26 @@ export default function App() {
           />
         )}
         {section === "groups" && (
-          <GroupsPanel providerType="cloudflare" token={token} collections={failoverCollections.filter((item) => item.provider_type === "cloudflare")} groups={groups.filter((item) => item.provider_type === "cloudflare")} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
+          <GroupsPanel providerType="cloudflare" token={token} collections={failoverCollections.filter((item) => item.provider_type === "cloudflare")} groups={groups.filter((item) => item.provider_type === "cloudflare")} targetPools={targetPools} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
         )}
         {section === "doh" && <DohPanel token={token} endpoints={dohEndpoints} act={act} />}
         {section === "awsRoute53" && (
           <>
             <AwsRoute53Panel token={token} credentials={awsRoute53Credentials} outputs={awsRoute53Outputs} endpoints={dohEndpoints} groups={groups.filter((item) => item.provider_type === "route53")} act={act} />
-            <GroupsPanel providerType="route53" token={token} collections={failoverCollections.filter((item) => item.provider_type === "route53")} groups={groups.filter((item) => item.provider_type === "route53")} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
+            <GroupsPanel providerType="route53" token={token} collections={failoverCollections.filter((item) => item.provider_type === "route53")} groups={groups.filter((item) => item.provider_type === "route53")} targetPools={targetPools} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actGroups} />
           </>
         )}
         {section === "alibabaHttpDns" && (
           <>
             <AlibabaHttpDnsPanel token={token} credentials={alibabaHttpDnsCredentials} groups={alibabaHttpDnsGroups} failoverGroups={groups} busy={busy} act={actAlibabaHttpDns} />
-            <GroupsPanel providerType="alibaba_httpdns" token={token} collections={failoverCollections.filter((item) => item.provider_type === "alibaba_httpdns")} groups={groups.filter((item) => item.provider_type === "alibaba_httpdns")} targetPool={targetPool} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actAlibabaHttpDns} />
+            <GroupsPanel providerType="alibaba_httpdns" token={token} collections={failoverCollections.filter((item) => item.provider_type === "alibaba_httpdns")} groups={groups.filter((item) => item.provider_type === "alibaba_httpdns")} targetPools={targetPools} externalIpItems={externalIpItems} azPanelResources={azPanelResources} agents={agents} act={actAlibabaHttpDns} />
           </>
         )}
         {section === "targetPool" && (
-          <TargetPoolPanel token={token} targetPool={targetPool} groups={groups} act={act} />
+          <TargetPoolPanel token={token} pools={targetPools} externalIpItems={externalIpItems} act={act} />
         )}
         {section === "externalIps" && (
-          <ExternalIpsPanel token={token} externalIpSources={externalIpSources} externalIpItems={externalIpItems} act={act} />
+          <ExternalIpsPanel token={token} externalIpSources={externalIpSources} externalIpItems={externalIpItems} pools={targetPools} act={act} />
         )}
         {section === "azpanel" && azPanelSettings && customIpSettings && (
           <AzPanelPanel token={token} settings={azPanelSettings} customSettings={customIpSettings} resources={azPanelResources} groups={groups} jobs={ipChangeJobs} act={act} />
@@ -2675,402 +2685,301 @@ function AlibabaHttpDnsRecordCard({ token, group, failoverGroups, busy, act }: {
   );
 }
 
-function TargetPoolPanel({ token, targetPool, groups, act }: { token: string; targetPool: TargetPoolItem[]; groups: FailoverGroup[]; act: ActionRunner }) {
-  const [poolDraft, setPoolDraft] = useState<TargetPoolDraft>(defaultTargetPoolDraft);
-  const [batchText, setBatchText] = useState("");
-  const [batchPort, setBatchPort] = useState(22);
-  const [batchInterval, setBatchInterval] = useState(600);
-  const [batchRemark, setBatchRemark] = useState("");
-  const [editingPoolId, setEditingPoolId] = useState<number | null>(null);
-  const [poolEdits, setPoolEdits] = useState<Record<number, TargetPoolDraft>>({});
-  const [selectedPoolIds, setSelectedPoolIds] = useState<Set<number>>(new Set());
-  const [assignModalOpen, setAssignModalOpen] = useState(false);
-  const [assignAllGroups, setAssignAllGroups] = useState(true);
-  const [assignGroupIds, setAssignGroupIds] = useState<Set<number>>(new Set());
-  const [assignPriority, setAssignPriority] = useState(10);
-  const selectedPoolItems = targetPool.filter((item) => selectedPoolIds.has(item.id));
-  const allPoolSelected = targetPool.length > 0 && targetPool.every((item) => selectedPoolIds.has(item.id));
+function poolItemStatus(item: TargetPoolItem): string {
+  if (!item.enabled) return "disabled";
+  return item.status === "healthy" || item.status === "unhealthy" ? item.status : "unknown";
+}
 
-  async function createPoolItem(event: FormEvent) {
-    event.preventDefault();
-    await act(
-      () =>
-        apiFetch("/api/target-pool", token, {
-          method: "POST",
-          body: JSON.stringify({
-            target: poolDraft.target.trim(),
-            port: poolDraft.port,
-            remark: poolDraft.remark.trim() || null,
-            check_interval_seconds: poolDraft.check_interval_seconds,
-            enabled: poolDraft.enabled
-          })
-        }),
-      "目标已加入池子",
-      () => setPoolDraft(defaultTargetPoolDraft)
-    );
-  }
-
-  function parseBatchTargets() {
-    return batchText
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith("#"))
-      .map((line) => {
-        const parts = line.includes(",") ? line.split(",").map((part) => part.trim()) : line.split(/\s+/);
-        const target = parts[0] || "";
-        const port = parts[1] ? Number(parts[1]) : batchPort;
-        const remark = parts.slice(2).join(" ").trim() || batchRemark.trim() || null;
-        return {
-          target,
-          port,
-          remark,
-          check_interval_seconds: batchInterval,
-          enabled: true
-        };
-      });
-  }
-
-  async function createBatchPoolItems(event: FormEvent) {
-    event.preventDefault();
-    const items = parseBatchTargets();
-    if (items.length === 0) {
-      await act(async () => {
-        throw new Error("请先输入要批量添加的 IP 或域名");
-      });
-      return;
-    }
-    const invalid = items.find((item) => !item.target || !Number.isInteger(item.port) || item.port < 1 || item.port > 65535);
-    if (invalid) {
-      await act(async () => {
-        throw new Error(`批量内容格式有误：${invalid.target || "空目标"}`);
-      });
-      return;
-    }
-    await act(
-      () =>
-        apiFetch("/api/target-pool/bulk", token, {
-          method: "POST",
-          body: JSON.stringify({ items })
-        }),
-      "批量添加已完成",
-      () => setBatchText("")
-    );
-  }
-
-  function beginEditPoolItem(item: TargetPoolItem) {
-    setEditingPoolId(item.id);
-    setPoolEdits((current) => ({
-      ...current,
-      [item.id]: {
-        target: item.target,
-        port: item.port,
-        remark: item.remark || "",
-        check_interval_seconds: item.check_interval_seconds,
-        enabled: item.enabled
+// 每行一个地址：IP:端口 备注 / IP,端口,备注 / IP 端口 备注；没写端口用默认端口
+function parsePoolLines(text: string, defaultPort: number): { target: string; port: number; remark: string | null }[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => {
+      const bracketed = line.match(/^\[([^\]]+)\](?::(\d+))?\s*(.*)$/);
+      if (bracketed) {
+        return { target: bracketed[1], port: bracketed[2] ? Number(bracketed[2]) : defaultPort, remark: bracketed[3].trim() || null };
       }
-    }));
+      const parts = line.includes(",") ? line.split(",").map((part) => part.trim()) : line.split(/\s+/);
+      let target = parts[0] || "";
+      let port = defaultPort;
+      let rest = parts.slice(1);
+      const hostPort = target.match(/^([^:]+):(\d+)$/);
+      if (hostPort) {
+        target = hostPort[1];
+        port = Number(hostPort[2]);
+      } else if (rest[0] && /^\d+$/.test(rest[0])) {
+        port = Number(rest[0]);
+        rest = rest.slice(1);
+      }
+      return { target, port, remark: rest.join(" ").trim() || null };
+    });
+}
+
+type PoolItemDraft = { target: string; port: number; remark: string; external_ip_item_id: number | "" };
+const emptyPoolItemDraft: PoolItemDraft = { target: "", port: 443, remark: "", external_ip_item_id: "" };
+
+function TargetPoolPanel({ token, pools, externalIpItems, act }: { token: string; pools: TargetPool[]; externalIpItems: ExternalIpItem[]; act: ActionRunner }) {
+  const [newPool, setNewPool] = useState({ name: "", remark: "" });
+  const [itemDrafts, setItemDrafts] = useState<Record<number, PoolItemDraft>>({});
+  const [bulkTexts, setBulkTexts] = useState<Record<number, string>>({});
+  const [bulkOpen, setBulkOpen] = useState<Record<number, boolean>>({});
+  const [editingPool, setEditingPool] = useState<{ id: number; name: string; remark: string } | null>(null);
+  const [editingItem, setEditingItem] = useState<{ id: number; target: string; port: number; remark: string; enabled: boolean; unbind: boolean } | null>(null);
+  const machines = externalIpItems.filter((item) => item.machine_key);
+
+  async function createPool(event: FormEvent) {
+    event.preventDefault();
+    await act(
+      () => apiFetch("/api/target-pool/pools", token, { method: "POST", body: JSON.stringify({ name: newPool.name.trim(), remark: newPool.remark.trim() || null }) }),
+      "IP 池子已创建",
+      () => setNewPool({ name: "", remark: "" })
+    );
   }
 
-  async function savePoolItem(itemId: number) {
-    const draft = poolEdits[itemId];
-    if (!draft) return;
+  async function addItem(pool: TargetPool) {
+    const draft = itemDrafts[pool.id] || emptyPoolItemDraft;
     await act(
-      () =>
-        apiFetch(`/api/target-pool/${itemId}`, token, {
-          method: "PATCH",
+      () => {
+        if (draft.external_ip_item_id === "" && !draft.target.trim()) throw new Error("请填写地址，或从外部 IP 里选择一台机器");
+        return apiFetch(`/api/target-pool/pools/${pool.id}/items`, token, {
+          method: "POST",
           body: JSON.stringify({
-            target: draft.target.trim(),
+            target: draft.target.trim() || "0.0.0.0",
             port: draft.port,
             remark: draft.remark.trim() || null,
-            check_interval_seconds: draft.check_interval_seconds,
-            enabled: draft.enabled
+            external_ip_item_id: draft.external_ip_item_id === "" ? null : draft.external_ip_item_id
           })
-        }),
-      "目标池已更新",
-      () => setEditingPoolId(null)
+        });
+      },
+      "地址已加入池子",
+      () => setItemDrafts((current) => ({ ...current, [pool.id]: { ...emptyPoolItemDraft, port: draft.port } }))
     );
   }
 
-  function togglePoolSelected(itemId: number) {
-    setSelectedPoolIds((current) => {
-      const next = new Set(current);
-      if (next.has(itemId)) {
-        next.delete(itemId);
-      } else {
-        next.add(itemId);
-      }
-      return next;
-    });
+  async function bulkAdd(pool: TargetPool) {
+    const draft = itemDrafts[pool.id] || emptyPoolItemDraft;
+    const items = parsePoolLines(bulkTexts[pool.id] || "", draft.port);
+    await act(
+      () => {
+        if (items.length === 0) throw new Error("请先输入要批量添加的地址");
+        const invalid = items.find((item) => !item.target || !Number.isInteger(item.port) || item.port < 1 || item.port > 65535);
+        if (invalid) throw new Error(`批量内容格式有误：${invalid.target || "空地址"}`);
+        return apiFetch(`/api/target-pool/pools/${pool.id}/items/bulk`, token, { method: "POST", body: JSON.stringify({ items }) });
+      },
+      "批量添加已完成",
+      () => setBulkTexts((current) => ({ ...current, [pool.id]: "" }))
+    );
   }
 
-  function toggleAllPoolSelected() {
-    setSelectedPoolIds((current) => {
-      if (targetPool.length > 0 && targetPool.every((item) => current.has(item.id))) {
-        return new Set();
-      }
-      return new Set(targetPool.map((item) => item.id));
-    });
+  async function savePool() {
+    if (!editingPool) return;
+    await act(
+      () => apiFetch(`/api/target-pool/pools/${editingPool.id}`, token, { method: "PATCH", body: JSON.stringify({ name: editingPool.name.trim(), remark: editingPool.remark.trim() || null }) }),
+      "池子已更新",
+      () => setEditingPool(null)
+    );
   }
 
-  async function openAssignModal() {
-    if (selectedPoolItems.length === 0) {
-      await act(async () => {
-        throw new Error("请先选择要加入故障组的池子目标");
-      });
-      return;
-    }
-    if (groups.length === 0) {
-      await act(async () => {
-        throw new Error("还没有可加入的故障切换组");
-      });
-      return;
-    }
-    setAssignAllGroups(true);
-    setAssignGroupIds(new Set(groups.map((group) => group.id)));
-    setAssignModalOpen(true);
-  }
-
-  function toggleAssignGroup(groupId: number) {
-    setAssignGroupIds((current) => {
-      const next = new Set(current);
-      if (next.has(groupId)) {
-        next.delete(groupId);
-      } else {
-        next.add(groupId);
-      }
-      return next;
-    });
-  }
-
-  function toggleAssignAllVisibleGroups() {
-    setAssignGroupIds((current) => {
-      if (groups.length > 0 && groups.every((group) => current.has(group.id))) {
-        return new Set();
-      }
-      return new Set(groups.map((group) => group.id));
-    });
-  }
-
-  async function assignSelectedPoolToGroups() {
-    const groupIds = Array.from(assignGroupIds);
-    if (!assignAllGroups && groupIds.length === 0) {
-      await act(async () => {
-        throw new Error("请选择至少一个故障切换组");
-      });
-      return;
-    }
+  async function saveItem() {
+    if (!editingItem) return;
     await act(
       () =>
-        apiFetch("/api/target-pool/assign-to-groups", token, {
-          method: "POST",
+        apiFetch(`/api/target-pool/items/${editingItem.id}`, token, {
+          method: "PATCH",
           body: JSON.stringify({
-            item_ids: selectedPoolItems.map((item) => item.id),
-            all_groups: assignAllGroups,
-            group_ids: assignAllGroups ? [] : groupIds,
-            priority: assignPriority,
-            enabled: true
+            target: editingItem.target.trim(),
+            port: editingItem.port,
+            remark: editingItem.remark.trim() || null,
+            enabled: editingItem.enabled,
+            ...(editingItem.unbind ? { external_ip_item_id: null } : {})
           })
         }),
-      "池子目标已加入故障组",
-      () => {
-        setAssignModalOpen(false);
-        setSelectedPoolIds(new Set());
-      }
+      "地址已更新，用到这个池子的源站已同步",
+      () => setEditingItem(null)
     );
   }
 
   return (
     <section className="stack">
-      <div className="panelTitle groupsIntro">
+      <div className="panel panelTitle">
         <h2>IP 池子</h2>
-        <p>把常用 IP、IPv6 或域名放进池子，故障切换组添加备用时可直接选择。</p>
+        <p>把一组可复用的地址（例如中转后端 B）放进池子。源站和全局备用在「中转后端」里选择池子：池子里改一次，所有用到它的源站立即生效。面板每轮都会检测池子里的地址。</p>
       </div>
-      <div className="targetPoolPanel">
-        <div className="targetPoolTools">
-          <form className="panel targetPoolForm" onSubmit={createPoolItem}>
-            <div className="panelTitle">
-              <h2>单个添加</h2>
-              <p>支持 IPv4、IPv6 和域名，系统会自动识别发布类型。</p>
-            </div>
-            <div className="poolFormGrid">
-              <label>
-                IP / IPv6 / 域名
-                <input placeholder="例如 192.0.2.10" value={poolDraft.target} onChange={(event) => setPoolDraft((current) => ({ ...current, target: event.target.value }))} required />
-              </label>
-              <label>
-                检查端口
-                <input type="number" min={1} max={65535} value={poolDraft.port} onChange={(event) => setPoolDraft((current) => ({ ...current, port: Number(event.target.value) }))} />
-              </label>
-            </div>
-            <label>
-              备注
-              <input placeholder="例如 香港备用、洛杉矶 1 号" value={poolDraft.remark} onChange={(event) => setPoolDraft((current) => ({ ...current, remark: event.target.value }))} />
-            </label>
-            <button>
-              <Plus size={16} />
-              <span>加入池子</span>
-            </button>
-          </form>
-          <form className="panel targetPoolForm" onSubmit={createBatchPoolItems}>
-            <div className="panelTitle">
-              <h2>批量添加</h2>
-              <p>每行一个目标；也可以写成：目标,端口,备注。</p>
-            </div>
-            <label>
-              批量目标
-              <textarea
-                rows={8}
-                placeholder={"8.8.8.8\n1.1.1.1,443,Cloudflare\n2001:4860:4860::8888"}
-                value={batchText}
-                onChange={(event) => setBatchText(event.target.value)}
-              />
-            </label>
-            <div className="batchPoolGrid">
-              <label>
-                默认端口
-                <input type="number" min={1} max={65535} value={batchPort} onChange={(event) => setBatchPort(Number(event.target.value))} />
-              </label>
-            </div>
-            <label>
-              默认备注
-              <input placeholder="每行没有备注时使用" value={batchRemark} onChange={(event) => setBatchRemark(event.target.value)} />
-            </label>
-            <button>
-              <Plus size={16} />
-              <span>批量加入</span>
-            </button>
-          </form>
+
+      <form className="panel targetPoolForm" onSubmit={createPool}>
+        <div className="panelTitle">
+          <h2>新建池子</h2>
+          <p>例如按出口地区建「香港出口」「日本出口」，一个源站可以同时选多个池子。</p>
         </div>
-        <div className="panel poolListPanel">
-          <div className="panelTitle">
-            <h2>池子列表</h2>
-            <p>故障切换组里点击添加备用，即可从这里选择目标。</p>
-          </div>
-          <div className="poolBulkBar">
-            <label className="inlineCheck">
-              <input type="checkbox" checked={allPoolSelected} onChange={toggleAllPoolSelected} disabled={targetPool.length === 0} />
-              全选池子目标
-            </label>
-            <span>已选 {selectedPoolItems.length}/{targetPool.length}</span>
-            <button className="secondary compactBtn" type="button" disabled={selectedPoolItems.length === 0 || groups.length === 0} onClick={openAssignModal}>
-              <Plus size={15} />
-              <span>加入故障组</span>
-            </button>
-          </div>
-          <div className="poolList">
-            {targetPool.map((item) => {
-              const edit = poolEdits[item.id] || {
-                target: item.target,
-                port: item.port,
-                remark: item.remark || "",
-                check_interval_seconds: item.check_interval_seconds,
-                enabled: item.enabled
-              };
-              return (
-                <div className="poolItem" key={item.id}>
-                  <label className="poolSelectCheck" title="选择这个池子目标">
-                    <input type="checkbox" checked={selectedPoolIds.has(item.id)} onChange={() => togglePoolSelected(item.id)} />
-                  </label>
-                  {editingPoolId === item.id ? (
-                    <>
-                      <div className="poolEditGrid">
-                        <input value={edit.target} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, target: event.target.value } }))} />
-                        <input type="number" min={1} max={65535} value={edit.port} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, port: Number(event.target.value) } }))} />
-                        <input value={edit.remark} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, remark: event.target.value } }))} placeholder="备注" />
-                        <label className="inlineCheck">
-                          <input type="checkbox" checked={edit.enabled} onChange={(event) => setPoolEdits((current) => ({ ...current, [item.id]: { ...edit, enabled: event.target.checked } }))} />
-                          启用
-                        </label>
-                      </div>
-                      <div className="rowActions">
-                        <button className="icon" title="保存" onClick={() => savePoolItem(item.id)}>
-                          <Save size={15} />
-                        </button>
-                        <button className="icon secondaryIcon" title="取消" onClick={() => setEditingPoolId(null)}>
-                          ×
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="poolItemMain">
-                        <strong title={`${item.target}:${item.port}`}>{displayTargetWithRemark(item.target, item.port, item.remark)}</strong>
-                        <span>{targetTypeText(item.target_type)} · 发布为 {recordTypeForTargetType(item.target_type)} · 备用仓库，不做连通性检测</span>
-                      </div>
-                      <div className="rowActions">
-                        <Status value={item.enabled ? "enabled" : "disabled"} />
-                        <button className="icon secondaryIcon" title="修改" onClick={() => beginEditPoolItem(item)}>
-                          <Pencil size={15} />
-                        </button>
-                        <button className="icon dangerBtn" title="删除" onClick={() => act(() => apiFetch(`/api/target-pool/${item.id}`, token, { method: "DELETE" }), "目标已删除")}>
-                          <Trash2 size={15} />
-                        </button>
-                      </div>
-                    </>
-                  )}
+        <div className="settingsGrid">
+          <label>
+            池子名称
+            <input placeholder="例如 香港出口" value={newPool.name} onChange={(event) => setNewPool((current) => ({ ...current, name: event.target.value }))} required />
+          </label>
+          <label>
+            备注
+            <input placeholder="可选" value={newPool.remark} onChange={(event) => setNewPool((current) => ({ ...current, remark: event.target.value }))} />
+          </label>
+        </div>
+        <button>
+          <Plus size={16} />
+          <span>新建池子</span>
+        </button>
+      </form>
+
+      {pools.length === 0 && <div className="panel emptyCell">还没有 IP 池子，先在上面新建一个</div>}
+
+      {pools.map((pool) => {
+        const draft = itemDrafts[pool.id] || emptyPoolItemDraft;
+        const enabledItems = pool.items.filter((item) => item.enabled);
+        const healthyCount = enabledItems.filter((item) => item.status === "healthy").length;
+        const users = pool.used_by_origins + pool.used_by_global_origins;
+        return (
+          <div className="panel ipPoolCard" key={pool.id}>
+            <div className="ipPoolHead">
+              {editingPool?.id === pool.id ? (
+                <div className="ipPoolEdit">
+                  <input value={editingPool.name} onChange={(event) => setEditingPool({ ...editingPool, name: event.target.value })} />
+                  <input placeholder="备注" value={editingPool.remark} onChange={(event) => setEditingPool({ ...editingPool, remark: event.target.value })} />
+                  <button className="compactBtn" onClick={savePool}>
+                    <Save size={14} />
+                    保存
+                  </button>
+                  <button className="secondary compactBtn" onClick={() => setEditingPool(null)}>取消</button>
                 </div>
-              );
-            })}
-            {targetPool.length === 0 && <div className="emptyCell">还没有池子目标</div>}
-          </div>
-        </div>
-      </div>
-      {assignModalOpen && (
-        <div className="modalBackdrop" role="dialog" aria-modal="true">
-          <div className="modalPanel wideModal">
-            <div className="panelTitle">
-              <h2>池子目标加入故障组</h2>
-              <p>把已选择的池子目标批量加入为备用源站；同组已存在的相同 IP/端口会自动跳过。</p>
-            </div>
-            <div className="bulkAssignSummary">
-              <span>已选池子目标</span>
-              <div>
-                {selectedPoolItems.map((item) => (
-                  <code key={item.id}>{displayTargetWithRemark(item.target, item.port, item.remark)}</code>
-                ))}
-              </div>
-            </div>
-            <div className="modalFormGrid">
-              <label>
-                统一优先级
-                <input type="number" min={0} max={100000} value={assignPriority} onChange={(event) => setAssignPriority(Number(event.target.value))} />
-              </label>
-              <label className="inlineCheck assignAllCheck">
-                <input type="checkbox" checked={assignAllGroups} onChange={(event) => setAssignAllGroups(event.target.checked)} />
-                加入所有故障切换组
-              </label>
-            </div>
-            {!assignAllGroups && (
-              <div className="groupPicker">
-                <div className="groupPickerHead">
-                  <strong>选择故障切换组</strong>
-                  <button type="button" className="miniBtn" onClick={toggleAssignAllVisibleGroups}>
-                    {groups.every((group) => assignGroupIds.has(group.id)) ? "取消全选" : "全选"}
+              ) : (
+                <div>
+                  <h2>{pool.name}</h2>
+                  <span className="ipPoolMeta">
+                    {enabledItems.length} 个地址 · {healthyCount} 个正常
+                    {users > 0 ? ` · 被 ${pool.used_by_origins} 个源站${pool.used_by_global_origins ? `、${pool.used_by_global_origins} 个全局备用` : ""}用作中转后端` : " · 还没有源站使用"}
+                    {pool.remark ? ` · ${pool.remark}` : ""}
+                  </span>
+                </div>
+              )}
+              {editingPool?.id !== pool.id && (
+                <div className="rowActions">
+                  <button className="icon secondaryIcon" title="修改池子名称和备注" onClick={() => setEditingPool({ id: pool.id, name: pool.name, remark: pool.remark || "" })}>
+                    <Pencil size={15} />
+                  </button>
+                  <button
+                    className="icon dangerBtn"
+                    title={users > 0 ? "还有源站在用，先在源站上取消选择" : "删除池子"}
+                    disabled={users > 0}
+                    onClick={() => window.confirm(`确认删除池子「${pool.name}」和里面的 ${pool.items.length} 个地址吗？`) && act(() => apiFetch(`/api/target-pool/pools/${pool.id}`, token, { method: "DELETE" }), "池子已删除")}
+                  >
+                    <Trash2 size={15} />
                   </button>
                 </div>
-                <div className="groupPickerList">
-                  {groups.map((group) => (
-                    <label className="groupPickerItem" key={group.id}>
-                      <input type="checkbox" checked={assignGroupIds.has(group.id)} onChange={() => toggleAssignGroup(group.id)} />
-                      <span>
-                        <strong>{group.hostname}</strong>
-                        <em>{group.enabled ? "已启用" : "已停用"} · 源站 {group.origins.length} 个</em>
-                      </span>
+              )}
+            </div>
+
+            <div className="ipPoolItems">
+              {pool.items.map((item) =>
+                editingItem?.id === item.id ? (
+                  <div className="ipPoolItem ipPoolItemEditing" key={item.id}>
+                    <input value={editingItem.target} onChange={(event) => setEditingItem({ ...editingItem, target: event.target.value })} />
+                    <input type="number" min={1} max={65535} value={editingItem.port} onChange={(event) => setEditingItem({ ...editingItem, port: Number(event.target.value) })} />
+                    <input placeholder="备注" value={editingItem.remark} onChange={(event) => setEditingItem({ ...editingItem, remark: event.target.value })} />
+                    <label className="inlineCheck">
+                      <input type="checkbox" checked={editingItem.enabled} onChange={(event) => setEditingItem({ ...editingItem, enabled: event.target.checked })} />
+                      启用
                     </label>
-                  ))}
-                </div>
-              </div>
-            )}
-            <div className="modalActions">
-              <button type="button" className="secondary" onClick={() => setAssignModalOpen(false)}>取消</button>
-              <button type="button" onClick={assignSelectedPoolToGroups}>
-                <Plus size={16} />
-                <span>确认加入</span>
+                    {item.external_machine_key && (
+                      <label className="inlineCheck" title="解除后地址不再跟随机器换 IP">
+                        <input type="checkbox" checked={editingItem.unbind} onChange={(event) => setEditingItem({ ...editingItem, unbind: event.target.checked })} />
+                        解除机器绑定
+                      </label>
+                    )}
+                    <button className="compactBtn" onClick={saveItem}>
+                      <Save size={14} />
+                      保存
+                    </button>
+                    <button className="secondary compactBtn" onClick={() => setEditingItem(null)}>取消</button>
+                  </div>
+                ) : (
+                  <div className="ipPoolItem" key={item.id}>
+                    <Status value={poolItemStatus(item)} />
+                    <strong title={item.last_error || undefined}>{item.target}:{item.port}</strong>
+                    {item.remark && <span className="ipPoolRemark">{item.remark}</span>}
+                    {item.external_machine_key && <span className="originBadge record" title={`绑定外部机器 ${item.external_machine_key}，机器换 IP 时地址自动跟随`}>跟随机器 IP</span>}
+                    {item.enabled && item.last_error && <small className="danger">{item.last_error}</small>}
+                    <span className="loadIpActions">
+                      <button className="icon secondaryIcon" title="立即检测" onClick={() => act(() => apiFetch(`/api/target-pool/items/${item.id}/run`, token, { method: "POST" }), "检测已完成")}>
+                        <Play size={14} />
+                      </button>
+                      <button className="icon secondaryIcon" title="修改" onClick={() => setEditingItem({ id: item.id, target: item.target, port: item.port, remark: item.remark || "", enabled: item.enabled, unbind: false })}>
+                        <Pencil size={14} />
+                      </button>
+                      <button className="icon dangerBtn" title="删除" onClick={() => window.confirm(`确认从「${pool.name}」删除 ${item.target}:${item.port} 吗？`) && act(() => apiFetch(`/api/target-pool/items/${item.id}`, token, { method: "DELETE" }), "地址已删除")}>
+                        <Trash2 size={14} />
+                      </button>
+                    </span>
+                  </div>
+                )
+              )}
+              {pool.items.length === 0 && <div className="emptyCell">池子里还没有地址</div>}
+            </div>
+
+            <div className="ipPoolAdd">
+              <select
+                value={draft.external_ip_item_id}
+                title="选外部 IP（Nyanpass）里的机器：机器换 IP 时这个地址自动跟随"
+                onChange={(event) => {
+                  const id = event.target.value ? Number(event.target.value) : "";
+                  const machine = machines.find((item) => item.id === id);
+                  setItemDrafts((current) => ({ ...current, [pool.id]: { ...draft, external_ip_item_id: id, target: machine ? machine.target : draft.target, remark: machine && !draft.remark ? machine.name : draft.remark } }));
+                }}
+              >
+                <option value="">手动填写地址</option>
+                {machines.map((item) => (
+                  <option value={item.id} key={item.id}>
+                    跟随机器：{externalIpLabel(item)}
+                  </option>
+                ))}
+              </select>
+              <input
+                placeholder="IP 或域名"
+                value={draft.target}
+                disabled={draft.external_ip_item_id !== ""}
+                onChange={(event) => setItemDrafts((current) => ({ ...current, [pool.id]: { ...draft, target: event.target.value } }))}
+              />
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                title="B 上中转服务的端口"
+                value={draft.port}
+                onChange={(event) => setItemDrafts((current) => ({ ...current, [pool.id]: { ...draft, port: Number(event.target.value) } }))}
+              />
+              <input placeholder="备注（可选）" value={draft.remark} onChange={(event) => setItemDrafts((current) => ({ ...current, [pool.id]: { ...draft, remark: event.target.value } }))} />
+              <button className="compactBtn" onClick={() => addItem(pool)}>
+                <Plus size={14} />
+                添加
+              </button>
+              <button className="secondary compactBtn" onClick={() => setBulkOpen((current) => ({ ...current, [pool.id]: !current[pool.id] }))}>
+                {bulkOpen[pool.id] ? "收起批量" : "批量添加"}
               </button>
             </div>
+            {bulkOpen[pool.id] && (
+              <div className="ipPoolBulk">
+                <textarea
+                  rows={4}
+                  placeholder={"每行一个，没写端口时用上面填的端口：\n198.51.100.1:8443 香港 B1\n198.51.100.2,8443,香港 B2"}
+                  value={bulkTexts[pool.id] || ""}
+                  onChange={(event) => setBulkTexts((current) => ({ ...current, [pool.id]: event.target.value }))}
+                />
+                <button className="compactBtn" onClick={() => bulkAdd(pool)}>
+                  <Plus size={14} />
+                  批量加入
+                </button>
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        );
+      })}
     </section>
   );
 }
@@ -3141,7 +3050,7 @@ function GroupsPanel({
   token,
   collections,
   groups,
-  targetPool,
+  targetPools,
   externalIpItems,
   azPanelResources,
   agents,
@@ -3151,7 +3060,7 @@ function GroupsPanel({
   token: string;
   collections: FailoverCollection[];
   groups: FailoverGroup[];
-  targetPool: TargetPoolItem[];
+  targetPools: TargetPool[];
   externalIpItems: ExternalIpItem[];
   azPanelResources: AzPanelResource[];
   agents: Agent[];
@@ -3189,6 +3098,7 @@ function GroupsPanel({
   const addingGroup = addingGroupId ? groups.find((group) => group.id === addingGroupId) : undefined;
   const addingGroupRequiredPublishMode = providerRequiredHostnamePublishMode(addingGroup);
   const addingHostnameGroup = addingHostnameGroupId ? groups.find((group) => group.id === addingHostnameGroupId) : undefined;
+  const targetPool: TargetPoolItem[] = useMemo(() => targetPools.flatMap((pool) => pool.items), [targetPools]);
   const enabledPoolItems = targetPool.filter((item) => item.enabled);
   const healthyExternalItems = externalIpItems.filter((item) => item.status === "healthy");
   // 绑定较少的排前面；同一资源允许驱动多个备用，不再把“已绑定”视为占用。
@@ -3282,7 +3192,7 @@ function GroupsPanel({
       port: 22,
       priority: maxPriority + 10,
       weight: 1,
-      relay_text: "",
+      relay_pool_ids: [],
       publish_mode: "direct",
       expanded_ip_priorities: {},
       preferred_agent_id: "",
@@ -3310,7 +3220,7 @@ function GroupsPanel({
             port: globalOriginAdd.port,
             priority: globalOriginAdd.priority,
             weight: globalOriginAdd.weight,
-            relay_targets: parseRelayText(globalOriginAdd.relay_text),
+            relay_pool_ids: globalOriginAdd.relay_pool_ids,
             publish_mode: globalAddTargetType === "hostname" ? globalOriginAdd.publish_mode : "direct",
             expanded_ip_priorities: globalAddTargetType === "hostname" ? globalOriginAdd.expanded_ip_priorities : {},
             preferred_agent_id: globalOriginAdd.preferred_agent_id === "" ? null : globalOriginAdd.preferred_agent_id,
@@ -3340,7 +3250,7 @@ function GroupsPanel({
         port: origin.port,
         priority: origin.priority,
         weight: origin.weight || 1,
-        relay_text: formatRelayText(origin.relay_targets),
+        relay_pool_ids: [...(origin.relay_pool_ids || [])],
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
         preferred_agent_id: origin.preferred_agent_id || "",
@@ -3371,7 +3281,7 @@ function GroupsPanel({
             port: draft.port,
             priority: draft.priority,
             weight: draft.weight,
-            relay_targets: parseRelayText(draft.relay_text),
+            relay_pool_ids: draft.relay_pool_ids,
             publish_mode: targetType === "hostname" ? draft.publish_mode : "direct",
             expanded_ip_priorities: targetType === "hostname" ? draft.expanded_ip_priorities : {},
             remark: draft.remark.trim() || null,
@@ -3401,7 +3311,7 @@ function GroupsPanel({
       port: 22,
       priority: maxPriority + 10,
       weight: 1,
-      relay_text: "",
+      relay_pool_ids: [],
       publish_mode: providerRequiredHostnamePublishMode(group) || "direct",
       expanded_ip_priorities: {},
       preferred_agent_id: "",
@@ -3523,7 +3433,7 @@ function GroupsPanel({
             port: originAdd.port,
             priority: originAdd.priority,
             weight: originAdd.weight,
-            relay_targets: parseRelayText(originAdd.relay_text),
+            relay_pool_ids: originAdd.relay_pool_ids,
             publish_mode: addTargetType === "hostname" ? (addingGroupRequiredPublishMode || originAdd.publish_mode) : "direct",
             expanded_ip_priorities: addTargetType === "hostname" ? originAdd.expanded_ip_priorities : {},
             preferred_agent_id: originAdd.preferred_agent_id === "" ? null : originAdd.preferred_agent_id,
@@ -3732,7 +3642,7 @@ function GroupsPanel({
         port: origin.port,
         priority: origin.priority,
         weight: origin.weight || 1,
-        relay_text: formatRelayText(origin.relays),
+        relay_pool_ids: [...(origin.relay_pool_ids || [])],
         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
         preferred_agent_id: origin.preferred_agent_id || "",
@@ -3752,14 +3662,13 @@ function GroupsPanel({
     const targetType = inferDraftTargetType(draft.target);
     const originGroup = groups.find((group) => group.origins.some((origin) => origin.id === originId));
     const requiredPublishMode = providerRequiredHostnamePublishMode(originGroup);
-    const { unbind_external, relay_text, ...rest } = draft;
+    const { unbind_external, ...rest } = draft;
     await act(
       () =>
         apiFetch(`/api/groups/origins/${originId}`, token, {
           method: "PATCH",
           body: JSON.stringify({
             ...rest,
-            relay_targets: parseRelayText(relay_text),
             publish_mode: targetType === "hostname" ? (requiredPublishMode || draft.publish_mode) : "direct",
             preferred_agent_id: draft.preferred_agent_id === "" ? null : draft.preferred_agent_id,
             probe_mode: draft.probe_mode,
@@ -3899,7 +3808,7 @@ function GroupsPanel({
       port: origin.port,
       priority: origin.priority,
       weight: origin.weight || 1,
-      relay_text: formatRelayText(origin.relay_targets),
+      relay_pool_ids: [...(origin.relay_pool_ids || [])],
       publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
       expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
       preferred_agent_id: origin.preferred_agent_id || "",
@@ -4039,10 +3948,7 @@ function GroupsPanel({
             备注
             <input value={draft.remark} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, remark: event.target.value } }))} />
           </label>
-          <label className="wideField" title="每行一个中转后端（B）的 IP:端口。填多个时，只要还有一个能连通就算正常；全部不通时，即使本机正常也会判定为中转不通并切走。留空表示不检测">
-            中转后端（可选）
-            <textarea rows={2} placeholder="例如\n203.0.113.5:8443\n203.0.113.6:8443" value={draft.relay_text} onChange={(event) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, relay_text: event.target.value } }))} />
-          </label>
+          <div className="wideField"><RelayPoolPicker pools={targetPools} value={draft.relay_pool_ids} onChange={(next) => setGlobalOriginEdits((current) => ({ ...current, [origin.id]: { ...draft, relay_pool_ids: next } }))} /></div>
           <label className="inlineCheck">
             <input
               type="checkbox"
@@ -4090,7 +3996,7 @@ function GroupsPanel({
           <span>
             {origin.external_machine_key ? `当前 ${origin.target}:${origin.port} · ` : ""}
             {targetTypeText(origin.target_type)} · 优先级 {origin.priority} · 发布为 {recordTypeForTargetType(origin.target_type, origin.publish_mode)} · {origin.enabled ? "已启用" : "已停用"}
-            {(origin.relay_targets || []).length > 0 && ` · 中转后端 ${origin.relay_targets.map((relay) => `${relay.target}:${relay.port}`).join("、")}`}
+            {(origin.relay_pool_ids || []).length > 0 && ` · 中转后端 ${origin.relay_pool_ids.map((poolId) => targetPools.find((pool) => pool.id === poolId)?.name || `#${poolId}`).join("、")}`}
             {preferredAgent ? ` · 指定探针 ${preferredAgent.name}` : ""}
             {normalizeProbeMode(origin.probe_mode) !== "default" ? ` · ${probeModeText(origin.probe_mode)}` : ""}
             {origin.ignore_health_check ? " · 无视健康检查" : ""}
@@ -4573,7 +4479,7 @@ function GroupsPanel({
                         port: origin.port,
                         priority: origin.priority,
                         weight: origin.weight || 1,
-                        relay_text: formatRelayText(origin.relays),
+                        relay_pool_ids: [...(origin.relay_pool_ids || [])],
                         publish_mode: origin.publish_mode === "expanded" ? "expanded" : "direct",
                         expanded_ip_priorities: { ...(origin.expanded_ip_priorities || {}) },
                         preferred_agent_id: origin.preferred_agent_id || "",
@@ -4708,10 +4614,7 @@ function GroupsPanel({
                                   <input placeholder="有备注时卡片优先显示备注" value={originEdit.remark} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, remark: event.target.value } }))} />
                                 </label>
                                 {!isLoadMember && (
-                                  <label className="wideField" title="每行一个中转后端（B）的 IP:端口。填多个时，只要还有一个能连通就算正常；全部不通时，即使本机正常也会判定为中转不通并切走。留空表示不检测">
-                                    中转后端（可选，A → B → C 里的 B）
-                                    <textarea rows={2} placeholder="例如\n203.0.113.5:8443\n203.0.113.6:8443" value={originEdit.relay_text} onChange={(event) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, relay_text: event.target.value } }))} />
-                                  </label>
+                                  <div className="wideField"><RelayPoolPicker pools={targetPools} value={originEdit.relay_pool_ids} onChange={(next) => setOriginEdits((current) => ({ ...current, [origin.id]: { ...originEdit, relay_pool_ids: next } }))} /></div>
                                 )}
                                 <label className="inlineCheck">
                                   <input
@@ -4816,8 +4719,8 @@ function GroupsPanel({
                                   <div className="relayList" title="中转后端（B）由面板直接检测；全部不通时本源站判为中转不通">
                                     <span className="relayListLabel">中转后端</span>
                                     {origin.relays.map((relay) => (
-                                      <span className={`relayChip ${relay.status}`} key={`${relay.target}:${relay.port}`} title={relay.last_error || (relay.last_checked_at ? `最后检测 ${fmtDate(relay.last_checked_at)}` : "等待检测")}>
-                                        {relay.target}:{relay.port} · {relayStatusText(relay)}
+                                      <span className={`relayChip ${relayChipClass(relay)}`} key={`${relay.pool_id}:${relay.target}:${relay.port}`} title={relay.last_error || (relay.last_checked_at ? `最后检测 ${fmtDate(relay.last_checked_at)}` : "等待检测")}>
+                                        {relay.pool_name ? `${relay.pool_name} · ` : ""}{relay.target}:{relay.port} · {relayStatusText(relay)}
                                       </span>
                                     ))}
                                   </div>
@@ -5039,10 +4942,7 @@ function GroupsPanel({
               备注
               <input placeholder="例如 全局香港备用、通用回源" value={globalOriginAdd.remark} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, remark: event.target.value }))} />
             </label>
-            <label title="每行一个中转后端（B）的 IP:端口。填多个时，只要还有一个能连通就算正常；全部不通时，即使本机正常也会判定为中转不通并切走。留空表示不检测">
-              中转后端（可选，A → B → C 里的 B）
-              <textarea rows={2} placeholder="例如\n203.0.113.5:8443\n203.0.113.6:8443" value={globalOriginAdd.relay_text} onChange={(event) => setGlobalOriginAdd((current) => ({ ...current, relay_text: event.target.value }))} />
-            </label>
+            <div><RelayPoolPicker pools={targetPools} value={globalOriginAdd.relay_pool_ids} onChange={(next) => setGlobalOriginAdd((current) => ({ ...current, relay_pool_ids: next }))} /></div>
             <div className="modalFormGrid">
               <label>
                 检查端口
@@ -5221,10 +5121,7 @@ function GroupsPanel({
               备注
               <input placeholder="例如 香港备用、线路 1" value={originAdd.remark} onChange={(event) => setOriginAdd((current) => ({ ...current, remark: event.target.value }))} />
             </label>
-            <label title="每行一个中转后端（B）的 IP:端口。填多个时，只要还有一个能连通就算正常；全部不通时，即使本机正常也会判定为中转不通并切走。留空表示不检测">
-              中转后端（可选，A → B → C 里的 B）
-              <textarea rows={2} placeholder="例如\n203.0.113.5:8443\n203.0.113.6:8443" value={originAdd.relay_text} onChange={(event) => setOriginAdd((current) => ({ ...current, relay_text: event.target.value }))} />
-            </label>
+            <div><RelayPoolPicker pools={targetPools} value={originAdd.relay_pool_ids} onChange={(next) => setOriginAdd((current) => ({ ...current, relay_pool_ids: next }))} /></div>
             <div className="modalFormGrid">
               <label>
                 检查端口
@@ -5728,13 +5625,19 @@ function ExternalIpsPanel({
   token,
   externalIpSources,
   externalIpItems,
+  pools,
   act
 }: {
   token: string;
   externalIpSources: ExternalIpSource[];
   externalIpItems: ExternalIpItem[];
+  pools: TargetPool[];
   act: ActionRunner;
 }) {
+  // 加入 IP 池子时用：目标池子和 B 上中转服务的端口（和外部来源的默认端口无关）
+  const [poolTargetId, setPoolTargetId] = useState<number | "">("");
+  const [poolPort, setPoolPort] = useState(443);
+  const selectedPoolId = poolTargetId === "" ? pools[0]?.id : poolTargetId;
   const [externalDraft, setExternalDraft] = useState<ExternalIpSourceDraft>(defaultExternalIpSourceDraft);
   const [editingSourceId, setEditingSourceId] = useState<number | null>(null);
   const [sourceEdits, setSourceEdits] = useState<Record<number, ExternalIpSourceDraft>>({});
@@ -5830,34 +5733,34 @@ function ExternalIpsPanel({
   }
 
   function externalItemToPoolPayload(item: ExternalIpItem) {
-    return {
-      target: item.target,
-      port: item.port,
-      remark: externalIpPoolRemark(item) || null,
-      check_interval_seconds: 600,
-      enabled: true
-    };
+    // Bound by machine: the pool address follows the machine when its IP changes.
+    return { target: item.target, port: poolPort, remark: externalIpPoolRemark(item) || null, enabled: true, external_ip_item_id: item.id };
+  }
+
+  function requirePool(): number {
+    if (!selectedPoolId) throw new Error("请先到「IP 池子」新建一个池子");
+    return selectedPoolId;
   }
 
   async function addExternalIpToPool(item: ExternalIpItem) {
     await act(
       () =>
-        apiFetch("/api/target-pool/bulk", token, {
+        apiFetch(`/api/target-pool/pools/${requirePool()}/items/bulk`, token, {
           method: "POST",
           body: JSON.stringify({ items: [externalItemToPoolPayload(item)] })
         }),
-      "已添加到 IP 池子"
+      "已加入 IP 池子，机器换 IP 时会自动跟随"
     );
   }
 
   async function addMachineToPool(items: ExternalIpItem[]) {
     await act(
       () =>
-        apiFetch("/api/target-pool/bulk", token, {
+        apiFetch(`/api/target-pool/pools/${requirePool()}/items/bulk`, token, {
           method: "POST",
           body: JSON.stringify({ items: items.map(externalItemToPoolPayload) })
         }),
-      "整台机器的 IP 已添加到池子"
+      "整台机器的 IP 已加入池子，换 IP 时会自动跟随"
     );
   }
 
@@ -5979,6 +5882,22 @@ function ExternalIpsPanel({
               );
             })}
             {externalIpSources.length === 0 && <div className="emptyCell">还没有外部 IP 来源</div>}
+          </div>
+          <div className="externalPoolBar">
+            <label>
+              加入到池子
+              <select value={selectedPoolId ?? ""} onChange={(event) => setPoolTargetId(event.target.value ? Number(event.target.value) : "")} disabled={pools.length === 0}>
+                {pools.length === 0 && <option value="">还没有池子，先到「IP 池子」新建</option>}
+                {pools.map((pool) => (
+                  <option value={pool.id} key={pool.id}>{pool.name}</option>
+                ))}
+              </select>
+            </label>
+            <label title="B 上中转服务的端口">
+              端口
+              <input type="number" min={1} max={65535} value={poolPort} onChange={(event) => setPoolPort(Number(event.target.value))} />
+            </label>
+            <small>加入的地址会绑定这台机器，机器换 IP 时池子里的地址自动跟随。</small>
           </div>
           <div className="externalMachineList">
             {externalMachines.map((machine) => (

@@ -2952,3 +2952,128 @@ form.panel {
   background: #fee2e2;
   color: #b91c1c;
 }
+
+/* ---- IP 池子 (reusable address sets, e.g. relay backends) ---- */
+.ipPoolCard {
+  display: grid;
+  gap: 10px;
+}
+
+.ipPoolHead {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.ipPoolHead h2 {
+  margin: 0;
+}
+
+.ipPoolMeta {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.ipPoolEdit,
+.ipPoolAdd,
+.ipPoolItem {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ipPoolEdit input {
+  max-width: 240px;
+}
+
+.ipPoolItems {
+  display: grid;
+  gap: 6px;
+}
+
+.ipPoolItem {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.ipPoolItem strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+.ipPoolItem small {
+  flex-basis: 100%;
+  order: 10;
+}
+
+.ipPoolItemEditing input {
+  max-width: 200px;
+}
+
+.ipPoolItemEditing input[type="number"],
+.ipPoolAdd input[type="number"] {
+  width: 90px;
+}
+
+.ipPoolRemark {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.ipPoolAdd select {
+  max-width: 260px;
+}
+
+.ipPoolAdd input:not([type="number"]) {
+  max-width: 200px;
+}
+
+.ipPoolBulk {
+  display: grid;
+  gap: 8px;
+}
+
+.ipPoolBulk button {
+  justify-self: start;
+}
+
+.relayPoolPicker {
+  display: grid;
+  gap: 6px;
+}
+
+.relayPoolLabel {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.relayPoolOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.relayPoolOptions small {
+  color: var(--muted-foreground);
+  margin-left: 4px;
+}
+
+.externalPoolBar {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.externalPoolBar input[type="number"] {
+  width: 90px;
+}
+
+.externalPoolBar small {
+  color: var(--muted-foreground);
+  flex-basis: 100%;
+}

@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import MetaData, Table, and_, create_engine, event, inspect, select, text
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from .config import get_settings
 
@@ -258,6 +258,10 @@ def _migrate_existing_schema() -> None:
     if "failover_global_origins" in table_names:
         _migrate_global_origin_constraints(dialect)
 
+    if "target_pool_items" in table_names:
+        _migrate_target_pool_constraints(dialect)
+    _migrate_into_ip_pools()
+
 
 def _rebuild_sqlite_failover_groups_with_nullable_zone() -> None:
     """Make ``failover_groups.zone_id`` nullable without losing SQLite data.
@@ -510,6 +514,134 @@ def _migrate_global_origin_constraints(dialect: str) -> None:
             )
 
 
+_LEGACY_TARGET_POOL_UNIQUE = "uq_target_pool_target_port"
+_TARGET_POOL_UNIQUE = "uq_target_pool_item_pool_target_port"
+
+
+def _target_pool_constraint_names() -> set[str]:
+    inspector = inspect(engine)
+    names = {index["name"] for index in inspector.get_indexes("target_pool_items")}
+    return names | {unique["name"] for unique in inspector.get_unique_constraints("target_pool_items")}
+
+
+def _migrate_target_pool_constraints(dialect: str) -> None:
+    """Let one address sit in several pools: unique per pool instead of globally."""
+    from .models import TargetPoolItem
+
+    names = _target_pool_constraint_names()
+    if _LEGACY_TARGET_POOL_UNIQUE in names:
+        try:
+            with engine.begin() as connection:
+                if dialect == "mysql":
+                    connection.execute(text(f"ALTER TABLE target_pool_items DROP INDEX {_LEGACY_TARGET_POOL_UNIQUE}"))
+                elif dialect == "postgresql":
+                    connection.execute(text(f"ALTER TABLE target_pool_items DROP CONSTRAINT IF EXISTS {_LEGACY_TARGET_POOL_UNIQUE}"))
+                else:
+                    _rebuild_sqlite_table(connection, TargetPoolItem.__table__)
+        except Exception:
+            # Keeping the old constraint only stops one address from joining two
+            # pools. A database that refuses to start is worse.
+            logger.exception("could not drop the legacy target-pool unique constraint; keeping the old schema")
+    if _TARGET_POOL_UNIQUE not in _target_pool_constraint_names():
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(f"CREATE UNIQUE INDEX {_TARGET_POOL_UNIQUE} ON target_pool_items (pool_id, target, port)")
+                )
+        except Exception:
+            logger.exception("could not create the per-pool target uniqueness index")
+
+
+def _rebuild_sqlite_table(connection, source_table) -> None:
+    """SQLite cannot drop a table-level constraint: create/copy/swap from the model."""
+    name = source_table.name
+    rebuild_metadata = MetaData()
+    for foreign_key in source_table.foreign_keys:
+        referenced = foreign_key.column.table
+        if referenced.name not in rebuild_metadata.tables:
+            referenced.to_metadata(rebuild_metadata)
+    rebuilt = source_table.to_metadata(rebuild_metadata, name=f"{name}_rebuild")
+    # The model's own constraint name must be free for the rebuilt table.
+    connection.execute(text(f"DROP INDEX IF EXISTS {_TARGET_POOL_UNIQUE}"))
+    rebuilt.create(bind=connection)
+    existing = {row[1] for row in connection.execute(text(f"PRAGMA table_info({name})"))}
+    copied = [column.name for column in source_table.columns if column.name in existing]
+    # Old rows may lack timestamps that the rebuilt table declares NOT NULL.
+    selected = [
+        f"COALESCE({column}, CURRENT_TIMESTAMP)" if column in {"created_at", "updated_at"} else column
+        for column in copied
+    ]
+    connection.execute(text(f"INSERT INTO {name}_rebuild ({', '.join(copied)}) SELECT {', '.join(selected)} FROM {name}"))
+    connection.execute(text(f"DROP TABLE {name}"))
+    connection.execute(text(f"ALTER TABLE {name}_rebuild RENAME TO {name}"))
+
+
+def _migrate_into_ip_pools() -> None:
+    """One-off data moves into the pool model; both steps are no-ops once done.
+
+    - Loose IP pool addresses from before pools existed go into 「默认池子」.
+    - Relay backends typed on each origin / global backup become pools: identical
+      lists share one pool, and the owner now references it.
+    """
+    from .models import FailoverGlobalOrigin, Origin, TargetPool, TargetPoolItem
+    from .dns_utils import parse_target
+
+    tables = set(inspect(engine).get_table_names())
+    if not {"target_pools", "target_pool_items", "origins", "failover_global_origins"} <= tables:
+        return
+    with Session(engine) as db:
+        try:
+            loose = db.query(TargetPoolItem).filter(TargetPoolItem.pool_id.is_(None)).all()
+            if loose:
+                pool = _pool_named(db, TargetPool, "默认池子")
+                for item in loose:
+                    item.pool_id = pool.id
+
+            pools_by_targets: dict[tuple, int] = {}
+            owners = [
+                *db.query(Origin).filter(Origin.relay_targets_json.isnot(None)).all(),
+                *db.query(FailoverGlobalOrigin).filter(FailoverGlobalOrigin.relay_targets_json.isnot(None)).all(),
+            ]
+            for owner in owners:
+                try:
+                    targets = json.loads(owner.relay_targets_json or "[]")
+                except (TypeError, ValueError):
+                    targets = []
+                pairs = []
+                for value in targets if isinstance(targets, list) else []:
+                    try:
+                        pairs.append((parse_target(str(value["target"])).value, int(value["port"])))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                if pairs:
+                    key = tuple(sorted(set(pairs)))
+                    if key not in pools_by_targets:
+                        pool = _pool_named(db, TargetPool, f"中转 {key[0][0]}" + (f" 等 {len(key)} 个" if len(key) > 1 else ""))
+                        for target, port in key:
+                            if not any(item.target == target and item.port == port for item in pool.items):
+                                target_type = parse_target(target).target_type
+                                pool.items.append(TargetPoolItem(target=target, target_type=target_type, port=port))
+                        db.flush()
+                        pools_by_targets[key] = pool.id
+                    existing = json.loads(owner.relay_pool_ids_json or "[]") if owner.relay_pool_ids_json else []
+                    if pools_by_targets[key] not in existing:
+                        owner.relay_pool_ids_json = json.dumps([*existing, pools_by_targets[key]])
+                owner.relay_targets_json = None
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("could not move relay backends / loose addresses into IP pools")
+
+
+def _pool_named(db, pool_model, name: str):
+    pool = db.query(pool_model).filter(pool_model.name == name).one_or_none()
+    if pool is None:
+        pool = pool_model(name=name)
+        db.add(pool)
+        db.flush()
+    return pool
+
+
 def _origin_migration_statements(dialect: str) -> dict[str, str]:
     if dialect == "mysql":
         return {
@@ -528,6 +660,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
             "load_parent_id": "ALTER TABLE origins ADD COLUMN load_parent_id INT NULL",
             "relay_targets_json": "ALTER TABLE origins ADD COLUMN relay_targets_json TEXT NULL",
             "relay_status_json": "ALTER TABLE origins ADD COLUMN relay_status_json TEXT NULL",
+            "relay_pool_ids_json": "ALTER TABLE origins ADD COLUMN relay_pool_ids_json TEXT NULL",
             "ignore_health_check": "ALTER TABLE origins ADD COLUMN ignore_health_check TINYINT(1) NOT NULL DEFAULT 0",
         }
     return {
@@ -546,6 +679,7 @@ def _origin_migration_statements(dialect: str) -> dict[str, str]:
         "load_parent_id": "ALTER TABLE origins ADD COLUMN load_parent_id INTEGER",
         "relay_targets_json": "ALTER TABLE origins ADD COLUMN relay_targets_json TEXT",
         "relay_status_json": "ALTER TABLE origins ADD COLUMN relay_status_json TEXT",
+        "relay_pool_ids_json": "ALTER TABLE origins ADD COLUMN relay_pool_ids_json TEXT",
         "ignore_health_check": "ALTER TABLE origins ADD COLUMN ignore_health_check BOOLEAN NOT NULL DEFAULT FALSE",
     }
 
@@ -613,6 +747,7 @@ def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
             "azpanel_resource_id": "ALTER TABLE failover_global_origins ADD COLUMN azpanel_resource_id INT NULL",
             "weight": "ALTER TABLE failover_global_origins ADD COLUMN weight INT NOT NULL DEFAULT 1",
             "relay_targets_json": "ALTER TABLE failover_global_origins ADD COLUMN relay_targets_json TEXT NULL",
+            "relay_pool_ids_json": "ALTER TABLE failover_global_origins ADD COLUMN relay_pool_ids_json TEXT NULL",
         }
     return {
         "preferred_agent_id": "ALTER TABLE failover_global_origins ADD COLUMN preferred_agent_id INTEGER",
@@ -624,6 +759,7 @@ def _global_origin_migration_statements(dialect: str) -> dict[str, str]:
         "azpanel_resource_id": "ALTER TABLE failover_global_origins ADD COLUMN azpanel_resource_id INTEGER",
         "weight": "ALTER TABLE failover_global_origins ADD COLUMN weight INTEGER NOT NULL DEFAULT 1",
         "relay_targets_json": "ALTER TABLE failover_global_origins ADD COLUMN relay_targets_json TEXT",
+        "relay_pool_ids_json": "ALTER TABLE failover_global_origins ADD COLUMN relay_pool_ids_json TEXT",
     }
 
 
@@ -635,6 +771,11 @@ def _target_pool_migration_statements(dialect: str) -> dict[str, str]:
             "last_checked_at": "ALTER TABLE target_pool_items ADD COLUMN last_checked_at DATETIME NULL",
             "last_error": "ALTER TABLE target_pool_items ADD COLUMN last_error TEXT NULL",
             "last_rtt_ms": "ALTER TABLE target_pool_items ADD COLUMN last_rtt_ms FLOAT NULL",
+            "pool_id": "ALTER TABLE target_pool_items ADD COLUMN pool_id INT NULL",
+            "external_source_id": "ALTER TABLE target_pool_items ADD COLUMN external_source_id INT NULL",
+            "external_machine_key": "ALTER TABLE target_pool_items ADD COLUMN external_machine_key VARCHAR(255) NULL",
+            "fail_count": "ALTER TABLE target_pool_items ADD COLUMN fail_count INT NOT NULL DEFAULT 0",
+            "success_count": "ALTER TABLE target_pool_items ADD COLUMN success_count INT NOT NULL DEFAULT 0",
         }
     if dialect == "postgresql":
         return {
@@ -643,6 +784,11 @@ def _target_pool_migration_statements(dialect: str) -> dict[str, str]:
             "last_checked_at": "ALTER TABLE target_pool_items ADD COLUMN last_checked_at TIMESTAMP NULL",
             "last_error": "ALTER TABLE target_pool_items ADD COLUMN last_error TEXT NULL",
             "last_rtt_ms": "ALTER TABLE target_pool_items ADD COLUMN last_rtt_ms FLOAT NULL",
+            "pool_id": "ALTER TABLE target_pool_items ADD COLUMN pool_id INTEGER NULL",
+            "external_source_id": "ALTER TABLE target_pool_items ADD COLUMN external_source_id INTEGER NULL",
+            "external_machine_key": "ALTER TABLE target_pool_items ADD COLUMN external_machine_key VARCHAR(255) NULL",
+            "fail_count": "ALTER TABLE target_pool_items ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0",
+            "success_count": "ALTER TABLE target_pool_items ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0",
         }
     return {
         "check_interval_seconds": "ALTER TABLE target_pool_items ADD COLUMN check_interval_seconds INTEGER NOT NULL DEFAULT 600",
@@ -650,6 +796,11 @@ def _target_pool_migration_statements(dialect: str) -> dict[str, str]:
         "last_checked_at": "ALTER TABLE target_pool_items ADD COLUMN last_checked_at DATETIME",
         "last_error": "ALTER TABLE target_pool_items ADD COLUMN last_error TEXT",
         "last_rtt_ms": "ALTER TABLE target_pool_items ADD COLUMN last_rtt_ms FLOAT",
+        "pool_id": "ALTER TABLE target_pool_items ADD COLUMN pool_id INTEGER",
+        "external_source_id": "ALTER TABLE target_pool_items ADD COLUMN external_source_id INTEGER",
+        "external_machine_key": "ALTER TABLE target_pool_items ADD COLUMN external_machine_key VARCHAR(255)",
+        "fail_count": "ALTER TABLE target_pool_items ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0",
+        "success_count": "ALTER TABLE target_pool_items ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0",
     }
 
 

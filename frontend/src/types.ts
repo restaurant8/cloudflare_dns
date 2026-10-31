@@ -145,7 +145,9 @@ export type ProbeState = {
 export type RelayTarget = { target: string; port: number };
 
 export type RelayStatus = RelayTarget & {
-  status: "up" | "down" | "unknown" | string;
+  pool_id: number | null;
+  pool_name: string | null;
+  status: "healthy" | "unhealthy" | "unknown" | string;
   last_checked_at: string | null;
   last_error: string | null;
   last_rtt_ms: number | null;
@@ -167,6 +169,7 @@ export type Origin = {
   priority: number;
   weight: number;
   load_parent_id: number | null;
+  relay_pool_ids: number[];
   relays: RelayStatus[];
   remark: string | null;
   enabled: boolean;
@@ -184,17 +187,30 @@ export type Origin = {
 
 export type TargetPoolItem = {
   id: number;
+  pool_id: number | null;
+  pool_name: string | null;
   target: string;
   target_type: string;
   port: number;
   remark: string | null;
-  check_interval_seconds: number;
   enabled: boolean;
   status: string;
   last_checked_at: string | null;
   last_error: string | null;
   last_rtt_ms: number | null;
-  probe_states: ProbeState[];
+  external_source_id: number | null;
+  external_machine_key: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TargetPool = {
+  id: number;
+  name: string;
+  remark: string | null;
+  items: TargetPoolItem[];
+  used_by_origins: number;
+  used_by_global_origins: number;
   created_at: string;
   updated_at: string;
 };
@@ -234,7 +250,7 @@ export type FailoverGlobalOrigin = {
   port: number;
   priority: number;
   weight: number;
-  relay_targets: RelayTarget[];
+  relay_pool_ids: number[];
   expanded_ip_priorities: Record<string, number>;
   remark: string | null;
   enabled: boolean;

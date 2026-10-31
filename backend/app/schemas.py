@@ -565,6 +565,8 @@ class RelayTarget(BaseModel):
 
 
 class RelayStatusOut(RelayTarget):
+    pool_id: int | None = None
+    pool_name: str | None = None
     status: str = "unknown"
     last_checked_at: str | None = None
     last_error: str | None = None
@@ -578,8 +580,8 @@ class OriginCreate(BaseModel):
     # 负载均衡：填写后作为该源站的负载 IP，其它配置跟随该源站，与它的其它 IP 按权重轮流使用
     load_parent_id: int | None = None
     weight: int = Field(default=1, ge=1, le=100)
-    # 中转后端 B：本源站正常且至少一个 B 正常才算可用
-    relay_targets: list[RelayTarget] = Field(default_factory=list, max_length=20)
+    # 中转后端：引用的 IP 池子。本源站正常且池子里至少一个地址能连通才算可用
+    relay_pool_ids: list[int] = Field(default_factory=list, max_length=20)
     publish_mode: Literal["direct", "expanded"] = "direct"
     expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
     preferred_agent_id: int | None = None
@@ -605,7 +607,7 @@ class OriginUpdate(BaseModel):
     port: int | None = Field(default=None, ge=1, le=65535)
     priority: int | None = Field(default=None, ge=0, le=100000)
     weight: int | None = Field(default=None, ge=1, le=100)
-    relay_targets: list[RelayTarget] | None = Field(default=None, max_length=20)
+    relay_pool_ids: list[int] | None = Field(default=None, max_length=20)
     publish_mode: Literal["direct", "expanded"] | None = None
     expanded_ip_priorities: dict[str, int] | None = None
     preferred_agent_id: int | None = None
@@ -655,6 +657,7 @@ class OriginOut(BaseModel):
     priority: int
     weight: int = 1
     load_parent_id: int | None = None
+    relay_pool_ids: list[int] = Field(default_factory=list)
     relays: list[RelayStatusOut] = Field(default_factory=list)
     remark: str | None
     enabled: bool
@@ -702,7 +705,7 @@ class FailoverGlobalOriginOut(BaseModel):
     port: int
     priority: int
     weight: int = 1
-    relay_targets: list[RelayTarget] = Field(default_factory=list)
+    relay_pool_ids: list[int] = Field(default_factory=list)
     expanded_ip_priorities: dict[str, int] = Field(default_factory=dict)
     remark: str | None
     enabled: bool
@@ -724,24 +727,26 @@ class FailoverCollectionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class TargetPoolCreate(BaseModel):
+class TargetPoolItemCreate(BaseModel):
     target: str = Field(min_length=1, max_length=255)
     port: int = Field(default=22, ge=1, le=65535)
     remark: str | None = Field(default=None, max_length=500)
-    check_interval_seconds: int = Field(default=600, ge=60, le=86400)
     enabled: bool = True
+    # 可选：绑定外部 IP 列表（Nyanpass）里的机器，机器换 IP 时地址自动跟随
+    external_ip_item_id: int | None = None
 
 
-class TargetPoolUpdate(BaseModel):
+class TargetPoolItemUpdate(BaseModel):
     target: str | None = Field(default=None, min_length=1, max_length=255)
     port: int | None = Field(default=None, ge=1, le=65535)
     remark: str | None = Field(default=None, max_length=500)
-    check_interval_seconds: int | None = Field(default=None, ge=60, le=86400)
     enabled: bool | None = None
+    # 传 null 解除机器绑定；传 item id 改绑
+    external_ip_item_id: int | None = None
 
 
 class TargetPoolBulkCreate(BaseModel):
-    items: list[TargetPoolCreate] = Field(min_length=1, max_length=500)
+    items: list[TargetPoolItemCreate] = Field(min_length=1, max_length=500)
 
 
 class TargetPoolBulkItemResult(BaseModel):
@@ -759,53 +764,49 @@ class TargetPoolBulkOut(BaseModel):
     results: list[TargetPoolBulkItemResult]
 
 
-class TargetPoolAssignToGroupsRequest(BaseModel):
-    item_ids: list[int] = Field(min_length=1, max_length=500)
-    all_groups: bool = False
-    group_ids: list[int] = Field(default_factory=list, max_length=500)
-    priority: int = Field(default=10, ge=0, le=100000)
-    enabled: bool = True
-
-
-class TargetPoolAssignGroupResult(BaseModel):
-    group_id: int
-    group_hostname: str
-    target: str
-    port: int
-    status: str
-    message: str | None = None
-    origin_id: int | None = None
-
-
-class TargetPoolAssignToGroupsOut(BaseModel):
-    created: int
-    skipped: int
-    failed: int
-    results: list[TargetPoolAssignGroupResult]
-
-
-class TargetPoolOut(BaseModel):
+class TargetPoolItemOut(BaseModel):
     id: int
+    pool_id: int | None
+    pool_name: str | None = None
     target: str
     target_type: str
     port: int
     remark: str | None
-    check_interval_seconds: int
     enabled: bool
     status: str
     last_checked_at: datetime | None
     last_error: str | None
     last_rtt_ms: float | None
-    probe_states: list[ProbeStateOut] = []
+    external_source_id: int | None = None
+    external_machine_key: str | None = None
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
-    @model_validator(mode="after")
-    def hide_disabled_agent_probe_states(self):
-        self.probe_states = _enabled_probe_states(self.probe_states)
-        return self
+
+class TargetPoolCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    remark: str | None = Field(default=None, max_length=500)
+
+
+class TargetPoolUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    remark: str | None = Field(default=None, max_length=500)
+
+
+class TargetPoolOut(BaseModel):
+    id: int
+    name: str
+    remark: str | None
+    items: list[TargetPoolItemOut] = []
+    # 引用这个池子作为中转后端的源站 / 全局备用数量
+    used_by_origins: int = 0
+    used_by_global_origins: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AzPanelSettingsOut(BaseModel):

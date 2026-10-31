@@ -1,6 +1,4 @@
-"""Relay backends: A → B → C, the origin (A) only counts when one B works."""
-
-from datetime import datetime
+"""Relay backends via IP pools: A → B → C, the origin (A) only counts when one B works."""
 
 import pytest
 from fastapi import HTTPException
@@ -11,8 +9,8 @@ from app.database import Base
 from app.dns_utils import TcpCheckResult
 from app.failover import evaluate_failover_groups
 from app.health import run_local_checks
-from app.models import FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin
-from app.relay import relay_overview, relay_verdict
+from app.models import FailoverCollection, FailoverGlobalOrigin, FailoverGroup, Origin, TargetPool, TargetPoolItem
+from app.relay import apply_relay_verdict, relay_overview, relay_verdict
 from app.routes.groups import create_origin, sync_global_origins_to_group, update_origin
 from app.schemas import OriginCreate, OriginUpdate
 
@@ -35,9 +33,20 @@ class Network:
         return TcpCheckResult(False, None, "connection refused", None)
 
 
+def make_pool(db, name, *addresses):
+    pool = TargetPool(name=name)
+    db.add(pool)
+    db.flush()
+    for target, port in addresses:
+        db.add(TargetPoolItem(pool_id=pool.id, target=target, target_type="ipv4", port=port))
+    db.commit()
+    return pool
+
+
 def setup(db, monkeypatch, network):
     monkeypatch.setattr("app.health.tcp_check", network)
     monkeypatch.setattr("app.health.send_webhooks", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.routes.groups._evaluate_locally", lambda *args, **kwargs: None)
     group = FailoverGroup(hostname="www.example.com", cloudflare_publish_enabled=False)
     db.add(group)
     db.flush()
@@ -59,8 +68,8 @@ def test_origin_is_relay_down_only_when_every_backend_fails(monkeypatch):
     db = make_session()
     network = Network(("192.0.2.10", 443), ("192.0.2.20", 443), ("198.51.100.1", 8443), ("198.51.100.2", 8443))
     group, a, _ = setup(db, monkeypatch, network)
-    monkeypatch.setattr("app.routes.groups._evaluate_locally", lambda *args, **kwargs: None)
-    update_origin(a.id, OriginUpdate(relay_targets=[{"target": "198.51.100.1", "port": 8443}, {"target": "198.51.100.2", "port": 8443}]), None, db)
+    pool = make_pool(db, "HK exit", ("198.51.100.1", 8443), ("198.51.100.2", 8443))
+    update_origin(a.id, OriginUpdate(relay_pool_ids=[pool.id]), None, db)
 
     checks(db, 2)
     assert a.status == "healthy"
@@ -70,7 +79,7 @@ def test_origin_is_relay_down_only_when_every_backend_fails(monkeypatch):
     network.up.discard(("198.51.100.1", 8443))
     checks(db, 5)
     assert a.status == "healthy"
-    assert [item["status"] for item in relay_overview(a)] == ["down", "up"]
+    assert [item["status"] for item in relay_overview(a)] == ["unhealthy", "healthy"]
 
     # Both Bs down: A itself still answers, but the chain is broken.
     network.up.discard(("198.51.100.2", 8443))
@@ -86,17 +95,52 @@ def test_origin_is_relay_down_only_when_every_backend_fails(monkeypatch):
     assert a.status == "healthy"
 
 
+def test_several_pools_count_as_one_backend_set(monkeypatch):
+    db = make_session()
+    network = Network(("192.0.2.10", 443), ("203.0.113.5", 8443))
+    group, a, _ = setup(db, monkeypatch, network)
+    hk = make_pool(db, "HK exit", ("198.51.100.1", 8443))
+    jp = make_pool(db, "JP exit", ("203.0.113.5", 8443))
+    update_origin(a.id, OriginUpdate(relay_pool_ids=[hk.id, jp.id]), None, db)
+
+    checks(db, 6)
+
+    assert a.status == "healthy"  # HK is down but JP still carries the chain
+    assert {item["pool_name"] for item in relay_overview(a)} == {"HK exit", "JP exit"}
+
+
+def test_one_pool_edit_reaches_every_origin_using_it(monkeypatch):
+    db = make_session()
+    network = Network(("192.0.2.10", 443), ("192.0.2.20", 443), ("198.51.100.9", 8443))
+    group, a, backup = setup(db, monkeypatch, network)
+    pool = make_pool(db, "HK exit", ("198.51.100.1", 8443))
+    for origin in (a, backup):
+        update_origin(origin.id, OriginUpdate(relay_pool_ids=[pool.id]), None, db)
+    checks(db, 6)
+    assert (a.status, backup.status) == ("relay_down", "relay_down")
+
+    # B changed: edit the single pool entry once.
+    from app.routes.target_pool import update_pool_item
+    from app.schemas import TargetPoolItemUpdate
+
+    item = pool.items[0]
+    update_pool_item(item.id, TargetPoolItemUpdate(target="198.51.100.9"), None, db)
+    checks(db, 1)
+
+    assert (a.status, backup.status) == ("healthy", "healthy")
+
+
 def test_failover_moves_away_from_relay_down_origin_without_ip_change(monkeypatch):
     db = make_session()
     network = Network(("192.0.2.10", 443), ("192.0.2.20", 443))
     group, a, backup = setup(db, monkeypatch, network)
-    a.relay_targets_json = '[{"target":"198.51.100.1","port":8443}]'
+    pool = make_pool(db, "HK exit", ("198.51.100.1", 8443))
+    update_origin(a.id, OriginUpdate(relay_pool_ids=[pool.id]), None, db)
     group.current_origin_id = a.id
     db.commit()
     published = []
     monkeypatch.setattr("app.failover.publish_origin", lambda _db, _group, origin: published.append(origin.target) or {"id": "r", "type": "A", "content": origin.target})
     monkeypatch.setattr("app.failover.trigger_ip_change_for_origin", lambda *args, **kwargs: pytest.fail("A is fine; its IP must not be changed"))
-    group.doh_enabled = False
     group.cloudflare_publish_enabled = True
     db.commit()
 
@@ -109,55 +153,61 @@ def test_failover_moves_away_from_relay_down_origin_without_ip_change(monkeypatc
     assert published == ["192.0.2.20"]
 
 
-def test_blocked_origin_stays_blocked_so_ip_change_still_runs():
-    origin = Origin(target="192.0.2.10", target_type="ipv4", port=443, status="blocked")
-    origin.relay_targets_json = '[{"target":"198.51.100.1","port":8443}]'
-    origin.relay_status_json = '{"198.51.100.1|8443":{"status":"down"}}'
-    from app.relay import apply_relay_verdict
+def test_blocked_origin_stays_blocked_so_ip_change_still_runs(monkeypatch):
+    db = make_session()
+    group, a, _ = setup(db, monkeypatch, Network())
+    pool = make_pool(db, "HK exit", ("198.51.100.1", 8443))
+    pool.items[0].status = "unhealthy"
+    a.relay_pool_ids_json = f"[{pool.id}]"
+    a.status = "blocked"
+    db.commit()
 
-    apply_relay_verdict(origin)
-    assert origin.status == "blocked"
+    apply_relay_verdict(a, db)
+
+    assert a.status == "blocked"
 
 
-def test_origin_without_backends_is_unaffected(monkeypatch):
+def test_origin_without_pools_is_unaffected(monkeypatch):
     db = make_session()
     group, a, _ = setup(db, monkeypatch, Network(("192.0.2.10", 443)))
+    make_pool(db, "unused", ("198.51.100.1", 8443))
 
-    checks(db, 3)
+    checks(db, 6)
 
     assert a.status == "healthy"
     assert relay_verdict(a) == "none"
 
 
-def test_api_validates_and_removing_backends_lifts_relay_down(monkeypatch):
+def test_api_validates_pools_and_deselecting_lifts_relay_down(monkeypatch):
     db = make_session()
     group, a, _ = setup(db, monkeypatch, Network(("192.0.2.10", 443)))
-    monkeypatch.setattr("app.routes.groups._evaluate_locally", lambda *args, **kwargs: None)
+    pool = make_pool(db, "HK exit", ("198.51.100.9", 8443))
 
     with pytest.raises(HTTPException):
-        update_origin(a.id, OriginUpdate(relay_targets=[{"target": "not a host!", "port": 1}]), None, db)
+        update_origin(a.id, OriginUpdate(relay_pool_ids=[9999]), None, db)
 
-    update_origin(a.id, OriginUpdate(relay_targets=[{"target": "198.51.100.9", "port": 8443}]), None, db)
+    update_origin(a.id, OriginUpdate(relay_pool_ids=[pool.id]), None, db)
     checks(db, 6)
     assert a.status == "relay_down"
 
-    update_origin(a.id, OriginUpdate(relay_targets=[]), None, db)
+    update_origin(a.id, OriginUpdate(relay_pool_ids=[]), None, db)
     db.refresh(a)
     assert a.status == "healthy"
 
 
-def test_load_ips_and_global_mirrors_inherit_backends(monkeypatch):
+def test_load_ips_and_global_mirrors_inherit_pools(monkeypatch):
     db = make_session()
     group, a, _ = setup(db, monkeypatch, Network())
-    monkeypatch.setattr("app.routes.groups._evaluate_locally", lambda *args, **kwargs: None)
-    update_origin(a.id, OriginUpdate(relay_targets=[{"target": "198.51.100.1", "port": 8443}]), None, db)
+    hk = make_pool(db, "HK exit", ("198.51.100.1", 8443))
+    jp = make_pool(db, "JP exit", ("198.51.100.2", 8443))
+    update_origin(a.id, OriginUpdate(relay_pool_ids=[hk.id]), None, db)
 
     member = create_origin(group.id, OriginCreate(target="192.0.2.11", port=443, load_parent_id=a.id), None, db)
-    assert [item["target"] for item in relay_overview(member)] == ["198.51.100.1"]
+    assert member.relay_pool_ids == [hk.id]
 
-    update_origin(a.id, OriginUpdate(relay_targets=[{"target": "198.51.100.2", "port": 8443}]), None, db)
+    update_origin(a.id, OriginUpdate(relay_pool_ids=[jp.id]), None, db)
     db.refresh(member)
-    assert [item["target"] for item in relay_overview(member)] == ["198.51.100.2"]
+    assert member.relay_pool_ids == [jp.id]
 
     collection = FailoverCollection(name="hk")
     db.add(collection)
@@ -168,11 +218,11 @@ def test_load_ips_and_global_mirrors_inherit_backends(monkeypatch):
         target="192.0.2.50",
         target_type="ipv4",
         port=443,
-        relay_targets_json='[{"target":"198.51.100.3","port":8443}]',
+        relay_pool_ids_json=f"[{hk.id}]",
     )
     db.add(global_origin)
     db.commit()
     db.refresh(group)
     sync_global_origins_to_group(db, group)
     mirror = next(origin for origin in group.origins if origin.global_origin_id == global_origin.id)
-    assert [item["target"] for item in relay_overview(mirror)] == ["198.51.100.3"]
+    assert mirror.relay_pool_ids == [hk.id]

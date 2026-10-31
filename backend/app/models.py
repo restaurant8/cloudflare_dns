@@ -503,9 +503,10 @@ class Origin(Base, TimestampMixin):
     healthy_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     published_ips_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     expanded_ip_priorities_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
-    # 中转后端（A → B → C 里的 B）：[{"target", "port"}]。全部不通时本源站判为中转不通。
+    # 中转后端（A → B → C 里的 B）：引用的 IP 池子 id 列表。池子里全部地址不通时本源站判为中转不通。
+    relay_pool_ids_json: Mapped[str | None] = mapped_column(Text, default="[]")
+    # 旧版逐条填写的中转后端，启动时已自动转成池子，保留列仅供迁移读取
     relay_targets_json: Mapped[str | None] = mapped_column(Text, default="[]")
-    # 各中转后端的检测状态：{"target|port": {"status": up/down/unknown, ...}}
     relay_status_json: Mapped[str | None] = mapped_column(Text, default="{}")
 
     group: Mapped["FailoverGroup"] = relationship("FailoverGroup", back_populates="origins")
@@ -528,6 +529,12 @@ class Origin(Base, TimestampMixin):
     @property
     def expanded_ip_priorities(self) -> dict[str, int]:
         return expanded_ip_priorities(self)
+
+    @property
+    def relay_pool_ids(self) -> list[int]:
+        from .relay import relay_pool_ids
+
+        return relay_pool_ids(self)
 
     @property
     def relays(self) -> list[dict]:
@@ -615,7 +622,9 @@ class FailoverGlobalOrigin(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     ignore_health_check: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     expanded_ip_priorities_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
-    # 中转后端，同步到业务分组下每个域名的镜像源站
+    # 中转后端引用的 IP 池子，同步到业务分组下每个域名的镜像源站
+    relay_pool_ids_json: Mapped[str | None] = mapped_column(Text, default="[]")
+    # 旧版逐条填写的中转后端，仅供迁移读取
     relay_targets_json: Mapped[str | None] = mapped_column(Text, default="[]")
 
     @property
@@ -623,21 +632,46 @@ class FailoverGlobalOrigin(Base, TimestampMixin):
         return expanded_ip_priorities(self)
 
     @property
-    def relay_targets(self) -> list[dict]:
-        from .relay import relay_targets
+    def relay_pool_ids(self) -> list[int]:
+        from .relay import relay_pool_ids
 
-        return relay_targets(self)
+        return relay_pool_ids(self)
 
     collection: Mapped["FailoverCollection"] = relationship("FailoverCollection", back_populates="global_origins")
     preferred_agent: Mapped["Agent | None"] = relationship("Agent", foreign_keys=[preferred_agent_id])
     mirrored_origins: Mapped[list["Origin"]] = relationship("Origin", back_populates="global_origin")
 
 
-class TargetPoolItem(Base, TimestampMixin):
-    __tablename__ = "target_pool_items"
-    __table_args__ = (UniqueConstraint("target", "port", name="uq_target_pool_target_port"),)
+class TargetPool(Base, TimestampMixin):
+    """IP 池子：一组可复用的地址（例如一组中转后端 B）。
+
+    源站和全局备用按池子引用中转后端，池子里改一次，引用它的源站全部生效。
+    """
+
+    __tablename__ = "target_pools"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    remark: Mapped[str | None] = mapped_column(Text)
+
+    items: Mapped[list["TargetPoolItem"]] = relationship(
+        "TargetPoolItem",
+        back_populates="pool",
+        cascade="all, delete-orphan",
+        order_by="TargetPoolItem.id",
+    )
+
+
+class TargetPoolItem(Base, TimestampMixin):
+    __tablename__ = "target_pool_items"
+    # 同一个地址可以出现在多个池子里，但同一个池子里不重复
+    __table_args__ = (UniqueConstraint("pool_id", "target", "port", name="uq_target_pool_item_pool_target_port"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    pool_id: Mapped[int | None] = mapped_column(ForeignKey("target_pools.id", ondelete="CASCADE"), index=True)
+    # 绑定外部 IP 来源（Nyanpass）里的机器：机器换 IP 时地址自动跟随（按 machine_key）
+    external_source_id: Mapped[int | None] = mapped_column(Integer)
+    external_machine_key: Mapped[str | None] = mapped_column(String(255))
     target: Mapped[str] = mapped_column(String(255), nullable=False)
     target_type: Mapped[str] = mapped_column(String(20), nullable=False)
     port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
@@ -648,8 +682,16 @@ class TargetPoolItem(Base, TimestampMixin):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_error: Mapped[str | None] = mapped_column(Text)
     last_rtt_ms: Mapped[float | None] = mapped_column(Float)
+    # 面板每轮检测的连续成功 / 失败次数（按系统设置的恢复 / 失败阈值判定）
+    fail_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    success_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
 
+    pool: Mapped["TargetPool | None"] = relationship("TargetPool", back_populates="items")
     probe_states: Mapped[list["TargetPoolProbeState"]] = relationship("TargetPoolProbeState", back_populates="pool_item", cascade="all, delete-orphan")
+
+    @property
+    def pool_name(self) -> str | None:
+        return self.pool.name if self.pool is not None else None
 
 
 class TargetPoolProbeState(Base, TimestampMixin):

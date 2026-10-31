@@ -9,7 +9,7 @@ from websockets.sync.client import connect
 
 from .dns_utils import parse_target
 from .events import add_event
-from .models import ExternalIpItem, ExternalIpSource, FailoverGlobalOrigin, Origin
+from .models import ExternalIpItem, ExternalIpSource, FailoverGlobalOrigin, Origin, TargetPoolItem
 from .runtime_settings import get_runtime_settings
 from .security import decrypt_secret
 
@@ -166,6 +166,7 @@ def sync_external_ip_source(db: Session, source: ExternalIpSource) -> int:
     # then handles only the standalone (non-mirrored) origins.
     _sync_bound_global_origins(db, source, imported_items)
     _sync_bound_origins(db, source, imported_items)
+    _sync_bound_pool_items(db, source, imported_items)
     db.flush()
     return len(imported_items)
 
@@ -287,6 +288,69 @@ def _sync_bound_origins(db: Session, source: ExternalIpSource, imported_items: l
                 "origin_id": origin.id,
                 "source_id": source.id,
                 "machine_key": origin.external_machine_key,
+                "old_target": old_target,
+                "new_target": chosen.target,
+            },
+        )
+    return updated
+
+
+def _sync_bound_pool_items(db: Session, source: ExternalIpSource, imported_items: list[ImportedExternalIp]) -> int:
+    """把机器的新 IP 跟随到 IP 池子里绑定它的地址（例如中转后端 B）。
+
+    池子地址的端口是 B 的中转端口，和外部来源的默认端口无关，所以只更新 IP。
+    """
+    by_key: dict[str, list[ImportedExternalIp]] = {}
+    for imported in imported_items:
+        if imported.machine_key:
+            by_key.setdefault(imported.machine_key, []).append(imported)
+    items = (
+        db.query(TargetPoolItem)
+        .filter(TargetPoolItem.external_source_id == source.id, TargetPoolItem.external_machine_key.isnot(None))
+        .all()
+    )
+    updated = 0
+    for item in items:
+        candidates = by_key.get(item.external_machine_key or "")
+        if not candidates:
+            # 机器暂时不在线/没上报不代表被删了，保留绑定等它回来
+            continue
+        chosen = _pick_machine_ip(candidates, item.target_type)
+        if item.target == chosen.target and item.target_type == chosen.target_type:
+            continue
+        clash = (
+            db.query(TargetPoolItem)
+            .filter(
+                TargetPoolItem.id != item.id,
+                TargetPoolItem.pool_id == item.pool_id,
+                TargetPoolItem.target == chosen.target,
+                TargetPoolItem.port == item.port,
+            )
+            .first()
+        )
+        if clash is not None:
+            # Two entries of one pool would point at the same address; keep this one
+            # waiting rather than violate the per-pool uniqueness mid-sync.
+            continue
+        old_target = item.target
+        item.target = chosen.target
+        item.target_type = chosen.target_type
+        item.status = "unknown"
+        item.fail_count = 0
+        item.success_count = 0
+        item.last_checked_at = None
+        item.last_error = "外部 IP 已更换，等待下一轮检测"
+        updated += 1
+        add_event(
+            db,
+            "external_ip.pool_item_synced",
+            "info",
+            f"{chosen.name} 外部 IP 变为 {chosen.target}，已同步到 IP 池子（原 {old_target}）",
+            {
+                "pool_item_id": item.id,
+                "pool_id": item.pool_id,
+                "source_id": source.id,
+                "machine_key": item.external_machine_key,
                 "old_target": old_target,
                 "new_target": chosen.target,
             },

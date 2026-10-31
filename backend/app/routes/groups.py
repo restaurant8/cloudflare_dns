@@ -19,9 +19,9 @@ from ..events import add_event
 from ..doh import sync_doh_endpoint, sync_group_doh_endpoint, validate_doh_hostname_conflicts
 from ..failover import ensure_group_hostname_entries, evaluate_failover_groups, find_managed_dns_record_by_id, publish_origin, validate_group_hostname_records, zone_for_hostname
 from ..health import recalculate_origin_status, run_local_checks
-from ..relay import relay_targets, set_relay_targets
+from ..relay import relay_pool_ids, set_relay_pool_ids
 from ..integrations import azpanel_settings, refresh_legacy_origin_mirror, resource_owns_port, sync_resource_current_ip_to_origin
-from ..models import Agent, AlibabaHttpDnsGroup, AzPanelRemoteResource, AzPanelResource, DohEndpoint, ExternalIpItem, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, User, Zone
+from ..models import Agent, AlibabaHttpDnsGroup, AzPanelRemoteResource, AzPanelResource, DohEndpoint, ExternalIpItem, FailoverCollection, FailoverGlobalOrigin, FailoverGroup, FailoverHostname, FailoverTimeRule, Origin, ProbeState, TargetPool, User, Zone
 from ..notifier import send_webhooks
 from ..origin_expansion import (
     DIRECT_PUBLISH_MODE,
@@ -286,7 +286,7 @@ def _origin_from_payload(db: Session, group: FailoverGroup, payload: OriginCreat
         external_machine_key=external_machine_key,
     )
     _apply_expanded_ip_priorities(origin, payload.expanded_ip_priorities if target_info.target_type == "hostname" else {})
-    _apply_relay_targets(origin, payload.relay_targets)
+    _apply_relay_pools(db, origin, payload.relay_pool_ids)
     if payload.load_parent_id is not None:
         parent = _load_balance_node(db, group, payload.load_parent_id)
         origin.load_parent_id = parent.id
@@ -320,15 +320,22 @@ def _copy_node_settings(node: Origin, member: Origin) -> bool:
     for key in _NODE_SHARED_SETTINGS:
         setattr(member, key, getattr(node, key))
     # Load IPs forward to the same relay backends as their origin.
-    set_relay_targets(member, relay_targets(node))
+    set_relay_pool_ids(member, relay_pool_ids(node))
     return probe_changed
 
 
-def _apply_relay_targets(owner, values) -> bool:
+def _apply_relay_pools(db: Session, owner, pool_ids) -> bool:
+    """Store the IP pools used as relay backends; every id must exist."""
+    pool_ids = list(pool_ids or [])
+    if pool_ids:
+        found = {pool.id for pool in db.query(TargetPool).filter(TargetPool.id.in_(pool_ids)).all()}
+        missing = [pool_id for pool_id in pool_ids if pool_id not in found]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"中转用的 IP 池子不存在：{missing}")
     try:
-        return set_relay_targets(owner, values)
+        return set_relay_pool_ids(owner, pool_ids)
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=f"中转后端格式不正确：{exc}") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _load_balance_node(db: Session, group: FailoverGroup, node_id: int) -> Origin:
@@ -411,7 +418,7 @@ def _global_origin_from_payload(db: Session, collection: FailoverCollection, pay
         ignore_health_check=payload.ignore_health_check,
     )
     _apply_expanded_ip_priorities(global_origin, payload.expanded_ip_priorities if target_info.target_type == "hostname" else {})
-    _apply_relay_targets(global_origin, payload.relay_targets)
+    _apply_relay_pools(db, global_origin, payload.relay_pool_ids)
     return global_origin
 
 
@@ -456,7 +463,7 @@ def _copy_global_origin_to_origin(origin: Origin, global_origin: FailoverGlobalO
     origin.enabled = global_origin.enabled
     origin.ignore_health_check = global_origin.ignore_health_check
     origin.expanded_ip_priorities_json = global_origin.expanded_ip_priorities_json
-    set_relay_targets(origin, relay_targets(global_origin))
+    set_relay_pool_ids(origin, relay_pool_ids(global_origin))
     if endpoint_changed or probe_source_changed:
         _reset_origin_probe_state(origin)
     return endpoint_changed
@@ -828,10 +835,10 @@ def update_global_origin(global_origin_id: int, payload: FailoverGlobalOriginUpd
         _apply_expanded_ip_priorities(global_origin, {})
     if "remark" in updates:
         global_origin.remark = _normalize_remark(updates.pop("remark"))
-    if "relay_targets" in updates:
-        relay_update = updates.pop("relay_targets")
+    if "relay_pool_ids" in updates:
+        relay_update = updates.pop("relay_pool_ids")
         if relay_update is not None:
-            _apply_relay_targets(global_origin, relay_update)
+            _apply_relay_pools(db, global_origin, relay_update)
     for key, value in updates.items():
         setattr(global_origin, key, value)
     current_endpoint_changed_groups = sync_global_origins_to_collection(db, global_origin.collection)
@@ -1535,10 +1542,10 @@ def update_origin(origin_id: int, payload: OriginUpdate, _: User = Depends(get_c
     if "remark" in updates:
         origin.remark = _normalize_remark(updates.pop("remark"))
     relay_changed = False
-    if "relay_targets" in updates:
-        relay_update = updates.pop("relay_targets")
+    if "relay_pool_ids" in updates:
+        relay_update = updates.pop("relay_pool_ids")
         if relay_update is not None:
-            relay_changed = _apply_relay_targets(origin, relay_update)
+            relay_changed = _apply_relay_pools(db, origin, relay_update)
     for key, value in updates.items():
         setattr(origin, key, value)
     if origin.load_parent_id is None:
